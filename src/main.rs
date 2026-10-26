@@ -1,4 +1,4 @@
-use std::io::Read as _;
+use std::io::{Read as _, Write as _};
 use std::path::PathBuf;
 
 use anyhow::{Context, bail};
@@ -155,16 +155,26 @@ fn print_groups(
     format: Format,
 ) -> anyhow::Result<()> {
     let groups: Vec<_> = ids.iter().map(|&id| analysis.group(id, template)).collect();
-    if format == Format::Json {
+    let out = if format == Format::Json {
         let body = serde_json::json!({ "summary": analysis.summary(), "groups": groups });
-        println!("{}", serde_json::to_string_pretty(&body)?);
-        return Ok(());
+        serde_json::to_string_pretty(&body)? + "\n"
+    } else {
+        let mut out = render_summary(&analysis.summary(), groups.len());
+        groups
+            .iter()
+            .for_each(|g| out.push_str(&format!("\n{}", render_group(g))));
+        out
+    };
+    emit(&out)
+}
+
+/// A closed pipe (`doppelscan | head`) is a normal way to stop reading, not
+/// an error worth a panic.
+fn emit(text: &str) -> anyhow::Result<()> {
+    match std::io::stdout().lock().write_all(text.as_bytes()) {
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        other => Ok(other?),
     }
-    print!("{}", render_summary(&analysis.summary(), groups.len()));
-    for g in &groups {
-        print!("\n{}", render_group(g));
-    }
-    Ok(())
 }
 
 fn show(engine: &Engine, id: &str, common: &Common) -> anyhow::Result<()> {
