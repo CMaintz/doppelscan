@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 
 use crate::engine::{Engine, ScanOptions};
 use crate::lang::{LANGS, lang_index_by_name};
-use crate::report::{Analysis, render_group, render_summary};
+use crate::report::{Analysis, Detail, render_group, render_summary};
 
 const MODERN: &str = "2026-07-28";
 const LEGACY: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
@@ -208,7 +208,12 @@ fn render(analysis: &Analysis, ids: &[usize], template: bool) -> String {
     let mut out = render_summary(&analysis.summary(), ids.len());
     for &id in ids {
         out.push('\n');
-        out.push_str(&render_group(&analysis.group(id, template)));
+        let detail = if template {
+            Detail::Full
+        } else {
+            Detail::Brief
+        };
+        out.push_str(&render_group(&analysis.group(id, template), detail));
     }
     out
 }
@@ -239,7 +244,7 @@ fn get_group(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<Strin
     let id = analysis
         .resolve(key)
         .ok_or_else(|| anyhow::anyhow!("no clone group {key:?}; run find_duplicates again"))?;
-    let mut out = render_group(&analysis.group(id, true));
+    let mut out = render_group(&analysis.group(id, true), Detail::Full);
     if args
         .get("include_code")
         .and_then(Value::as_bool)
@@ -363,7 +368,7 @@ fn tool_definitions() -> Value {
         {
             "name": "find_similar_code",
             "title": "Find code like a snippet",
-            "description": "Search the codebase for code structurally equivalent to a snippet (names and literals may differ). Use before writing a helper to find one that already exists.",
+            "description": "Search the codebase for code structurally equivalent to a snippet (names and literals may differ). Use before writing a helper to find one that already exists. Only fragments of at least min_tokens (default 20 here) are matched, so pass whole statements or functions.",
             "inputSchema": { "type": "object", "properties": with(json!({
                 "code": { "type": "string", "description": "The snippet: whole functions or statements." },
                 "language": { "type": "string", "description": "Language name or file extension of the snippet." },

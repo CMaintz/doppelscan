@@ -152,7 +152,19 @@ pub fn render_summary(s: &Summary, shown: usize) -> String {
     )
 }
 
-pub fn render_group(g: &Group) -> String {
+/// How much of a group to render. Listings use `Brief` so a page of
+/// groups stays cheap for an agent to read; `Full` gives every occurrence
+/// and the per-occurrence value columns needed to rewrite call sites.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Detail {
+    Brief,
+    Full,
+}
+
+const BRIEF_OCCURRENCES: usize = 5;
+const BRIEF_VALUES: usize = 4;
+
+pub fn render_group(g: &Group, detail: Detail) -> String {
     let mut out = String::new();
     let shape = if g.kind == "node" {
         String::new()
@@ -170,7 +182,27 @@ pub fn render_group(g: &Group) -> String {
         shape,
         g.score
     );
-    for loc in &g.occurrences {
+    render_locations(&mut out, &g.occurrences, detail);
+    render_variations(&mut out, "params", &g.parameters, true, detail);
+    render_variations(&mut out, "renames", &g.renames, false, detail);
+    if let Some(t) = &g.template {
+        let _ = writeln!(
+            out,
+            "  template:
+{}",
+            indent(t)
+        );
+    }
+    out
+}
+
+fn render_locations(out: &mut String, locations: &[Location], detail: Detail) {
+    let shown = if detail == Detail::Brief {
+        BRIEF_OCCURRENCES
+    } else {
+        usize::MAX
+    };
+    for loc in locations.iter().take(shown) {
         let scope = loc
             .scope
             .as_deref()
@@ -182,15 +214,18 @@ pub fn render_group(g: &Group) -> String {
             loc.file, loc.start_line, loc.end_line, scope
         );
     }
-    render_variations(&mut out, "params", &g.parameters, true);
-    render_variations(&mut out, "renames", &g.renames, false);
-    if let Some(t) = &g.template {
-        let _ = writeln!(out, "  template:\n{}", indent(t));
+    if locations.len() > shown {
+        let _ = writeln!(out, "  ... and {} more", locations.len() - shown);
     }
-    out
 }
 
-fn render_variations(out: &mut String, label: &str, vars: &[Variation], numbered: bool) {
+fn render_variations(
+    out: &mut String,
+    label: &str,
+    vars: &[Variation],
+    numbered: bool,
+    detail: Detail,
+) {
     if vars.is_empty() {
         return;
     }
@@ -198,12 +233,7 @@ fn render_variations(out: &mut String, label: &str, vars: &[Variation], numbered
         .iter()
         .enumerate()
         .map(|(i, v)| {
-            let values = v
-                .values
-                .iter()
-                .map(|s| clip(s))
-                .collect::<Vec<_>>()
-                .join(" | ");
+            let values = render_values(&v.values, detail);
             if numbered {
                 format!("${}={}", i + 1, values)
             } else {
@@ -212,6 +242,33 @@ fn render_variations(out: &mut String, label: &str, vars: &[Variation], numbered
         })
         .collect();
     let _ = writeln!(out, "  {label}: {}", items.join(";  "));
+}
+
+/// Full keeps one value per occurrence, in occurrence order; Brief lists
+/// each distinct value once.
+fn render_values(values: &[String], detail: Detail) -> String {
+    if detail == Detail::Full {
+        return values
+            .iter()
+            .map(|s| clip(s))
+            .collect::<Vec<_>>()
+            .join(" | ");
+    }
+    let mut distinct: Vec<&String> = Vec::new();
+    for v in values {
+        if !distinct.contains(&v) {
+            distinct.push(v);
+        }
+    }
+    let mut shown: Vec<String> = distinct
+        .iter()
+        .take(BRIEF_VALUES)
+        .map(|s| clip(s))
+        .collect();
+    if distinct.len() > BRIEF_VALUES {
+        shown.push(format!("+{} more", distinct.len() - BRIEF_VALUES));
+    }
+    shown.join(" | ")
 }
 
 fn clip(s: &str) -> String {

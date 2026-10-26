@@ -194,9 +194,19 @@ fn bad_arguments_are_tool_errors_and_unknown_tools_are_protocol_errors() {
 #[test]
 fn a_bare_function_snippet_matches_the_whole_existing_function() {
     let (engine, root) = (Engine::default(), fixture("similar-fn"));
-    let snippet = CLONE.replace("export ", "").replace("sumTotals", "computeTotal");
+    let snippet = CLONE
+        .replace("export ", "")
+        .replace("sumTotals", "computeTotal");
     let args = json!({ "code": snippet, "language": "ts" });
-    let reply = call(&engine, &root, modern("tools/call", json!({ "name": "find_similar_code", "arguments": args }))).unwrap();
+    let reply = call(
+        &engine,
+        &root,
+        modern(
+            "tools/call",
+            json!({ "name": "find_similar_code", "arguments": args }),
+        ),
+    )
+    .unwrap();
     let text = tool_text(&reply);
     assert!(text.contains("src/a.ts:2-10"), "{text}");
 }

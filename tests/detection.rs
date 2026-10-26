@@ -100,7 +100,10 @@ fn nested_clones_are_reported_once_at_the_outermost_extent() {
     let a = scan(&[("a.ts", SUM_TOTALS), ("b.ts", SUM_REFUNDS)]);
     assert_eq!(a.groups.len(), 1);
     let template = a.group(1, true).template.unwrap();
-    assert!(template.starts_with("export function sumTotals"), "{template}");
+    assert!(
+        template.starts_with("export function sumTotals"),
+        "{template}"
+    );
 }
 
 // Catches over-eager subsumption: the loop also appears in a third file,
@@ -240,7 +243,8 @@ fn occurrences_within_a_group_never_overlap() {
     let a_stmt = "    registry.register(\"alpha\", createHandler(config.alpha, logger));\n";
     let b_stmt = "    registry.validate(\"alpha\", schema.alpha, { strict: true });\n";
     let body = [a_stmt, b_stmt, a_stmt, b_stmt, a_stmt].concat();
-    let src = format!("function setup() {{\n{body}}}\nfunction other() {{\n{a_stmt}{b_stmt}{a_stmt}}}\n");
+    let src =
+        format!("function setup() {{\n{body}}}\nfunction other() {{\n{a_stmt}{b_stmt}{a_stmt}}}\n");
     let a = scan(&[("a.ts", &src)]);
     for g in groups(&a) {
         let mut spans: Vec<(u32, u32)> = g
@@ -516,5 +520,34 @@ fn between_a_file_and_its_only_function_the_function_is_reported() {
     let body = SUM_TOTALS.replace("export ", "");
     let a = scan(&[("a.ts", &body), ("b.ts", &body)]);
     assert_eq!(a.groups.len(), 1);
-    assert_eq!(a.group(1, false).occurrences[0].scope.as_deref(), Some("sumTotals"));
+    assert_eq!(
+        a.group(1, false).occurrences[0].scope.as_deref(),
+        Some("sumTotals")
+    );
+}
+
+// Catches listings growing with occurrence count: a brief group must cap
+// locations and print each distinct parameter value once, while the full
+// form keeps one value per occurrence for rewriting call sites.
+#[test]
+fn brief_rendering_stays_small_for_widely_repeated_code() {
+    let files: Vec<(String, String)> = (0..7)
+        .map(|i| {
+            (
+                format!("f{i}.ts"),
+                SUM_TOTALS.replace("\"paid\"", if i % 2 == 0 { "\"even\"" } else { "\"odd\"" }),
+            )
+        })
+        .collect();
+    let refs: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(p, t)| (p.as_str(), t.as_str()))
+        .collect();
+    let a = scan(&refs);
+    let g = a.group(1, false);
+    let brief = doppelscan::report::render_group(&g, doppelscan::report::Detail::Brief);
+    assert!(brief.contains("... and 2 more"), "{brief}");
+    assert!(brief.contains("$1=\"even\" | \"odd\"\n"), "{brief}");
+    let full = doppelscan::report::render_group(&g, doppelscan::report::Detail::Full);
+    assert_eq!(full.matches("\"even\"").count(), 4, "{full}");
 }

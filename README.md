@@ -37,8 +37,11 @@ TypeScript, TSX, JavaScript, Java, C#, Kotlin, Swift, PHP, Python, Go, Rust, CSS
 ## Install
 
 ```sh
-cargo install --path .        # from a checkout; needs a C compiler for the grammars
+cargo install --path . --root ~/.local   # binary lands in ~/.local/bin
 ```
+
+Plain `cargo install --path .` works too if cargo's `bin` directory is on
+your PATH. Building needs a C compiler for the tree-sitter grammars.
 
 The repo pins its Rust toolchain in `mise.toml` (`mise install` sets it up).
 On Windows the MSVC build tools are required.

@@ -5,7 +5,7 @@ use anyhow::{Context, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use doppelscan::engine::{Engine, ScanOptions};
 use doppelscan::lang::{LANGS, lang_index_by_name, lang_index_for_path};
-use doppelscan::report::{Analysis, render_group, render_summary};
+use doppelscan::report::{Analysis, Detail, render_group, render_summary};
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -155,6 +155,12 @@ fn print_groups(
     format: Format,
 ) -> anyhow::Result<()> {
     let groups: Vec<_> = ids.iter().map(|&id| analysis.group(id, template)).collect();
+    // Asking for templates means drilling in, so show every occurrence too.
+    let detail = if template {
+        Detail::Full
+    } else {
+        Detail::Brief
+    };
     let out = if format == Format::Json {
         let body = serde_json::json!({ "summary": analysis.summary(), "groups": groups });
         serde_json::to_string_pretty(&body)? + "\n"
@@ -162,7 +168,7 @@ fn print_groups(
         let mut out = render_summary(&analysis.summary(), groups.len());
         groups
             .iter()
-            .for_each(|g| out.push_str(&format!("\n{}", render_group(g))));
+            .for_each(|g| out.push_str(&format!("\n{}", render_group(g, detail))));
         out
     };
     emit(&out)
@@ -194,7 +200,7 @@ fn at(engine: &Engine, location: &str, common: &Common) -> anyhow::Result<()> {
     print_groups(
         &analysis,
         &analysis.overlapping(&file, from, to),
-        false,
+        true,
         common.format,
     )
 }
