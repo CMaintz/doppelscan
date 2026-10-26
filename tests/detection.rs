@@ -232,16 +232,15 @@ fn shared_statement_run_is_reported_at_full_length() {
     assert_eq!(gs[0].elements, 5);
 }
 
-// Catches overlapping occurrences in a tandem repeat being reported as
-// separate clones of each other.
+// Catches overlapping occurrences being reported as clones of each other.
+// In "A B A B A" the run "A B A" occurs at 0 and 2, overlapping, and is not
+// a tandem repeat (its period 2 is more than half its length).
 #[test]
 fn occurrences_within_a_group_never_overlap() {
-    let pair = "    registry.register(\"alpha\", createHandler(config.alpha, logger));
-    registry.validate(\"alpha\", schema.alpha, { strict: true });
-";
-    let src = format!("function setup() {{
-{}}}
-", pair.repeat(4));
+    let a_stmt = "    registry.register(\"alpha\", createHandler(config.alpha, logger));\n";
+    let b_stmt = "    registry.validate(\"alpha\", schema.alpha, { strict: true });\n";
+    let body = [a_stmt, b_stmt, a_stmt, b_stmt, a_stmt].concat();
+    let src = format!("function setup() {{\n{body}}}\nfunction other() {{\n{a_stmt}{b_stmt}{a_stmt}}}\n");
     let a = scan(&[("a.ts", &src)]);
     for g in groups(&a) {
         let mut spans: Vec<(u32, u32)> = g
