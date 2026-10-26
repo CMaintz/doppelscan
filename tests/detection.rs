@@ -224,11 +224,11 @@ fn shared_statement_run_is_reported_at_full_length() {
         1,
         "{:#?}",
         gs.iter()
-            .map(|g| (&g.kind, g.statements, &g.occurrences))
+            .map(|g| (&g.kind, g.elements, &g.occurrences))
             .collect::<Vec<_>>()
     );
-    assert_eq!(gs[0].kind, "statements");
-    assert_eq!(gs[0].statements, 5);
+    assert_eq!(gs[0].kind, "run");
+    assert_eq!(gs[0].elements, 5);
 }
 
 // Catches overlapping occurrences in a tandem repeat being reported as
@@ -383,7 +383,7 @@ fn a_repetitive_wall_in_one_block_is_one_group() {
         gs.len() <= 1,
         "{:#?}",
         gs.iter()
-            .map(|g| (g.statements, g.occurrences.len()))
+            .map(|g| (g.elements, g.occurrences.len()))
             .collect::<Vec<_>>()
     );
 }
@@ -413,10 +413,10 @@ fn a_repetitive_wall_copied_between_classes_is_reported_whole() {
         1,
         "{:#?}",
         gs.iter()
-            .map(|g| (g.statements, g.occurrences.len()))
+            .map(|g| (g.elements, g.occurrences.len()))
             .collect::<Vec<_>>()
     );
-    assert_eq!((gs[0].statements, gs[0].occurrences.len()), (16, 2));
+    assert_eq!((gs[0].elements, gs[0].occurrences.len()), (16, 2));
 }
 
 // Catches an import-bearing file node replacing the function it wraps: the
@@ -470,4 +470,25 @@ fn data_tables_are_not_reported() {
             .map(|g| (g.tokens, g.parameters.len()))
             .collect::<Vec<_>>()
     );
+}
+
+// Catches runs being limited to statement blocks: two constructor calls
+// sharing a long argument prefix are a clone even though the calls differ.
+#[test]
+fn a_shared_argument_prefix_is_a_clone() {
+    let args = "a.id(), a.jobId(), a.status().name(), a.appliedAt(), a.recruiterName(), a.recruiterEmail(), a.coverLetter(), a.notes(), a.createdAt(), a.updatedAt()";
+    let src = format!(
+        "class R {{\n  static R from(A a) {{\n    return new R({args},\n        null, null);\n  }}\n  static R from(A a, Job job) {{\n    return new R({args},\n        job != null ? job.title() : null, job.url());\n  }}\n}}\n"
+    );
+    let a = scan(&[("R.java", &src)]);
+    let gs = groups(&a);
+    assert_eq!(
+        gs.len(),
+        1,
+        "{:#?}",
+        gs.iter()
+            .map(|g| (&g.kind, g.elements, &g.occurrences))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!((gs[0].kind, gs[0].elements), ("run", 10));
 }

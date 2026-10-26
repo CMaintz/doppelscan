@@ -21,7 +21,8 @@ pub enum KindClass {
     Identifier,
     StringLit,
     NumberLit,
-    /// A container whose children form a statement or member sequence.
+    /// A container whose children form a sequence: statements, members,
+    /// arguments or literal elements.
     Block,
     /// A function/class/etc. whose name labels the occurrences inside it.
     Definition,
@@ -223,6 +224,29 @@ fn is_block(kind: &str) -> bool {
     ]
     .iter()
     .any(|w| kind.contains(w))
+        || EXACT.contains(&kind)
+        || is_list(kind)
+}
+
+/// Argument lists, array and object literals: a shared prefix of a long
+/// argument list is as extractable as a shared run of statements. Binary
+/// expressions and the like are deliberately absent, since a run of their
+/// operands would ignore the operator between them.
+fn is_list(kind: &str) -> bool {
+    const EXACT: &[&str] = &[
+        "object",
+        "array",
+        "list",
+        "dictionary",
+        "literal_value",
+        "arguments",
+    ];
+    kind.ends_with("argument_list")
+        || kind.ends_with("_arguments")
+        || kind.contains("array_initializer")
+        || kind.contains("array_expression")
+        || kind.contains("initializer_expression")
+        || kind == "initializer_list"
         || EXACT.contains(&kind)
 }
 

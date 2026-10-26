@@ -34,9 +34,11 @@ pub struct Group {
     pub id: usize,
     /// Stable across runs while the duplicated code is unchanged.
     pub fingerprint: String,
-    /// "node" for one syntax node, "statements" for a run of siblings.
+    /// "node" for one syntax node, "run" for consecutive siblings
+    /// (statements, members or arguments).
     pub kind: &'static str,
-    pub statements: usize,
+    /// Siblings in a run; 1 for a node.
+    pub elements: usize,
     pub tokens: u32,
     pub lines: u32,
     /// tokens x (occurrences - 1): the volume extraction would remove.
@@ -66,12 +68,8 @@ impl Analysis {
         Group {
             id,
             fingerprint: format!("{:012x}", raw.hash >> 16),
-            kind: if raw.run_len == 1 {
-                "node"
-            } else {
-                "statements"
-            },
-            statements: raw.run_len,
+            kind: if raw.run_len == 1 { "node" } else { "run" },
+            elements: raw.run_len,
             tokens: raw.tokens,
             lines: raw.occs[0].end_line - raw.occs[0].start_line + 1,
             score: score(raw),
@@ -159,7 +157,7 @@ pub fn render_group(g: &Group) -> String {
     let shape = if g.kind == "node" {
         String::new()
     } else {
-        format!(", {} statements", g.statements)
+        format!(", run of {}", g.elements)
     };
     let _ = writeln!(
         out,

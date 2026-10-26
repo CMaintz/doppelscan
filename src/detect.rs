@@ -20,7 +20,7 @@ pub struct Occ {
     pub end_line: u32,
     pub scope: u32,
     /// Leaf index ranges; one per run element so separators between
-    /// statements (which differ between grammars) never break alignment.
+    /// siblings (which differ between grammars) never break alignment.
     pub leaves: Vec<(u32, u32)>,
 }
 
@@ -38,7 +38,7 @@ impl Occ {
 pub struct RawGroup {
     pub hash: u64,
     pub tokens: u32,
-    /// 1 for a whole-node clone, otherwise the number of statements.
+    /// 1 for a whole-node clone, otherwise the number of siblings in the run.
     pub run_len: usize,
     pub occs: Vec<Occ>,
 }
