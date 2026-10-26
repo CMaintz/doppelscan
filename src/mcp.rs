@@ -49,7 +49,9 @@ pub fn handle_line(engine: &Engine, root: &Path, line: &str) -> Option<String> {
     let msg: Value = match serde_json::from_str(line) {
         Ok(v) => v,
         Err(e) => {
-            return Some(error(Value::Null, -32700, &format!("parse error: {e}"), None).to_string());
+            return Some(
+                error(Value::Null, -32700, &format!("parse error: {e}"), None).to_string(),
+            );
         }
     };
     let id = msg.get("id")?.clone();
