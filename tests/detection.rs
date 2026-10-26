@@ -99,7 +99,8 @@ fn different_operator_is_not_a_clone() {
 fn nested_clones_are_reported_once_at_the_outermost_extent() {
     let a = scan(&[("a.ts", SUM_TOTALS), ("b.ts", SUM_REFUNDS)]);
     assert_eq!(a.groups.len(), 1);
-    assert_eq!(a.group(1, false).lines, 10);
+    let template = a.group(1, true).template.unwrap();
+    assert!(template.starts_with("export function sumTotals"), "{template}");
 }
 
 // Catches over-eager subsumption: the loop also appears in a third file,
@@ -235,8 +236,12 @@ fn shared_statement_run_is_reported_at_full_length() {
 // separate clones of each other.
 #[test]
 fn occurrences_within_a_group_never_overlap() {
-    let pair = "    registry.register(\"alpha\", createHandler(config.alpha, logger));\n    registry.validate(\"alpha\", schema.alpha, { strict: true });\n";
-    let src = format!("function setup() {{\n{}}}\n", pair.repeat(4));
+    let pair = "    registry.register(\"alpha\", createHandler(config.alpha, logger));
+    registry.validate(\"alpha\", schema.alpha, { strict: true });
+";
+    let src = format!("function setup() {{
+{}}}
+", pair.repeat(4));
     let a = scan(&[("a.ts", &src)]);
     for g in groups(&a) {
         let mut spans: Vec<(u32, u32)> = g
@@ -491,4 +496,26 @@ fn a_shared_argument_prefix_is_a_clone() {
             .collect::<Vec<_>>()
     );
     assert_eq!((gs[0].kind, gs[0].elements), ("run", 10));
+}
+
+// Catches a file node standing in for the only function it contains: one
+// side bare, the other with an import, must still match as functions.
+#[test]
+fn a_bare_function_file_matches_the_same_function_after_imports() {
+    let body = SUM_TOTALS.replace("export ", "");
+    let with_import = format!("import {{ a }} from \"./a\";\n{body}");
+    let a = scan(&[("a.ts", &body), ("b.ts", &with_import)]);
+    assert_eq!(a.groups.len(), 1);
+    let template = a.group(1, true).template.unwrap();
+    assert!(template.starts_with("function sumTotals"), "{template}");
+}
+
+// Catches the file node winning over the function it holds: equal tokens,
+// but the function is the extractable unit and carries the scope name.
+#[test]
+fn between_a_file_and_its_only_function_the_function_is_reported() {
+    let body = SUM_TOTALS.replace("export ", "");
+    let a = scan(&[("a.ts", &body), ("b.ts", &body)]);
+    assert_eq!(a.groups.len(), 1);
+    assert_eq!(a.group(1, false).occurrences[0].scope.as_deref(), Some("sumTotals"));
 }

@@ -25,8 +25,17 @@ pub struct Occ {
 }
 
 impl Occ {
+    /// By token span, not bytes: a wrapper and the node it wraps (a file
+    /// holding one function) cover the same tokens and contain each other,
+    /// so whichever is accepted first suppresses the other.
     fn contains(&self, other: &Occ) -> bool {
-        self.file == other.file && self.start <= other.start && other.end <= self.end
+        let (lo, hi) = self.leaf_span();
+        let (other_lo, other_hi) = other.leaf_span();
+        self.file == other.file && lo <= other_lo && other_hi <= hi
+    }
+
+    fn leaf_span(&self) -> (u32, u32) {
+        (self.leaves[0].0, self.leaves[self.leaves.len() - 1].1)
     }
 
     pub fn leaf_indices(&self) -> impl Iterator<Item = u32> + '_ {
@@ -238,9 +247,10 @@ fn keep_aligned(group: &mut RawGroup) -> bool {
     group.occs.len() >= 2
 }
 
-/// Largest groups first; a group is dropped when each of its occurrences
-/// already sits inside an accepted occurrence, since extracting the outer
-/// clone removes the inner one too.
+/// Largest groups first (among equal token counts the tightest byte span,
+/// so a function wins over the file wrapping it). A group is dropped when
+/// each of its occurrences already sits inside an accepted occurrence,
+/// since extracting the outer clone removes the inner one too.
 fn suppress_subsumed(
     mut groups: Vec<RawGroup>,
     useful: impl Fn(&RawGroup) -> bool,
@@ -249,6 +259,7 @@ fn suppress_subsumed(
         b.tokens
             .cmp(&a.tokens)
             .then(b.occs.len().cmp(&a.occs.len()))
+            .then(byte_span(a).cmp(&byte_span(b)))
             .then(a.hash.cmp(&b.hash))
     });
     let mut accepted_by_file: FxHashMap<u32, Vec<Occ>> = FxHashMap::default();
@@ -268,4 +279,8 @@ fn suppress_subsumed(
         kept.push(g);
     }
     kept
+}
+
+fn byte_span(g: &RawGroup) -> u32 {
+    g.occs[0].end - g.occs[0].start
 }

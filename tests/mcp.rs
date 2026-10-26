@@ -100,7 +100,7 @@ fn find_duplicates_then_drill_into_the_group() {
     .unwrap();
     let text = tool_text(&reply);
     assert!(
-        text.contains("src/a.ts:2-11") && text.contains("src/b.ts:2-11"),
+        text.contains("src/a.ts:2-10") && text.contains("src/b.ts:2-10"),
         "{text}"
     );
     let fingerprint = text.split('[').nth(1).unwrap().split(']').next().unwrap();
@@ -138,7 +138,7 @@ fn duplicates_at_respects_the_line_range() {
         .unwrap();
         tool_text(&reply).to_string()
     };
-    assert!(at(5).contains("src/a.ts:2-11"));
+    assert!(at(5).contains("src/a.ts:2-10"));
     assert!(at(40).starts_with("No clones"));
 }
 
@@ -187,4 +187,16 @@ fn bad_arguments_are_tool_errors_and_unknown_tools_are_protocol_errors() {
     )
     .unwrap();
     assert_eq!(unknown["error"]["code"], -32602);
+}
+
+// Catches a bare-function snippet matching only the existing function's
+// body, which hides that the whole helper already exists.
+#[test]
+fn a_bare_function_snippet_matches_the_whole_existing_function() {
+    let (engine, root) = (Engine::default(), fixture("similar-fn"));
+    let snippet = CLONE.replace("export ", "").replace("sumTotals", "computeTotal");
+    let args = json!({ "code": snippet, "language": "ts" });
+    let reply = call(&engine, &root, modern("tools/call", json!({ "name": "find_similar_code", "arguments": args }))).unwrap();
+    let text = tool_text(&reply);
+    assert!(text.contains("src/a.ts:2-10"), "{text}");
 }

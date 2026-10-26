@@ -56,7 +56,8 @@ pub struct FileIndex {
     pub lang: usize,
     pub source: String,
     pub leaves: Vec<Leaf>,
-    /// Candidate whole-node fragments, outermost of any same-token chain.
+    /// Candidate whole-node fragments. Wrappers covering the same tokens
+    /// (a statement around a call) are all kept; detection picks one.
     pub nodes: Vec<Frag>,
     /// Child sequences of block-like nodes, split at noise such as imports.
     pub seqs: Vec<Vec<Frag>>,
@@ -107,9 +108,6 @@ struct Frame {
     leaf_start: u32,
     block: Option<Vec<Frag>>,
     scope_pushed: bool,
-    /// Had a noise child (an import), whose text is in the hash but not in
-    /// the tokens.
-    noisy: bool,
 }
 
 /// A finished child handed up to its parent frame.
@@ -117,7 +115,6 @@ struct Done {
     frag: Frag,
     class: KindClass,
     named: bool,
-    noisy: bool,
 }
 
 struct Builder<'a> {
@@ -192,7 +189,6 @@ impl<'a> Builder<'a> {
             leaf_start: self.leaves.len() as u32,
             block: (class == KindClass::Block).then(Vec::new),
             scope_pushed,
-            noisy: false,
         });
     }
 
@@ -210,7 +206,6 @@ impl<'a> Builder<'a> {
             frag,
             class,
             named: node.is_named(),
-            noisy: frame.noisy,
         })
     }
 
@@ -228,7 +223,6 @@ impl<'a> Builder<'a> {
             frag,
             class,
             named: node.is_named(),
-            noisy: false,
         })
     }
 
@@ -288,13 +282,12 @@ impl<'a> Builder<'a> {
     fn deliver(&mut self, done: Option<Done>) {
         let Some(done) = done else { return };
         if done.named && done.frag.tokens() >= MIN_STORED_TOKENS && is_candidate(done.class) {
-            self.push_node(done.frag, done.noisy);
+            self.nodes.push(done.frag);
         }
         let Some(parent) = self.frames.last_mut() else {
             return;
         };
         parent.hash = combine(parent.hash, done.frag.hash);
-        parent.noisy |= done.class == KindClass::Noise;
         let Some(elems) = parent.block.as_mut() else {
             return;
         };
@@ -303,23 +296,6 @@ impl<'a> Builder<'a> {
             self.flush_run(run);
         } else if done.named && done.frag.tokens() > 0 {
             elems.push(done.frag);
-        }
-    }
-
-    /// Keeps only the outermost of a wrapper chain (an expression statement
-    /// around a call covers the same tokens), so one clone is one group. A
-    /// noisy wrapper must not replace its child: a file differing only in
-    /// imports would otherwise hide the identical function inside it.
-    fn push_node(&mut self, frag: Frag, noisy: bool) {
-        match self.nodes.last_mut() {
-            Some(last)
-                if !noisy
-                    && last.leaf_start == frag.leaf_start
-                    && last.leaf_end == frag.leaf_end =>
-            {
-                *last = frag
-            }
-            _ => self.nodes.push(frag),
         }
     }
 
