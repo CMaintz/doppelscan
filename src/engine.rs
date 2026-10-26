@@ -28,6 +28,8 @@ pub struct ScanOptions {
     /// than [`FREE_PARAMS`]) are dropped: they are tables of data or mapping
     /// boilerplate, not a helper waiting to be extracted.
     pub max_param_density: f32,
+    /// Result paths are shown relative to this; default is the scanned path.
+    pub display_base: Option<PathBuf>,
 }
 
 impl Default for ScanOptions {
@@ -38,6 +40,7 @@ impl Default for ScanOptions {
             languages: Vec::new(),
             exclude: Vec::new(),
             max_param_density: 8.0,
+            display_base: None,
         }
     }
 }
@@ -72,10 +75,11 @@ impl Engine {
         opts: &ScanOptions,
     ) -> anyhow::Result<Vec<Arc<FileIndex>>> {
         let found = discover(root, &opts.exclude, &opts.languages)?;
+        let base = opts.display_base.as_deref().unwrap_or(root);
         let indexed: Vec<_> = found
             .par_iter()
             .map_init(Parser::new, |parser, (path, lang)| {
-                self.index_cached(parser, root, path, *lang, opts.strict)
+                self.index_cached(parser, base, path, *lang, opts.strict)
             })
             .collect();
         Ok(indexed.into_iter().flatten().collect())

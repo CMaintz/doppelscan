@@ -125,6 +125,7 @@ fn options(c: &Common) -> anyhow::Result<ScanOptions> {
         languages,
         exclude: c.exclude.clone(),
         max_param_density: c.max_param_density,
+        display_base: None,
     })
 }
 
