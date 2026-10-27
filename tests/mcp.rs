@@ -71,7 +71,7 @@ fn both_protocol_eras_are_served() {
     let (engine, root) = (Engine::default(), fixture("eras"));
     let listed = call(&engine, &root, modern("tools/list", json!({}))).unwrap();
     assert_eq!(listed["result"]["resultType"], "complete");
-    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 5);
+    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 6);
     let init = json!({ "jsonrpc": "2.0", "id": 2, "method": "initialize", "params": { "protocolVersion": "2025-06-18" } });
     let reply = call(&engine, &root, init).unwrap();
     assert_eq!(reply["result"]["protocolVersion"], "2025-06-18");
@@ -244,4 +244,35 @@ fn check_new_duplicates_compares_a_subdirectory_with_head() {
     std::fs::write(root.join("src/c.ts"), CLONE.replace("sumTotals", "sumAll")).unwrap();
     let text = check_new(&engine, &root);
     assert!(text.contains("src/c.ts"), "{text}");
+}
+
+// Catches the near-duplicate tool not reaching the near-miss detector, or
+// reporting copies without saying where they differ.
+#[test]
+fn find_near_duplicates_points_at_the_differing_lines() {
+    let (engine, root) = (Engine::default(), fixture("near"));
+    let edited = CLONE.replace("sumTotals", "sumWithFees").replace(
+        "            total += order.amount * config.rate;\n",
+        "            total += order.amount * config.rate;\n            fees += order.fee;\n",
+    );
+    std::fs::write(root.join("src/b.ts"), edited).unwrap();
+    let args = json!({ "name": "find_near_duplicates", "arguments": { "path": "src", "min_tokens": 20, "similarity": 0.6 } });
+    let reply = call(&engine, &root, modern("tools/call", args)).unwrap();
+    let text = tool_text(&reply);
+    assert!(
+        text.contains("src/a.ts:2-10") && text.contains("src/b.ts:2-11"),
+        "{text}"
+    );
+    assert!(text.contains("differs: 7"), "{text}");
+}
+
+// Catches `limit: 0` returning nothing with a hint to repeat the same call.
+#[test]
+fn a_limit_of_zero_returns_every_group() {
+    let (engine, root) = (Engine::default(), fixture("limit"));
+    let args = json!({ "name": "find_duplicates", "arguments": { "path": "src", "min_tokens": 20, "limit": 0 } });
+    let reply = call(&engine, &root, modern("tools/call", args)).unwrap();
+    let text = tool_text(&reply);
+    assert!(text.contains("src/a.ts:2-10"), "{text}");
+    assert!(!text.contains("More groups"), "{text}");
 }

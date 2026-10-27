@@ -13,6 +13,7 @@ mod hash;
 pub mod index;
 pub mod lang;
 pub mod mcp;
+pub mod near;
 pub mod report;
 mod suffix;
 pub mod variation;

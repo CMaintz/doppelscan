@@ -30,6 +30,9 @@ pub struct Leaf {
     pub end: u32,
     pub class: LeafClass,
     pub role: Role,
+    /// The normalized token (names and literals anonymised unless strict),
+    /// for comparing token streams that do not align 1:1.
+    pub token: u32,
     /// For a binding, the leaf index range where its name refers to it: the
     /// enclosing function for a local, the whole file for a declaration.
     pub scope: (u32, u32),
@@ -102,6 +105,11 @@ pub struct FileIndex {
     pub nodes: Vec<Frag>,
     /// Child sequences of block-like nodes, split at noise such as imports.
     pub seqs: Vec<Vec<Frag>>,
+    /// Functions, methods and lambdas: the units near-miss detection
+    /// compares.
+    pub units: Vec<Frag>,
+    /// Byte offset where each line starts, for mapping leaves to lines.
+    line_starts: Vec<u32>,
     /// Qualified names ("Class.method") that `Frag::scope` indexes into.
     pub scopes: Vec<String>,
     /// Byte range of each scope's definition, parallel to `scopes`.
@@ -111,6 +119,11 @@ pub struct FileIndex {
 impl FileIndex {
     pub fn text(&self, start: u32, end: u32) -> &str {
         &self.source[start as usize..end as usize]
+    }
+
+    /// 1-based line of a byte offset.
+    pub fn line_of(&self, byte: u32) -> u32 {
+        self.line_starts.partition_point(|&s| s <= byte) as u32
     }
 
     pub fn leaf_text(&self, leaf: &Leaf) -> &str {
@@ -149,6 +162,12 @@ impl FileIndex {
     }
 }
 
+fn line_starts(source: &str) -> Vec<u32> {
+    std::iter::once(0)
+        .chain(source.match_indices('\n').map(|(i, _)| i as u32 + 1))
+        .collect()
+}
+
 pub fn index_source(
     parser: &mut Parser,
     path: String,
@@ -167,6 +186,8 @@ pub fn index_source(
         leaves: builder.leaves,
         nodes: builder.nodes,
         seqs: builder.seqs,
+        units: builder.units,
+        line_starts: line_starts(&source),
         scopes: builder.scopes,
         scope_spans: builder.scope_spans,
         source,
@@ -199,6 +220,7 @@ struct Builder<'a> {
     pending_locals: Vec<u32>,
     nodes: Vec<Frag>,
     seqs: Vec<Vec<Frag>>,
+    units: Vec<Frag>,
     scopes: Vec<String>,
     scope_spans: Vec<(u32, u32)>,
     scope_stack: Vec<u32>,
@@ -216,6 +238,7 @@ impl<'a> Builder<'a> {
             pending_locals: Vec::new(),
             nodes: Vec::new(),
             seqs: Vec::new(),
+            units: Vec::new(),
             scopes: Vec::new(),
             scope_spans: Vec::new(),
             scope_stack: Vec::new(),
@@ -278,6 +301,9 @@ impl<'a> Builder<'a> {
         let frag = self.frag(node, frame.hash, frame.leaf_start);
         if is_function_like(self.lang.kind_name(frame.kind)) {
             self.claim_locals(frame.leaf_start);
+            if frag.tokens() >= MIN_STORED_TOKENS {
+                self.units.push(frag);
+            }
         }
         if frame.scope_pushed {
             self.scope_stack.pop();
@@ -328,6 +354,7 @@ impl<'a> Builder<'a> {
             end: range.end as u32,
             class: leaf_class,
             role,
+            token: (hash ^ (hash >> 32)) as u32,
             scope,
         });
         hash

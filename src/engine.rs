@@ -358,3 +358,18 @@ pub fn anchor(root: &Path, baseline: &Path) -> anyhow::Result<PathBuf> {
     );
     Ok(dir)
 }
+
+impl Engine {
+    /// Near-miss clones: functions at least `similarity` alike (0 to 1)
+    /// that are not exact clones of each other.
+    pub fn near(
+        &self,
+        root: &Path,
+        opts: &ScanOptions,
+        similarity: f32,
+    ) -> anyhow::Result<crate::near::NearAnalysis> {
+        let started = Instant::now();
+        let files = self.index_tree(root, opts)?;
+        Ok(crate::near::near_analysis(files, opts, similarity, started))
+    }
+}

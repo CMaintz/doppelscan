@@ -9,8 +9,9 @@ doppelscan finds code with the same syntax structure even when names and
 literals differ, and tells you what a shared helper would take as arguments.
 
 Use the MCP tools when available (`find_duplicates`, `get_duplicate_group`,
-`duplicates_at`, `find_similar_code`, `check_new_duplicates`). Otherwise use
-the CLI: `doppelscan`, `doppelscan show <fingerprint>`,
+`find_near_duplicates`, `duplicates_at`, `find_similar_code`,
+`check_new_duplicates`). Otherwise use the CLI: `doppelscan`,
+`doppelscan show <fingerprint>`, `doppelscan near`,
 `doppelscan at <file>:<from>-<to>`, `doppelscan similar --lang <ext> < snippet`,
 `doppelscan check`.
 
@@ -46,6 +47,16 @@ the CLI: `doppelscan`, `doppelscan show <fingerprint>`,
    column order.
 5. Run the tests, then `duplicates_at` on a former occurrence: the group should
    be gone.
+
+## Near duplicates
+
+`find_near_duplicates` (CLI: `doppelscan near`) lists functions that are
+copies with statements added, removed or changed. It gives no template:
+read each copy's `differs` lines (code that copy has and another lacks; a
+copy without any only lacks code), then merge the copies into one function
+and turn each difference into a parameter, an option or a callback. If the
+differences are most of the function, leave the copies alone. Near groups
+have no fingerprint and are not covered by `check_new_duplicates`.
 
 ## Before writing new code
 

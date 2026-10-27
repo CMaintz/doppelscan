@@ -61,8 +61,25 @@ doppelscan src --limit 0           # every group
 doppelscan show b4a94232d76e       # one group in full, with template
 doppelscan at src/user.ts:40-60    # clones touching these lines
 doppelscan similar --lang ts < snippet.ts   # does this code already exist?
+doppelscan near --similarity 0.8   # functions that are copies with edits
 doppelscan --format json           # machine-readable
 ```
+
+`near` finds what the exact scan cannot: functions that match except for
+statements added, removed or changed. Each copy lists the lines where it
+has code another copy lacks, which is where the merged function needs an
+option or a callback:
+
+```
+#2 x3 near, 81% similar | 128 tokens | score 256
+  frontend/src/app/features/documents/documents.component.ts:123-129  (DocumentsComponent.ageLabel)  differs: 125
+  frontend/src/app/features/job-feed/job-feed.component.ts:275-282  (JobFeedComponent.ageLabel)  differs: 275-276, 278
+  frontend/src/app/features/prompts/prompts-library.component.ts:251-258  (PromptsLibraryComponent.ageLabel)  differs: 251-252
+```
+
+`near` is advisory: `check` and `baseline` cover exact clones only. Tests
+are often near copies of each other by design, so `--exclude '**/*.test.ts'`
+(or your test glob) keeps them out when they are noise.
 
 Useful options: `--min-tokens` (default 50), `--strict` (identical names and
 literals only), `--only ts,java`, `--exclude 'generated/**'`,
@@ -129,6 +146,7 @@ the 2026-07-28 protocol and the older `initialize` handshake.
 | `duplicates_at` | Is the code at this file/line range duplicated elsewhere? |
 | `find_similar_code` | Before writing a helper: does equivalent code already exist? |
 | `check_new_duplicates` | After writing code: did this change duplicate anything? |
+| `find_near_duplicates` | Functions that are copies with small edits, and where each copy differs. |
 
 The server keeps parsed files in memory and re-parses only files whose size or
 mtime changed, so follow-up calls on a large repo take tens of milliseconds.
@@ -156,6 +174,18 @@ find-extract-verify loop for agents.
    scope, so a same-spelled name elsewhere is still a parameter, and a member
    access (`this.x`) only follows a field the fragment declares itself.
 
+Near-miss detection (`near`) compares whole functions instead. Each
+function's normalized tokens are cut into 10-token windows and fingerprinted
+with winnowing ([Schleimer, Wilkerson and Aiken, SIGMOD
+2003](https://theory.stanford.edu/~aiken/publications/papers/sigmod03.pdf)),
+which guarantees that any shared run of 17 tokens yields a shared
+fingerprint. An inverted index finds the functions that share fingerprints,
+fingerprints common to many functions are dropped as idiom, and pairs are
+scored by Jaccard similarity of their fingerprint counts (counts, so four
+repeated assignments and ten do not look alike). Union-find groups the
+pairs, exact clones are left to the exact scan, and the differing lines come
+from a token-level diff against another copy.
+
 ## Performance
 
 On a 951-file Java/TypeScript repo (64k lines): doppelscan 0.19 s wall time,
@@ -166,8 +196,10 @@ skips because they cannot be extracted as one unit.
 
 ## Limitations
 
-- Near-miss clones with inserted or deleted statements (type-3) are not
-  detected; occurrences must have the same structure.
+- Near-miss groups are whole functions: an edited copy of a block inside two
+  otherwise different functions is not found, and a small function copied
+  into a much larger one scores low because the larger one dilutes the
+  similarity. They come without a template, since the copies do not align.
 - Scopes are per function, not per block, and come from each grammar's node
   names rather than a compiler: a name shadowed inside a nested block of the
   same function, or a binding form a grammar spells unusually, can still be

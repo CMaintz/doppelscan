@@ -16,6 +16,7 @@ use serde_json::{Value, json};
 use crate::baseline::Baseline;
 use crate::engine::{Against, Engine, ScanOptions};
 use crate::lang::{LANGS, lang_index_by_name};
+use crate::near::{render_near, render_near_summary};
 use crate::report::{Analysis, Detail, render_check, render_group, render_summary};
 
 const MODERN: &str = "2026-07-28";
@@ -25,8 +26,9 @@ const VERSION_KEY: &str = "io.modelcontextprotocol/protocolVersion";
 const INSTRUCTIONS: &str = "doppelscan finds duplicated code by syntax structure (names and literals may differ). \
 Use find_duplicates to survey a repo for helper-extraction candidates, get_duplicate_group for one group's \
 helper template and parameters, duplicates_at to check a file/line range you are editing, find_similar_code \
-before writing a new helper to see whether equivalent code already exists, and check_new_duplicates after \
-writing code to see whether it duplicated anything. Prefer fingerprints over numeric ids \
+before writing a new helper to see whether equivalent code already exists, check_new_duplicates after \
+writing code to see whether it duplicated anything, and find_near_duplicates for functions that are copies \
+with small edits. Prefer fingerprints over numeric ids \
 when referring back to a group; ids depend on the scan options.";
 
 pub fn serve(engine: &Engine, root: &Path) -> anyhow::Result<()> {
@@ -146,6 +148,7 @@ fn call_tool(engine: &Engine, root: &Path, params: &Value) -> ToolResult {
         "duplicates_at" => duplicates_at(engine, root, &args),
         "find_similar_code" => find_similar(engine, root, &args),
         "check_new_duplicates" => check_new(engine, root, &args),
+        "find_near_duplicates" => find_near(engine, root, &args),
         _ => return Err((-32602, format!("Unknown tool: {name}"))),
     };
     Ok(match outcome {
@@ -223,21 +226,30 @@ fn render(analysis: &Analysis, ids: &[usize], template: bool) -> String {
 
 fn find_duplicates(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<String> {
     let analysis = engine.scan(&scan_root(root, args)?, &options(root, args, 50)?)?;
-    let offset = uint_arg(args, "offset", 0) as usize;
-    let limit = uint_arg(args, "limit", 15) as usize;
-    let ids: Vec<usize> = (offset + 1..=analysis.groups.len()).take(limit).collect();
+    let ids = page(args, analysis.groups.len());
     let templates = args
         .get("include_templates")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let mut out = render(&analysis, &ids, templates);
-    if offset + ids.len() < analysis.groups.len() {
-        out.push_str(&format!(
-            "\nMore groups: call again with offset={}.\n",
-            offset + ids.len()
-        ));
+    let out = render(&analysis, &ids, templates);
+    Ok(out + &more_hint(&ids, analysis.groups.len()))
+}
+
+/// The ids an `offset`/`limit` page covers; a limit of 0 means the rest.
+fn page(args: &Value, total: usize) -> Vec<usize> {
+    let offset = uint_arg(args, "offset", 0) as usize;
+    let limit = match uint_arg(args, "limit", 15) as usize {
+        0 => usize::MAX,
+        n => n,
+    };
+    (offset + 1..=total).take(limit).collect()
+}
+
+fn more_hint(ids: &[usize], total: usize) -> String {
+    match ids.last() {
+        Some(&last) if last < total => format!("\nMore groups: call again with offset={last}.\n"),
+        _ => String::new(),
     }
-    Ok(out)
 }
 
 fn get_group(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<String> {
@@ -319,6 +331,34 @@ fn find_similar(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<St
     Ok(render(&analysis, &ids, false))
 }
 
+fn find_near(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<String> {
+    let similarity = match args.get("similarity") {
+        None => 0.8,
+        Some(v) => v
+            .as_f64()
+            .ok_or_else(|| anyhow::anyhow!("similarity must be a number"))?,
+    } as f32;
+    anyhow::ensure!(
+        (0.0..=1.0).contains(&similarity),
+        "similarity is a fraction between 0 and 1"
+    );
+    let analysis = engine.near(
+        &scan_root(root, args)?,
+        &options(root, args, 50)?,
+        similarity,
+    )?;
+    let ids = page(args, analysis.groups.len());
+    let mut out = render_near_summary(&analysis, ids.len());
+    for &id in &ids {
+        out.push_str(&format!(
+            "\n{}",
+            render_near(&analysis.group(id), Detail::Brief)
+        ));
+    }
+    out.push_str(&more_hint(&ids, analysis.groups.len()));
+    Ok(out)
+}
+
 fn check_new(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<String> {
     let path = scan_root(root, args)?;
     let file = str_arg(args, "baseline").map(|f| root.join(f));
@@ -356,7 +396,7 @@ fn tool_definitions() -> Value {
             "title": "Find duplicated code",
             "description": "List clone groups in a codebase, ranked by how much code extracting a shared helper would remove. Each group lists its locations, the values that differ per occurrence (helper parameters) and names that are merely renamed locals.",
             "inputSchema": { "type": "object", "properties": with(json!({
-                "limit": { "type": "integer", "description": "Groups to return. Default 15." },
+                "limit": { "type": "integer", "description": "Groups to return; 0 for all. Default 15." },
                 "offset": { "type": "integer", "description": "Skip this many groups (pagination)." },
                 "include_templates": { "type": "boolean", "description": "Include each group's helper template. Default false." },
             })) },
@@ -400,6 +440,17 @@ fn tool_definitions() -> Value {
             "inputSchema": { "type": "object", "properties": with(json!({
                 "base": { "type": "string", "description": "Git revision to compare against, e.g. \"main\" for a whole branch." },
                 "baseline": { "type": "string", "description": "Baseline file relative to the root. Default: the nearest .doppelscan-baseline.json in path or a parent, up to the repository root." },
+            })) },
+            "annotations": { "readOnlyHint": true },
+        },
+        {
+            "name": "find_near_duplicates",
+            "title": "Find near-duplicate functions",
+            "description": "Functions that are mostly the same but not exact clones: a copy with statements added, removed or changed. Each group lists every copy and the line ranges where it differs from the others; read those lines before merging the copies into one function with an option or callback for the difference.",
+            "inputSchema": { "type": "object", "properties": with(json!({
+                "similarity": { "type": "number", "minimum": 0, "maximum": 1, "description": "Smallest similarity reported. Default 0.8." },
+                "limit": { "type": "integer", "description": "Groups to return; 0 for all. Default 15." },
+                "offset": { "type": "integer", "description": "Skip this many groups (pagination)." },
             })) },
             "annotations": { "readOnlyHint": true },
         },

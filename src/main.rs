@@ -7,6 +7,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use doppelscan::baseline::{Baseline, DEFAULT_FILE};
 use doppelscan::engine::{Against, Check, Engine, ScanOptions, anchor};
 use doppelscan::lang::{LANGS, lang_index_by_name, lang_index_for_path};
+use doppelscan::near::{render_near, render_near_summary};
 use doppelscan::report::{Analysis, Detail, render_check, render_group, render_summary};
 
 #[global_allocator]
@@ -71,6 +72,18 @@ enum Command {
         /// Baseline file [default: PATH/.doppelscan-baseline.json].
         #[arg(long, short)]
         output: Option<PathBuf>,
+        #[command(flatten)]
+        common: Common,
+    },
+    /// Near-miss clones: functions alike except for added, removed or
+    /// changed statements, which the exact scan cannot align.
+    Near {
+        /// Smallest similarity reported, 0 to 1.
+        #[arg(long, default_value_t = 0.8)]
+        similarity: f32,
+        /// Groups to show; 0 for all.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
         #[command(flatten)]
         common: Common,
     },
@@ -152,6 +165,11 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             output,
             common,
         } => write_baseline(&engine, prune, output, &common),
+        Command::Near {
+            similarity,
+            limit,
+            common,
+        } => near(&engine, similarity, limit, &common),
         Command::Mcp { root } => doppelscan::mcp::serve(&engine, &root),
     };
     done.map(|()| ExitCode::SUCCESS)
@@ -182,17 +200,14 @@ fn known_langs() -> String {
 
 fn scan(engine: &Engine, args: &ScanArgs) -> anyhow::Result<()> {
     let analysis = engine.scan(&args.common.path, &options(&args.common)?)?;
-    let limit = if args.limit == 0 {
-        analysis.groups.len()
-    } else {
-        args.limit.min(analysis.groups.len())
-    };
-    print_groups(
-        &analysis,
-        &(1..=limit).collect::<Vec<_>>(),
-        args.template,
-        args.common.format,
-    )
+    let ids = first_ids(args.limit, analysis.groups.len());
+    print_groups(&analysis, &ids, args.template, args.common.format)
+}
+
+/// Ids `1..=limit`, with 0 meaning all `total`.
+fn first_ids(limit: usize, total: usize) -> Vec<usize> {
+    let shown = if limit == 0 { total } else { limit.min(total) };
+    (1..=shown).collect()
 }
 
 fn print_groups(
@@ -364,4 +379,25 @@ fn anchored(opts: ScanOptions, common: &Common, file: &Path) -> anyhow::Result<S
         display_base: Some(anchor(&common.path, file)?),
         ..opts
     })
+}
+
+fn near(engine: &Engine, similarity: f32, limit: usize, common: &Common) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        (0.0..=1.0).contains(&similarity),
+        "--similarity is a fraction between 0 and 1"
+    );
+    let analysis = engine.near(&common.path, &options(common)?, similarity)?;
+    let groups: Vec<_> = first_ids(limit, analysis.groups.len())
+        .into_iter()
+        .map(|id| analysis.group(id))
+        .collect();
+    if common.format == Format::Json {
+        let body = serde_json::json!({ "summary": analysis.summary(), "groups": groups });
+        return emit(&(serde_json::to_string_pretty(&body)? + "\n"));
+    }
+    let mut out = render_near_summary(&analysis, groups.len());
+    for g in &groups {
+        out.push_str(&format!("\n{}", render_near(g, Detail::Brief)));
+    }
+    emit(&out)
 }
