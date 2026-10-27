@@ -1,5 +1,8 @@
 # doppelscan
 
+[![ci](https://github.com/CMaintz/doppelscan/actions/workflows/ci.yml/badge.svg)](https://github.com/CMaintz/doppelscan/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Fast, syntax-aware duplicate code finder built for coding agents.
 
 doppelscan parses your code with tree-sitter and finds fragments that have the
@@ -37,11 +40,11 @@ TypeScript, TSX, JavaScript, Java, C#, Kotlin, Swift, PHP, Python, Go, Rust, CSS
 ## Install
 
 ```sh
-cargo install --path . --root ~/.local   # binary lands in ~/.local/bin
+cargo install --git https://github.com/CMaintz/doppelscan
 ```
 
-Plain `cargo install --path .` works too if cargo's `bin` directory is on
-your PATH. Building needs a C compiler for the tree-sitter grammars.
+From a checkout, `cargo install --path . --root ~/.local` puts the binary in
+`~/.local/bin` instead of cargo's own `bin` directory. Building needs a C compiler for the tree-sitter grammars.
 
 The repo pins its Rust toolchain in `mise.toml` (`mise install` sets it up).
 On Windows the MSVC build tools are required.
@@ -119,3 +122,14 @@ skips because they cannot be extracted as one unit.
   detected; occurrences must have the same structure.
 - Rename vs parameter is a syntactic heuristic, not name resolution.
 - Matches stay within one language.
+
+## Contributing
+
+Bug reports with a small pair of snippets are the most useful thing you can
+send. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and what a good change
+looks like, and [docs/adding-a-language.md](docs/adding-a-language.md) to add a
+language.
+
+## License
+
+[MIT](LICENSE)
