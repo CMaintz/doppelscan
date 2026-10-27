@@ -332,6 +332,8 @@ pub fn is_function_like(kind: &str) -> bool {
         "modifier",
         "parameter",
         "static",
+        // `constructor_body` is the block, not the constructor.
+        "body",
     ]
     .iter()
     .any(|w| kind.contains(w));
