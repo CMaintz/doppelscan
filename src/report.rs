@@ -186,12 +186,7 @@ pub fn render_group(g: &Group, detail: Detail) -> String {
     render_variations(&mut out, "params", &g.parameters, true, detail);
     render_variations(&mut out, "renames", &g.renames, false, detail);
     if let Some(t) = &g.template {
-        let _ = writeln!(
-            out,
-            "  template:
-{}",
-            indent(t)
-        );
+        let _ = writeln!(out, "  template:\n{}", indent(t));
     }
     out
 }
