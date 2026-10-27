@@ -39,7 +39,8 @@ call it as a tool.
 
 ## Languages
 
-TypeScript, TSX, JavaScript, Java, C#, Kotlin, Swift, PHP, Python, Go, Rust, CSS.
+TypeScript, TSX, JavaScript, Java, C#, Kotlin, Swift, PHP, Python, Go, Rust, CSS, HTML
+(including Angular and other framework templates, matched as markup).
 
 ## Install
 

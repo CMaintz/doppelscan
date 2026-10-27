@@ -123,6 +123,12 @@ pub static LANGS: LazyLock<Vec<Lang>> = LazyLock::new(|| {
         Lang::new("go", tree_sitter_go::LANGUAGE.into(), &["go"], false),
         Lang::new("rust", tree_sitter_rust::LANGUAGE.into(), &["rs"], false),
         Lang::new("css", tree_sitter_css::LANGUAGE.into(), &["css"], false),
+        Lang::new(
+            "html",
+            tree_sitter_html::LANGUAGE.into(),
+            &["html", "htm"],
+            false,
+        ),
     ]
 });
 
@@ -175,6 +181,10 @@ fn is_noise(kind: &str) -> bool {
 }
 
 fn is_string(kind: &str) -> bool {
+    // Markup's text and attribute values are its literals.
+    if kind == "text" || kind.contains("attribute_value") {
+        return true;
+    }
     let stringy = kind.contains("string") || (kind.contains("char") && kind.contains("literal"));
     // Interpolated strings are walked so the embedded expressions still count.
     stringy && !kind.contains("interpolat") && !kind.contains("template")
@@ -214,6 +224,9 @@ fn is_block(kind: &str) -> bool {
         "default_case",
         "communication_case",
         "chunk",
+        // Markup: an element's children are a sequence like statements.
+        "document",
+        "element",
     ];
     [
         "block",
