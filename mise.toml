@@ -1,2 +1,43 @@
 [tools]
-rust = "1.99.1"
+rust = { version = "1.99.1", components = "rustfmt,clippy" }
+osv-scanner = "2.7.0"
+gitleaks = "8.30.1"
+
+# The six Foundry verbs (https://github.com/CMaintz/foundry/blob/main/CONTRACT.md).
+# Foundry ships no Rust stack template, so they are defined here directly.
+
+[tasks.fix]
+description = "Apply mechanical fixes"
+run = [
+    "cargo fmt",
+    "cargo clippy --all-targets --fix --allow-dirty --allow-staged -- -D warnings",
+]
+
+[tasks.lint]
+description = "Formatting and clippy"
+run = ["cargo fmt --check", "cargo clippy --all-targets -- -D warnings"]
+
+[tasks.typecheck]
+description = "Type-check every target"
+run = "cargo check --all-targets --locked"
+
+[tasks.test]
+description = "Unit, behaviour and MCP tests"
+run = "cargo test --locked"
+
+[tasks.audit]
+description = "Dependency vulnerabilities and committed secrets"
+run = [
+    "osv-scanner scan source --lockfile Cargo.lock",
+    "gitleaks git --no-banner --redact .",
+]
+
+# Sequential on purpose: `depends` runs prerequisites in parallel, unordered.
+[tasks.gate]
+description = "lint, typecheck, test, audit, in order"
+run = [
+    { task = "lint" },
+    { task = "typecheck" },
+    { task = "test" },
+    { task = "audit" },
+]
