@@ -10,7 +10,7 @@ use serde::Serialize;
 use crate::detect::RawGroup;
 use crate::engine::{Against, Check, score};
 use crate::index::FileIndex;
-use crate::variation::{Variation, analyze, template};
+use crate::variation::{Kind, Variation, analyze, template};
 
 /// Ranked clone groups over a set of indexed files.
 pub struct Analysis {
@@ -46,8 +46,11 @@ pub struct Group {
     pub occurrences: Vec<Location>,
     /// Values that differ per occurrence and become helper arguments.
     pub parameters: Vec<Variation>,
-    /// Names the fragment binds itself; they differ but need no argument.
+    /// Locals the fragment binds itself; they differ but need no argument.
     pub renames: Vec<Variation>,
+    /// Names the fragment declares for other code (methods, fields,
+    /// classes): keeping one means updating the callers of the others.
+    pub declares: Vec<Variation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub template: Option<String>,
 }
@@ -65,6 +68,10 @@ impl Analysis {
         let raw = &self.groups[id - 1];
         let vars = analyze(raw, &self.files);
         let template = with_template.then(|| template(raw, &self.files, &vars));
+        let (declares, renames) = vars
+            .renames
+            .into_iter()
+            .partition(|v| v.kind == Kind::Declared);
         Group {
             id,
             fingerprint: fingerprint(raw),
@@ -75,7 +82,8 @@ impl Analysis {
             score: score(raw),
             occurrences: raw.occs.iter().map(|o| self.location(o)).collect(),
             parameters: vars.parameters,
-            renames: vars.renames,
+            renames,
+            declares,
             template,
         }
     }
@@ -190,6 +198,7 @@ pub fn render_group(g: &Group, detail: Detail) -> String {
     render_locations(&mut out, &g.occurrences, detail);
     render_variations(&mut out, "params", &g.parameters, true, detail);
     render_variations(&mut out, "renames", &g.renames, false, detail);
+    render_variations(&mut out, "declares", &g.declares, false, detail);
     if let Some(t) = &g.template {
         let _ = writeln!(out, "  template:\n{}", indent(t));
     }
@@ -234,8 +243,16 @@ fn render_variations(
         .enumerate()
         .map(|(i, v)| {
             let values = render_values(&v.values, detail);
+            let label = match v.kind {
+                Kind::Type => ":type",
+                Kind::Function => ":function",
+                Kind::Member => ":member",
+                // Plain values and literals (which show their quotes or
+                // digits) stay unlabelled to keep listings short.
+                _ => "",
+            };
             if numbered {
-                format!("${}={}", i + 1, values)
+                format!("${}{label}={}", i + 1, values)
             } else {
                 values
             }

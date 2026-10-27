@@ -11,9 +11,13 @@ IntelliJ's duplicate detection. Each clone group comes with what an agent needs
 to extract a shared helper:
 
 - **parameters**: values that differ between occurrences and would become
-  helper arguments,
-- **renames**: names the fragment binds itself (locals, its own parameters),
-  which differ but need no argument,
+  helper arguments, labelled by what the helper takes: `type` (a generic),
+  `function` (a callback), `member` (a key or accessor), or unlabelled for a
+  plain value or literal (`kind` in the JSON output),
+- **renames**: locals the fragment binds itself (variables, its own
+  parameters, loop and lambda variables), which differ but need no argument,
+- **declares**: names the fragment declares for other code (methods, fields,
+  classes), so callers have to switch to the one name the helper keeps,
 - **template**: the first occurrence with each parameter replaced by `$1`,
   `$2`, ..., i.e. the helper body.
 
@@ -25,8 +29,8 @@ call it as a tool.
   src/app/resume-state.service.ts:303-305  (ResumeStateService.addExperience)
   src/app/resume-state.service.ts:317-319  (ResumeStateService.addEducation)
   ...
-  params: $1=ResumeExperience | ResumeEducation | ...;  $2='experience' | 'education' | ...
-  renames: addExperience | addEducation | ...;  updateExperience | updateEducation | ...
+  params: $1:type=ResumeExperience | ResumeEducation | ...;  $2='experience' | 'education' | ...
+  declares: addExperience | addEducation | ...;  updateExperience | updateEducation | ...
   template:
     addExperience(item: Omit<$1, 'id'>): void { this.addTo($2, item); }
     updateExperience(id: string, patch: Partial<$1>): void { this.updateIn($2, id, patch); }
@@ -146,8 +150,11 @@ find-extract-verify loop for agents.
    clone, when it is a tandem repeat inside one block (a wall of getters, a
    data table), or when it needs too many parameters to be a useful helper.
 5. Occurrences align leaf by leaf, so differing positions become parameters or
-   renames. A name counts as a rename when the fragment binds it (declaration,
-   parameter, loop variable).
+   renames. Each binding (declaration, parameter, loop, lambda or catch
+   variable, destructured name) gets a scope: its function for a local, the
+   file for a declaration. A use is renamed with a binding only inside that
+   scope, so a same-spelled name elsewhere is still a parameter, and a member
+   access (`this.x`) only follows a field the fragment declares itself.
 
 ## Performance
 
@@ -161,7 +168,13 @@ skips because they cannot be extracted as one unit.
 
 - Near-miss clones with inserted or deleted statements (type-3) are not
   detected; occurrences must have the same structure.
-- Rename vs parameter is a syntactic heuristic, not name resolution.
+- Scopes are per function, not per block, and come from each grammar's node
+  names rather than a compiler: a name shadowed inside a nested block of the
+  same function, or a binding form a grammar spells unusually, can still be
+  misclassified.
+- Fields that are only assigned, never declared (Python `self.x = x`, JS
+  classes without field declarations), are not known to be fields, so
+  `self.x` shows as a `member` parameter beside the `x` rename.
 - Matches stay within one language.
 
 ## Contributing

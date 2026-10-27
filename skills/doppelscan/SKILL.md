@@ -19,10 +19,15 @@ the CLI: `doppelscan`, `doppelscan show <fingerprint>`,
 - `x9`: nine occurrences. `score` is tokens x (occurrences - 1), the code an
   extraction removes. Work on high scores first.
 - `params`: values that differ per occurrence, one column per occurrence.
-  Each becomes a helper argument. An identifier parameter that is called is a
-  function to pass in; a type parameter means a generic.
-- `renames`: names the fragment declares itself. Pick one name in the helper;
+  Each becomes a helper argument, and its label says what kind: `$1:type`
+  is a generic, `$2:function` a callback, `$3:member` a property key or
+  accessor; unlabelled ones are plain values or literals.
+- `renames`: locals the fragment binds itself. Pick one name in the helper;
   they need no argument.
+- `declares`: methods, fields or classes the fragment declares. Other code
+  calls them by name, so keeping one means updating the callers of the
+  others. Many `member` params plus `declares` usually mean parallel
+  classes (entities, DTOs); prefer a shared base or generation over a helper.
 - `template`: the helper body, with parameters as `$1`, `$2`, ...
 
 ## Extracting a helper

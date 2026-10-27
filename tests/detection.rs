@@ -141,7 +141,9 @@ fn locals_are_renames_and_outside_values_are_parameters() {
     let a = scan(&[("a.ts", SUM_TOTALS), ("b.ts", SUM_REFUNDS)]);
     let g = a.group(1, true);
     let params: Vec<&str> = g.parameters.iter().map(|v| v.values[0].as_str()).collect();
-    let renames: Vec<&str> = g.renames.iter().map(|v| v.values[0].as_str()).collect();
+    let renames: Vec<&str> = (g.renames.iter().chain(&g.declares))
+        .map(|v| v.values[0].as_str())
+        .collect();
     for local in ["total", "order", "sumTotals", "orders", "config"] {
         assert!(
             renames.contains(&local),
