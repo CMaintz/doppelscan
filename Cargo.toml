@@ -5,6 +5,11 @@ edition = "2024"
 description = "Fast syntax-aware duplicate code finder with an MCP server for coding agents"
 license = "MIT"
 rust-version = "1.91"
+repository = "https://github.com/CMaintz/doppelscan"
+readme = "README.md"
+keywords = ["duplicate-code", "clone-detection", "tree-sitter", "mcp", "refactoring"]
+categories = ["development-tools", "command-line-utilities"]
+exclude = [".github/", "examples/"]
 
 [[bin]]
 name = "doppelscan"
