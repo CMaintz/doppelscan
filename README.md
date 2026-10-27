@@ -68,6 +68,46 @@ mapping boilerplate too).
 `.gitignore` is honoured, and dependency/build directories, minified bundles
 and files marked as generated are skipped.
 
+## Gating new duplication
+
+`doppelscan check` fails (exit 1) only on duplication a change adds, so it
+can gate CI in a codebase that already has some.
+
+```sh
+doppelscan check                  # the working tree vs HEAD
+doppelscan check --base main      # a whole branch vs where it left main
+doppelscan baseline               # accept today's duplication...
+doppelscan check                  # ...then fail only on new duplication
+doppelscan baseline --prune       # shrink the baseline after a cleanup
+```
+
+With `--base`, `check` compares against the merge-base of that revision and
+HEAD, so cleanups that landed on `main` after the branch forked do not count
+against it. The revision is read from git's object store (no checkout), with
+the same files, filters and options as the working-tree scan; when the local
+branch does not exist, `origin/<rev>` is used, as on a CI checkout.
+
+Without `--base`, `check` uses the nearest `.doppelscan-baseline.json` in the
+scanned directory or above it (up to the repository root), and HEAD when
+there is none. A baseline keeps the settings it was written with
+(`--min-tokens`, `--strict`, `--only`, `--exclude`), and `check` uses those
+instead of its own flags so the comparison stays like for like; to change
+them, write the baseline again.
+
+A baseline stores each accepted group's fingerprint, copy count and the
+functions it sits in, not line numbers. Moving or renaming known duplication
+passes, and so does shrinking it within the same functions; another copy, a
+clone that grew, or a new top-level clone does not. `--prune` only drops
+entries and lowers counts, so it cannot accept new duplication.
+
+`check` reads the working tree, staged or not, so as a pre-commit hook it
+also sees unstaged edits. Commit the baseline with LF line endings
+(`.doppelscan-baseline.json text eol=lf` in `.gitattributes`), or a Windows
+checkout with `core.autocrlf` shows it modified after every prune.
+
+Exit codes: 0 clean, 1 new duplication, 2 error. In GitHub Actions, check out
+with `fetch-depth: 0` so the merge-base is available.
+
 ## MCP server
 
 ```sh
@@ -84,6 +124,7 @@ the 2026-07-28 protocol and the older `initialize` handshake.
 | `get_duplicate_group` | One group's parameters, renames and helper template; optionally every occurrence's code. |
 | `duplicates_at` | Is the code at this file/line range duplicated elsewhere? |
 | `find_similar_code` | Before writing a helper: does equivalent code already exist? |
+| `check_new_duplicates` | After writing code: did this change duplicate anything? |
 
 The server keeps parsed files in memory and re-parses only files whose size or
 mtime changed, so follow-up calls on a large repo take tens of milliseconds.

@@ -1,5 +1,8 @@
+mod common;
+
 use std::path::{Path, PathBuf};
 
+use common::git;
 use doppelscan::engine::Engine;
 use doppelscan::mcp::handle_line;
 use serde_json::{Value, json};
@@ -68,7 +71,7 @@ fn both_protocol_eras_are_served() {
     let (engine, root) = (Engine::default(), fixture("eras"));
     let listed = call(&engine, &root, modern("tools/list", json!({}))).unwrap();
     assert_eq!(listed["result"]["resultType"], "complete");
-    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 4);
+    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 5);
     let init = json!({ "jsonrpc": "2.0", "id": 2, "method": "initialize", "params": { "protocolVersion": "2025-06-18" } });
     let reply = call(&engine, &root, init).unwrap();
     assert_eq!(reply["result"]["protocolVersion"], "2025-06-18");
@@ -209,4 +212,36 @@ fn a_bare_function_snippet_matches_the_whole_existing_function() {
     .unwrap();
     let text = tool_text(&reply);
     assert!(text.contains("src/a.ts:2-10"), "{text}");
+}
+
+fn check_new(engine: &Engine, root: &Path) -> String {
+    let args =
+        json!({ "name": "check_new_duplicates", "arguments": { "path": "src", "min_tokens": 20 } });
+    let reply = call(engine, root, modern("tools/call", args)).unwrap();
+    tool_text(&reply).to_string()
+}
+
+// Catches revision paths missing the subdirectory prefix the working-tree
+// scan shows (a shrunk clone would then look new), and uncommitted copies
+// going unreported.
+#[test]
+fn check_new_duplicates_compares_a_subdirectory_with_head() {
+    let (engine, root) = (Engine::default(), fixture("check"));
+    let _ = std::fs::remove_dir_all(root.join(".git"));
+    git(&root, &["init", "-q"]);
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-qm", "init"]);
+    let shrunk = std::fs::read_to_string(root.join("src/b.ts"))
+        .unwrap()
+        .replace("return Math.round(total * 100) / 100;", "return total;");
+    std::fs::write(root.join("src/b.ts"), shrunk).unwrap();
+    let text = check_new(&engine, &root);
+    assert!(
+        text.starts_with("No new duplication against HEAD"),
+        "{text}"
+    );
+
+    std::fs::write(root.join("src/c.ts"), CLONE.replace("sumTotals", "sumAll")).unwrap();
+    let text = check_new(&engine, &root);
+    assert!(text.contains("src/c.ts"), "{text}");
 }

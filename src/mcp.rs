@@ -13,9 +13,10 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use crate::engine::{Engine, ScanOptions};
+use crate::baseline::Baseline;
+use crate::engine::{Against, Engine, ScanOptions};
 use crate::lang::{LANGS, lang_index_by_name};
-use crate::report::{Analysis, Detail, render_group, render_summary};
+use crate::report::{Analysis, Detail, render_check, render_group, render_summary};
 
 const MODERN: &str = "2026-07-28";
 const LEGACY: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
@@ -23,8 +24,9 @@ const VERSION_KEY: &str = "io.modelcontextprotocol/protocolVersion";
 
 const INSTRUCTIONS: &str = "doppelscan finds duplicated code by syntax structure (names and literals may differ). \
 Use find_duplicates to survey a repo for helper-extraction candidates, get_duplicate_group for one group's \
-helper template and parameters, duplicates_at to check a file/line range you are editing, and find_similar_code \
-before writing a new helper to see whether equivalent code already exists. Prefer fingerprints over numeric ids \
+helper template and parameters, duplicates_at to check a file/line range you are editing, find_similar_code \
+before writing a new helper to see whether equivalent code already exists, and check_new_duplicates after \
+writing code to see whether it duplicated anything. Prefer fingerprints over numeric ids \
 when referring back to a group; ids depend on the scan options.";
 
 pub fn serve(engine: &Engine, root: &Path) -> anyhow::Result<()> {
@@ -143,6 +145,7 @@ fn call_tool(engine: &Engine, root: &Path, params: &Value) -> ToolResult {
         "get_duplicate_group" => get_group(engine, root, &args),
         "duplicates_at" => duplicates_at(engine, root, &args),
         "find_similar_code" => find_similar(engine, root, &args),
+        "check_new_duplicates" => check_new(engine, root, &args),
         _ => return Err((-32602, format!("Unknown tool: {name}"))),
     };
     Ok(match outcome {
@@ -316,6 +319,21 @@ fn find_similar(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<St
     Ok(render(&analysis, &ids, false))
 }
 
+fn check_new(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<String> {
+    let path = scan_root(root, args)?;
+    let file = str_arg(args, "baseline").map(|f| root.join(f));
+    let against = match (
+        str_arg(args, "base"),
+        file.or_else(|| Baseline::find(&path)),
+    ) {
+        (Some(rev), _) => Against::Rev(rev.to_string()),
+        (None, Some(file)) => Against::File(file),
+        (None, None) => Against::Rev("HEAD".into()),
+    };
+    let check = engine.check(&path, &against, &options(root, args, 50)?)?;
+    Ok(render_check(&check, &against))
+}
+
 fn tool_definitions() -> Value {
     let common = json!({
         "path": { "type": "string", "description": "Directory or file to scan, relative to the server root. Default: the root." },
@@ -373,6 +391,16 @@ fn tool_definitions() -> Value {
                 "code": { "type": "string", "description": "The snippet: whole functions or statements." },
                 "language": { "type": "string", "description": "Language name or file extension of the snippet." },
             })), "required": ["code", "language"] },
+            "annotations": { "readOnlyHint": true },
+        },
+        {
+            "name": "check_new_duplicates",
+            "title": "Check a change for new duplication",
+            "description": "Clone groups a change added: the working tree against a git revision (default HEAD, i.e. uncommitted work) or against the repo's committed baseline file when it has one. Call after writing code and before committing, then reuse or extract the existing code it points to.",
+            "inputSchema": { "type": "object", "properties": with(json!({
+                "base": { "type": "string", "description": "Git revision to compare against, e.g. \"main\" for a whole branch." },
+                "baseline": { "type": "string", "description": "Baseline file relative to the root. Default: the nearest .doppelscan-baseline.json in path or a parent, up to the repository root." },
+            })) },
             "annotations": { "readOnlyHint": true },
         },
     ])

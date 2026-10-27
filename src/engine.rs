@@ -10,6 +10,7 @@ use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use tree_sitter::Parser;
 
+use crate::baseline::{Baseline, Settings};
 use crate::detect::{RawGroup, detect};
 use crate::index::{FileIndex, MIN_STORED_TOKENS, index_source};
 use crate::report::Analysis;
@@ -74,8 +75,9 @@ impl Engine {
         root: &Path,
         opts: &ScanOptions,
     ) -> anyhow::Result<Vec<Arc<FileIndex>>> {
-        let found = discover(root, &opts.exclude, &opts.languages)?;
-        let base = opts.display_base.as_deref().unwrap_or(root);
+        let (root, base) = comparable(root, opts)?;
+        let found = discover(&root, &opts.exclude, &opts.languages)?;
+        let base = base.as_deref().unwrap_or(&root);
         let indexed: Vec<_> = found
             .par_iter()
             .map_init(Parser::new, |parser, (path, lang)| {
@@ -222,4 +224,137 @@ fn snippet_text(code: &str, lang: usize) -> String {
     } else {
         code.to_string()
     }
+}
+
+/// What a check compares the working tree against.
+pub enum Against {
+    /// A baseline file written by `doppelscan baseline`.
+    File(PathBuf),
+    /// The same scan at a git revision.
+    Rev(String),
+}
+
+impl Against {
+    pub fn label(&self) -> String {
+        match self {
+            // Canonical Windows paths carry a `\\?\` prefix nobody wants to read.
+            Against::File(path) => {
+                let shown = path.display().to_string();
+                shown.strip_prefix(r"\\?\").unwrap_or(&shown).to_string()
+            }
+            Against::Rev(rev) => rev.clone(),
+        }
+    }
+}
+
+pub struct Check {
+    pub analysis: Analysis,
+    /// Ids of groups in `analysis` the baseline does not account for.
+    pub new: Vec<usize>,
+    /// Baseline entries nothing in the working tree matches any more.
+    pub resolved: usize,
+    /// Set when a baseline file's stored settings replaced the requested ones.
+    pub note: Option<String>,
+}
+
+impl Engine {
+    pub fn check(
+        &self,
+        root: &Path,
+        against: &Against,
+        opts: &ScanOptions,
+    ) -> anyhow::Result<Check> {
+        let (baseline, opts, note) = match against {
+            Against::File(path) => against_file(root, path, opts)?,
+            Against::Rev(rev) => {
+                let (base, opts) = self.scan_rev(root, rev, opts)?;
+                (Baseline::from_analysis(&base, &opts), opts, None)
+            }
+        };
+        let analysis = self.scan(root, &opts)?;
+        let new = baseline.new_groups(&analysis);
+        let resolved = baseline.groups.len() - baseline.pruned(&analysis).groups.len();
+        Ok(Check {
+            analysis,
+            new,
+            resolved,
+            note,
+        })
+    }
+
+    /// `root` at the fork point of `rev`, with paths shown as a working-tree
+    /// scan with the same options would show them. Also returns those
+    /// options, narrowed to leave out submodules on both sides.
+    pub fn scan_rev(
+        &self,
+        root: &Path,
+        rev: &str,
+        opts: &ScanOptions,
+    ) -> anyhow::Result<(Analysis, ScanOptions)> {
+        let started = Instant::now();
+        let prefix = match &opts.display_base {
+            Some(_) => {
+                let (root, base) = comparable(root, opts)?;
+                prefix_of(&root, base.as_deref().unwrap_or(&root))
+            }
+            None => String::new(),
+        };
+        let commit = crate::git::fork_point(root, rev)?;
+        let revision = crate::git::read_revision(root, &commit, opts, &prefix)?;
+        let mut opts = opts.clone();
+        let submodules = revision.submodules.iter().map(|s| format!("{s}/**"));
+        opts.exclude.extend(submodules);
+        let files = index_sources(revision.sources, opts.strict);
+        Ok((analyze(files, &opts, started), opts))
+    }
+}
+
+/// The scanned root and `display_base` in the same canonical form, or
+/// `./src` would never strip against `/repo` to `src`.
+fn comparable(root: &Path, opts: &ScanOptions) -> anyhow::Result<(PathBuf, Option<PathBuf>)> {
+    Ok(match &opts.display_base {
+        Some(base) => (root.canonicalize()?, Some(base.canonicalize()?)),
+        None => (root.to_path_buf(), None),
+    })
+}
+
+fn prefix_of(root: &Path, base: &Path) -> String {
+    let rel = root.strip_prefix(base).unwrap_or(Path::new(""));
+    let rel = rel.to_string_lossy().replace('\\', "/");
+    if rel.is_empty() { rel } else { rel + "/" }
+}
+
+/// Places in a baseline are relative to the file's own directory, so the
+/// scan is shown from there whatever subdirectory is being checked.
+fn against_file(
+    root: &Path,
+    path: &Path,
+    opts: &ScanOptions,
+) -> anyhow::Result<(Baseline, ScanOptions, Option<String>)> {
+    let baseline = Baseline::load(path)?;
+    let mut applied = baseline.settings.apply(opts)?;
+    applied.display_base = Some(anchor(root, path)?);
+    let note = (Settings::from_options(opts) != baseline.settings).then(|| {
+        format!(
+            "Using the settings stored in {} (min_tokens {}); \
+             rewrite the baseline to change them.",
+            path.display(),
+            baseline.settings.min_tokens
+        )
+    });
+    Ok((baseline, applied, note))
+}
+
+/// The directory a baseline file describes; `root` must lie inside it.
+pub fn anchor(root: &Path, baseline: &Path) -> anyhow::Result<PathBuf> {
+    let dir = baseline.parent().filter(|d| !d.as_os_str().is_empty());
+    let dir = dir.unwrap_or(Path::new(".")).canonicalize()?;
+    let root = root.canonicalize()?;
+    anyhow::ensure!(
+        root.starts_with(&dir),
+        "{} is outside {}, the directory the baseline describes",
+        root.display(),
+        dir.display()
+    );
+    Ok(dir)
 }

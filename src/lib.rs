@@ -5,8 +5,10 @@
 //! reports what varies between its occurrences so an agent can extract a
 //! helper without re-deriving the parameters itself.
 
+pub mod baseline;
 pub mod detect;
 pub mod engine;
+mod git;
 mod hash;
 pub mod index;
 pub mod lang;

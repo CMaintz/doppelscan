@@ -9,9 +9,10 @@ doppelscan finds code with the same syntax structure even when names and
 literals differ, and tells you what a shared helper would take as arguments.
 
 Use the MCP tools when available (`find_duplicates`, `get_duplicate_group`,
-`duplicates_at`, `find_similar_code`). Otherwise use the CLI: `doppelscan`,
-`doppelscan show <fingerprint>`, `doppelscan at <file>:<from>-<to>`,
-`doppelscan similar --lang <ext> < snippet`.
+`duplicates_at`, `find_similar_code`, `check_new_duplicates`). Otherwise use
+the CLI: `doppelscan`, `doppelscan show <fingerprint>`,
+`doppelscan at <file>:<from>-<to>`, `doppelscan similar --lang <ext> < snippet`,
+`doppelscan check`.
 
 ## Reading a group
 
@@ -45,6 +46,15 @@ Use the MCP tools when available (`find_duplicates`, `get_duplicate_group`,
 
 Call `find_similar_code` with the function or statements you are about to
 write. If it matches, reuse or generalise the existing code instead.
+
+## Before committing
+
+Call `check_new_duplicates` (or run `doppelscan check`). It reports only the
+clone groups your change added: against the repo's baseline file when it has
+one, otherwise against HEAD (pass `base: "main"` to cover a whole branch). For each one, reuse the existing code it points to or
+extract a helper, then check again. Never run `doppelscan baseline` to make
+the check pass: that accepts the duplication. `doppelscan baseline --prune`
+after removing duplication is fine.
 
 ## Tuning
 

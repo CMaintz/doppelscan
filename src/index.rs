@@ -63,6 +63,8 @@ pub struct FileIndex {
     pub seqs: Vec<Vec<Frag>>,
     /// Qualified names ("Class.method") that `Frag::scope` indexes into.
     pub scopes: Vec<String>,
+    /// Byte range of each scope's definition, parallel to `scopes`.
+    pub scope_spans: Vec<(u32, u32)>,
 }
 
 impl FileIndex {
@@ -76,6 +78,33 @@ impl FileIndex {
 
     pub fn scope_name(&self, scope: u32) -> Option<&str> {
         self.scopes.get(scope as usize).map(String::as_str)
+    }
+
+    /// The definition a fragment `[start, end)` consists of, when it wraps
+    /// exactly one (an exported function, an annotated method); otherwise
+    /// `enclosing`. Names a clone by what it is rather than where it sits.
+    pub fn own_scope(&self, start: u32, end: u32, enclosing: u32) -> u32 {
+        let inside: Vec<usize> = (0..self.scope_spans.len())
+            .filter(|&i| {
+                let (s, e) = self.scope_spans[i];
+                start <= s && e <= end
+            })
+            .collect();
+        let outermost: Vec<usize> = inside
+            .iter()
+            .copied()
+            .filter(|&i| {
+                let (s, e) = self.scope_spans[i];
+                !inside.iter().any(|&j| {
+                    let (os, oe) = self.scope_spans[j];
+                    j != i && os <= s && e <= oe
+                })
+            })
+            .collect();
+        match outermost[..] {
+            [only] => only as u32,
+            _ => enclosing,
+        }
     }
 }
 
@@ -97,6 +126,7 @@ pub fn index_source(
         nodes: builder.nodes,
         seqs: builder.seqs,
         scopes: builder.scopes,
+        scope_spans: builder.scope_spans,
         source,
     })
 }
@@ -126,6 +156,7 @@ struct Builder<'a> {
     nodes: Vec<Frag>,
     seqs: Vec<Vec<Frag>>,
     scopes: Vec<String>,
+    scope_spans: Vec<(u32, u32)>,
     scope_stack: Vec<u32>,
     frames: Vec<Frame>,
 }
@@ -141,6 +172,7 @@ impl<'a> Builder<'a> {
             nodes: Vec::new(),
             seqs: Vec::new(),
             scopes: Vec::new(),
+            scope_spans: Vec::new(),
             scope_stack: Vec::new(),
             frames: Vec::new(),
         }
@@ -329,6 +361,9 @@ impl<'a> Builder<'a> {
         };
         self.scope_stack.push(self.scopes.len() as u32);
         self.scopes.push(qualified);
+        let range = node.byte_range();
+        self.scope_spans
+            .push((range.start as u32, range.end as u32));
         true
     }
 }

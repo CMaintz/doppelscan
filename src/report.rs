@@ -8,7 +8,7 @@ use std::time::Duration;
 use serde::Serialize;
 
 use crate::detect::RawGroup;
-use crate::engine::score;
+use crate::engine::{Against, Check, score};
 use crate::index::FileIndex;
 use crate::variation::{Variation, analyze, template};
 
@@ -67,7 +67,7 @@ impl Analysis {
         let template = with_template.then(|| template(raw, &self.files, &vars));
         Group {
             id,
-            fingerprint: format!("{:012x}", raw.hash >> 16),
+            fingerprint: fingerprint(raw),
             kind: if raw.run_len == 1 { "node" } else { "run" },
             elements: raw.run_len,
             tokens: raw.tokens,
@@ -99,8 +99,8 @@ impl Analysis {
             return Some(id);
         }
         let key = key.to_ascii_lowercase();
-        let mut hits = (1..=self.groups.len())
-            .filter(|&i| format!("{:012x}", self.groups[i - 1].hash >> 16).starts_with(&key));
+        let mut hits =
+            (1..=self.groups.len()).filter(|&i| fingerprint(&self.groups[i - 1]).starts_with(&key));
         let first = hits.next()?;
         hits.next().is_none().then_some(first)
     }
@@ -141,6 +141,11 @@ impl Analysis {
             elapsed_ms: self.elapsed.as_millis(),
         }
     }
+}
+
+/// Stable across runs while the duplicated code keeps its structure.
+pub fn fingerprint(group: &RawGroup) -> String {
+    format!("{:012x}", group.hash >> 16)
 }
 
 const MAX_VALUE_CHARS: usize = 48;
@@ -283,4 +288,38 @@ fn indent(text: &str) -> String {
         .map(|l| format!("    {l}"))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// New groups in full (an agent has to see every copy to decide which one
+/// to keep), then a hint when the baseline file can shrink.
+pub fn render_check(check: &Check, against: &Against) -> String {
+    let what = against.label();
+    let mut out = if check.new.is_empty() {
+        format!("No new duplication against {what}.\n")
+    } else {
+        format!(
+            "{} new clone group(s) against {what}. Reuse or extract the existing \
+             code; `doppelscan show <fingerprint>` gives the helper template.\n",
+            check.new.len()
+        )
+    };
+    if let Some(note) = &check.note {
+        out.push_str(&format!("{note}\n"));
+    }
+    for &id in &check.new {
+        let group = check.analysis.group(id, false);
+        out.push_str(&format!("\n{}", render_group(&group, Detail::Full)));
+    }
+    if check.resolved > 0 && matches!(against, Against::File(_)) {
+        let entries = if check.resolved == 1 {
+            "entry"
+        } else {
+            "entries"
+        };
+        out.push_str(&format!(
+            "\n{} baseline {entries} no longer match; `doppelscan baseline --prune` shrinks it.\n",
+            check.resolved
+        ));
+    }
+    out
 }
