@@ -101,8 +101,9 @@ literals only), `--only ts,java`, `--exclude 'generated/**'`,
 mapping boilerplate too; in token-level languages a name that differs in
 several places is taken for a renamed local and not counted).
 
-`.gitignore` is honoured, and dependency/build directories, minified bundles
-and files marked as generated are skipped.
+`.gitignore` is honoured, and dependency/build directories, tool caches,
+minified bundles and files marked as generated are skipped. Other
+dot-directories, such as `.github`, are scanned.
 
 ## Gating new duplication
 
