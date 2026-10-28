@@ -8,11 +8,15 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 use crate::engine::ScanOptions;
-use crate::lang::{LANGS, lang_index_by_name};
+use crate::lang::{LANGS, Syntax, lang_index_by_name};
 use crate::report::{Analysis, fingerprint};
 
 pub const DEFAULT_FILE: &str = ".doppelscan-baseline.json";
-const VERSION: u32 = 1;
+/// Version 2 lists the languages it covers even when none were named:
+/// version 1 stored none, which then meant every language the binary knew,
+/// so a release adding languages failed every check on their existing
+/// duplication.
+const VERSION: u32 = 2;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Baseline {
@@ -50,10 +54,9 @@ impl Settings {
             min_tokens: opts.min_tokens,
             strict: opts.strict,
             max_param_density: opts.max_param_density,
-            languages: opts
-                .languages
-                .iter()
-                .map(|&l| LANGS[l].name.to_string())
+            languages: scanned_languages(&opts.languages)
+                .into_iter()
+                .map(|l| LANGS[l].name.to_string())
                 .collect(),
             exclude: opts.exclude.clone(),
         }
@@ -74,6 +77,15 @@ impl Settings {
             exclude: self.exclude.clone(),
             ..base.clone()
         })
+    }
+}
+
+/// The languages a scan with `languages` covers.
+fn scanned_languages(languages: &[usize]) -> Vec<usize> {
+    if languages.is_empty() {
+        (0..LANGS.len()).filter(|&l| !LANGS[l].opt_in).collect()
+    } else {
+        languages.to_vec()
     }
 }
 
@@ -109,8 +121,11 @@ impl Baseline {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading baseline {}", path.display()))?;
-        let baseline: Self = serde_json::from_str(&text)
+        let mut baseline: Self = serde_json::from_str(&text)
             .with_context(|| format!("parsing baseline {}", path.display()))?;
+        if baseline.version == 1 {
+            baseline.upgrade_from_v1();
+        }
         anyhow::ensure!(
             baseline.version == VERSION,
             "baseline {} has version {}; this doppelscan reads version {VERSION}",
@@ -118,6 +133,19 @@ impl Baseline {
             baseline.version
         );
         Ok(baseline)
+    }
+
+    /// Version 1 baselines predate languages read without a grammar, so
+    /// "all languages" meant the grammar ones.
+    fn upgrade_from_v1(&mut self) {
+        if self.settings.languages.is_empty() {
+            self.settings.languages = LANGS
+                .iter()
+                .filter(|l| matches!(l.syntax, Syntax::Tree(_)))
+                .map(|l| l.name.to_string())
+                .collect();
+        }
+        self.version = VERSION;
     }
 
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {

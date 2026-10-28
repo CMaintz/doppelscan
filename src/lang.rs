@@ -31,13 +31,47 @@ pub enum KindClass {
 
 pub struct Lang {
     pub name: &'static str,
-    pub language: Language,
+    pub syntax: Syntax,
     pub extensions: &'static [&'static str],
     /// Plain assignment introduces a local (Python, PHP), so an assigned
     /// name that differs between clones is a rename, not a parameter.
     pub assign_declares: bool,
+    /// Scanned only when named (`--only`), not by default.
+    pub opt_in: bool,
     classes: Vec<KindClass>,
 }
+
+/// How a language is read: parsed with its grammar, or tokenized when no
+/// grammar is bundled.
+pub enum Syntax {
+    Tree(Language),
+    Tokens(Lexicon),
+}
+
+/// What a tokenizer needs to know about a language beyond the shared rules
+/// for names, numbers, strings and brackets.
+pub struct Lexicon {
+    pub line_comments: &'static [&'static str],
+    pub block_comments: &'static [(&'static str, &'static str)],
+    /// Keywords beyond the shared list, for languages whose keywords are
+    /// common names elsewhere (SQL's `order`, `values`).
+    pub keywords: &'static [&'static str],
+    /// Keywords match in any case (SQL's `SELECT`, PowerShell's `If`).
+    pub ignore_case: bool,
+}
+
+const C_LIKE: Lexicon = Lexicon {
+    line_comments: &["//"],
+    block_comments: &[("/*", "*/")],
+    keywords: &[],
+    ignore_case: false,
+};
+const HASH: Lexicon = Lexicon {
+    line_comments: &["#"],
+    block_comments: &[],
+    keywords: &[],
+    ignore_case: false,
+};
 
 impl Lang {
     fn new(
@@ -51,11 +85,28 @@ impl Lang {
             .collect();
         Self {
             name,
-            language,
+            syntax: Syntax::Tree(language),
             extensions,
             assign_declares,
+            opt_in: false,
             classes,
         }
+    }
+
+    fn tokens(name: &'static str, lexicon: Lexicon, extensions: &'static [&'static str]) -> Self {
+        Self {
+            name,
+            syntax: Syntax::Tokens(lexicon),
+            extensions,
+            assign_declares: false,
+            opt_in: false,
+            classes: Vec::new(),
+        }
+    }
+
+    fn opt_in(mut self) -> Self {
+        self.opt_in = true;
+        self
     }
 
     pub fn class_of(&self, kind_id: u16) -> KindClass {
@@ -66,11 +117,17 @@ impl Lang {
     }
 
     pub fn kind_name(&self, kind_id: u16) -> &str {
-        self.language.node_kind_for_id(kind_id).unwrap_or("")
+        match &self.syntax {
+            Syntax::Tree(language) => language.node_kind_for_id(kind_id).unwrap_or(""),
+            Syntax::Tokens(_) => "",
+        }
     }
 
     pub fn field_name(&self, field_id: Option<std::num::NonZeroU16>) -> Option<&str> {
-        self.language.field_name_for_id(field_id?.get())
+        match &self.syntax {
+            Syntax::Tree(language) => language.field_name_for_id(field_id?.get()),
+            Syntax::Tokens(_) => None,
+        }
     }
 }
 
@@ -128,6 +185,107 @@ pub static LANGS: LazyLock<Vec<Lang>> = LazyLock::new(|| {
             tree_sitter_html::LANGUAGE.into(),
             &["html", "htm"],
             false,
+        ),
+        // Without a bundled grammar these are matched token by token: exact
+        // and renamed copies, but no rename analysis and no near-misses.
+        // Curated rather than "any text file" so data (JSON, lock files) and
+        // prose stay out.
+        // One language, so a header (`.h` is C's and C++'s) matches the
+        // sources that include it.
+        Lang::tokens(
+            "c-family",
+            C_LIKE,
+            &[
+                "c", "h", "cpp", "cc", "cxx", "hpp", "hh", "hxx", "ino", "m", "mm",
+            ],
+        ),
+        Lang::tokens("scala", C_LIKE, &["scala", "sc"]),
+        Lang::tokens("groovy", C_LIKE, &["groovy", "gradle"]),
+        Lang::tokens("dart", C_LIKE, &["dart"]),
+        Lang::tokens("zig", C_LIKE, &["zig"]),
+        Lang::tokens("solidity", C_LIKE, &["sol"]),
+        Lang::tokens("protobuf", C_LIKE, &["proto"]),
+        Lang::tokens("scss", C_LIKE, &["scss", "less"]),
+        Lang::tokens(
+            "vue",
+            Lexicon {
+                line_comments: &["//"],
+                block_comments: &[("/*", "*/"), ("<!--", "-->")],
+                keywords: &[],
+                ignore_case: false,
+            },
+            &["vue", "svelte"],
+        ),
+        Lang::tokens(
+            "sql",
+            Lexicon {
+                line_comments: &["--"],
+                block_comments: &[("/*", "*/")],
+                keywords: &[
+                    "select", "insert", "update", "into", "values", "join", "on", "group", "order",
+                    "by", "having", "create", "table", "alter", "drop", "set", "limit", "distinct",
+                    "left", "right", "inner", "outer", "exists", "between", "like",
+                ],
+                ignore_case: true,
+            },
+            &["sql"],
+        ),
+        Lang::tokens(
+            "lua",
+            Lexicon {
+                line_comments: &["--"],
+                block_comments: &[("--[[", "]]")],
+                keywords: &[],
+                ignore_case: false,
+            },
+            &["lua"],
+        ),
+        Lang::tokens(
+            "haskell",
+            Lexicon {
+                line_comments: &["--"],
+                block_comments: &[("{-", "-}")],
+                keywords: &[],
+                ignore_case: false,
+            },
+            &["hs", "elm"],
+        ),
+        Lang::tokens(
+            "ruby",
+            Lexicon {
+                line_comments: &["#"],
+                block_comments: &[("=begin", "=end")],
+                keywords: &[],
+                ignore_case: false,
+            },
+            &["rb", "rake"],
+        ),
+        Lang::tokens("shell", HASH, &["sh", "bash", "zsh"]),
+        Lang::tokens(
+            "powershell",
+            Lexicon {
+                line_comments: &["#"],
+                block_comments: &[("<#", "#>")],
+                keywords: &[],
+                ignore_case: true,
+            },
+            &["ps1", "psm1"],
+        ),
+        Lang::tokens("perl", HASH, &["pl", "pm"]),
+        Lang::tokens("r", HASH, &["r"]),
+        Lang::tokens("elixir", HASH, &["ex", "exs"]),
+        // Mostly data (fixtures, API specs, manifests), which would bury the
+        // code results; scanned with `--only yaml`.
+        Lang::tokens("yaml", HASH, &["yml", "yaml"]).opt_in(),
+        Lang::tokens(
+            "terraform",
+            Lexicon {
+                line_comments: &["#", "//"],
+                block_comments: &[("/*", "*/")],
+                keywords: &[],
+                ignore_case: false,
+            },
+            &["tf", "hcl"],
         ),
     ]
 });

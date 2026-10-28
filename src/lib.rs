@@ -12,6 +12,7 @@ mod git;
 mod hash;
 pub mod index;
 pub mod lang;
+mod lexical;
 pub mod mcp;
 pub mod near;
 pub mod report;

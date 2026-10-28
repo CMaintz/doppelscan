@@ -5,15 +5,16 @@
 
 Fast, syntax-aware duplicate code finder built for coding agents.
 
-doppelscan parses your code with tree-sitter and finds fragments that have the
-same structure, even when names and literals differ, in the spirit of
+doppelscan parses your code with tree-sitter (or tokenizes it, for languages
+without a bundled grammar) and finds fragments that have the same structure, even when names and literals differ, in the spirit of
 IntelliJ's duplicate detection. Each clone group comes with what an agent needs
 to extract a shared helper:
 
 - **parameters**: values that differ between occurrences and would become
   helper arguments, labelled by what the helper takes: `type` (a generic),
-  `function` (a callback), `member` (a key or accessor), or unlabelled for a
-  plain value or literal (`kind` in the JSON output),
+  `function` (a callback), `member` (a key or accessor), `name` (in a
+  token-level language, a name that may be a parameter or a rename), or
+  unlabelled for a plain value or literal (`kind` in the JSON output),
 - **renames**: locals the fragment binds itself (variables, its own
   parameters, loop and lambda variables), which differ but need no argument,
 - **declares**: names the fragment declares for other code (methods, fields,
@@ -41,6 +42,18 @@ call it as a tool.
 
 TypeScript, TSX, JavaScript, Java, C#, Kotlin, Swift, PHP, Python, Go, Rust, CSS, HTML
 (including Angular and other framework templates, matched as markup).
+
+Without a bundled grammar, these are matched token by token: C, C++,
+Objective-C, Scala, Groovy and Gradle, Dart, Zig, Solidity, Protobuf,
+SCSS/Less, Vue/Svelte, SQL, Lua, Haskell/Elm, Ruby, shell, PowerShell, Perl,
+R, Elixir, Terraform/HCL, and YAML. They find exact and renamed copies, with
+three differences: a name that differs is listed as a `name` parameter (the
+tokens cannot tell a parameter from a rename, so there are no `renames`),
+only names that differ in a single place count toward
+`--max-param-density`, and `near` skips them. YAML is mostly data (fixtures,
+API specs, manifests), so it is scanned only when asked for: `--only yaml`,
+a `.yml` file named directly, or `at` and `similar` on YAML. Other file
+types, JSON and lock files among them, are not scanned.
 
 ## Install
 
@@ -85,7 +98,8 @@ are often near copies of each other by design, so `--exclude '**/*.test.ts'`
 Useful options: `--min-tokens` (default 50), `--strict` (identical names and
 literals only), `--only ts,java`, `--exclude 'generated/**'`,
 `--max-param-density` (default 8 per 100 tokens; higher shows data tables and
-mapping boilerplate too).
+mapping boilerplate too; in token-level languages a name that differs in
+several places is taken for a renamed local and not counted).
 
 `.gitignore` is honoured, and dependency/build directories, minified bundles
 and files marked as generated are skipped.
@@ -175,6 +189,11 @@ find-extract-verify loop for agents.
    scope, so a same-spelled name elsewhere is still a parameter, and a member
    access (`this.x`) only follows a field the fragment declares itself.
 
+Files without a grammar go through a tokenizer instead: braces become
+blocks, a block's statements (split at `;`, at line ends outside brackets,
+and at commas between braces) become the sequences of step 3, and keywords
+are hashed by text so only names and literals are anonymised.
+
 Near-miss detection (`near`) compares whole functions instead. Each
 function's normalized tokens are cut into 10-token windows and fingerprinted
 with winnowing ([Schleimer, Wilkerson and Aiken, SIGMOD
@@ -209,6 +228,12 @@ skips because they cannot be extracted as one unit.
   classes without field declarations), are not known to be fields, so
   `self.x` shows as a `member` parameter beside the `x` rename.
 - Matches stay within one language.
+- Token-level languages split statements by layout, so the same code
+  formatted differently (a statement broken over lines outside brackets)
+  can fail to match.
+- Baselines record the languages they cover. One written by an older
+  release (version 1) keeps covering only the grammar languages until it is
+  written again with `doppelscan baseline`.
 
 ## Contributing
 

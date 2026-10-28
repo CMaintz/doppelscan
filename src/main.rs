@@ -13,8 +13,9 @@ use doppelscan::report::{Analysis, Detail, render_check, render_group, render_su
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-/// Find duplicated code by syntax structure, with the parameters an
-/// extracted helper would need.
+/// Find duplicated code by syntax structure (or tokens, for languages
+/// without a bundled grammar), with the parameters an extracted helper
+/// would need.
 #[derive(Parser)]
 #[command(version, args_conflicts_with_subcommands = true)]
 struct Cli {
@@ -76,7 +77,8 @@ enum Command {
         common: Common,
     },
     /// Near-miss clones: functions alike except for added, removed or
-    /// changed statements, which the exact scan cannot align.
+    /// changed statements, which the exact scan cannot align. Languages
+    /// read without a grammar are skipped.
     Near {
         /// Smallest similarity reported, 0 to 1.
         #[arg(long, default_value_t = 0.8)]
@@ -106,13 +108,16 @@ struct Common {
     /// Match identifiers and literals exactly (copy-paste clones only).
     #[arg(long)]
     strict: bool,
-    /// Only these languages (comma-separated names or extensions).
+    /// Only these languages (comma-separated names or extensions); yaml is
+    /// scanned only when named here.
     #[arg(long = "only", value_delimiter = ',')]
     only: Vec<String>,
     /// Glob to skip; repeatable.
     #[arg(long)]
     exclude: Vec<String>,
-    /// Drop groups needing more parameters than this per 100 tokens.
+    /// Drop groups needing more parameters than this per 100 tokens (in
+    /// token-level languages, names differing in several places are not
+    /// counted).
     #[arg(long, default_value_t = 8.0)]
     max_param_density: f32,
     #[arg(long, value_enum, default_value_t = Format::Text)]
@@ -258,7 +263,8 @@ fn show(engine: &Engine, id: &str, common: &Common) -> anyhow::Result<()> {
 
 fn at(engine: &Engine, location: &str, common: &Common) -> anyhow::Result<()> {
     let (file, from, to) = parse_location(location)?;
-    let analysis = engine.scan(&common.path, &options(common)?)?;
+    let opts = options(common)?.narrowed_to(lang_index_for_path(file.as_ref()));
+    let analysis = engine.scan(&common.path, &opts)?;
     print_groups(
         &analysis,
         &analysis.overlapping(&file, from, to),

@@ -14,7 +14,7 @@ use crate::baseline::{Baseline, Settings};
 use crate::detect::{RawGroup, detect};
 use crate::index::{FileIndex, MIN_STORED_TOKENS, index_source};
 use crate::report::Analysis;
-use crate::variation;
+use crate::variation::{self, Kind, Variation};
 use crate::walk::{MAX_FILE_BYTES, discover, looks_generated};
 
 #[derive(Clone, Debug)]
@@ -22,12 +22,14 @@ pub struct ScanOptions {
     pub min_tokens: u32,
     /// Exact-text matching only: identifiers and literals must match too.
     pub strict: bool,
-    /// Language indices into `LANGS`; empty means all.
+    /// Language indices into `LANGS`; empty means every language that is
+    /// not opt-in.
     pub languages: Vec<usize>,
     pub exclude: Vec<String>,
     /// Groups needing more parameters than this per 100 tokens (and more
     /// than [`FREE_PARAMS`]) are dropped: they are tables of data or mapping
-    /// boilerplate, not a helper waiting to be extracted.
+    /// boilerplate, not a helper waiting to be extracted. Which parameters
+    /// count is [`counts_as_parameter`].
     pub max_param_density: f32,
     /// Result paths are shown relative to this; default is the scanned path.
     pub display_base: Option<PathBuf>,
@@ -43,6 +45,22 @@ impl Default for ScanOptions {
             max_param_density: 8.0,
             display_base: None,
         }
+    }
+}
+
+impl ScanOptions {
+    /// These options restricted to `lang` when they name no languages, for
+    /// a question about one file or snippet: its clones are all in its
+    /// language, and an opt-in language (YAML) is then scanned because it
+    /// was asked about.
+    pub fn narrowed_to(&self, lang: Option<usize>) -> Self {
+        let mut opts = self.clone();
+        if let Some(lang) = lang
+            && opts.languages.is_empty()
+        {
+            opts.languages = vec![lang];
+        }
+        opts
     }
 }
 
@@ -162,7 +180,12 @@ pub fn analyze(files: Vec<Arc<FileIndex>>, opts: &ScanOptions, started: Instant)
     let density = opts.max_param_density;
     let mut groups: Vec<RawGroup> = detect(&files, min_tokens, |g| {
         let allowed = (density * g.tokens as f32 / 100.0).max(FREE_PARAMS);
-        variation::analyze(g, &files).parameters.len() as f32 <= allowed
+        let params = variation::analyze(g, &files)
+            .parameters
+            .iter()
+            .filter(|p| counts_as_parameter(p))
+            .count();
+        params as f32 <= allowed
     });
     groups.sort_by(|a, b| score(b).cmp(&score(a)).then(a.hash.cmp(&b.hash)));
     Analysis {
@@ -170,6 +193,15 @@ pub fn analyze(files: Vec<Arc<FileIndex>>, opts: &ScanOptions, started: Instant)
         groups,
         elapsed: started.elapsed(),
     }
+}
+
+/// A name that differs in several places, in a file read without a
+/// grammar, is most likely a renamed local, which the tokens cannot tell
+/// from a parameter; counting those would drop every renamed copy. One
+/// that differs once is counted, or same-shaped unrelated code (shell
+/// lines, SQL statements) would pass the veto.
+fn counts_as_parameter(p: &Variation) -> bool {
+    p.kind != Kind::Name || p.uses == 1
 }
 
 /// A small clone with a couple of arguments is still a fine helper, so the
@@ -193,6 +225,7 @@ impl Engine {
         opts: &ScanOptions,
     ) -> anyhow::Result<(Analysis, Vec<usize>)> {
         let started = Instant::now();
+        let opts = &opts.narrowed_to(Some(lang));
         let mut files = self.index_tree(root, opts)?;
         let text = snippet_text(code, lang);
         files.extend(index_sources(

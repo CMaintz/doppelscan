@@ -37,6 +37,9 @@ pub enum Kind {
     Member,
     Literal,
     Value,
+    /// A name in a file read without a grammar: a parameter or a rename,
+    /// which the tokens cannot tell apart.
+    Name,
 }
 
 impl Kind {
@@ -190,6 +193,8 @@ fn kind_of(slot: &Slot) -> Kind {
     }
     if slot.literal {
         Kind::Literal
+    } else if any(Role::Unresolved) {
+        Kind::Name
     } else if any(Role::Type) {
         Kind::Type
     } else if any(Role::Callee) {
