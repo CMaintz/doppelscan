@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 
 use crate::baseline::Baseline;
 use crate::engine::{Against, Engine, ScanOptions};
-use crate::lang::{LANGS, lang_index_by_name};
+use crate::lang::{LANGS, lang_index_by_name, lang_index_for_path};
 use crate::near::{render_near, render_near_summary};
 use crate::report::{Analysis, Detail, render_check, render_group, render_summary};
 
@@ -300,7 +300,8 @@ fn duplicates_at(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<S
             u32::MAX as u64
         },
     ) as u32;
-    let analysis = engine.scan(&scan_root(root, args)?, &options(root, args, 50)?)?;
+    let opts = options(root, args, 50)?.narrowed_to(lang_index_for_path(file.as_ref()));
+    let analysis = engine.scan(&scan_root(root, args)?, &opts)?;
     let ids = analysis.overlapping(file, from, to);
     if ids.is_empty() {
         return Ok(format!(
@@ -378,7 +379,7 @@ fn tool_definitions() -> Value {
     let common = json!({
         "path": { "type": "string", "description": "Directory or file to scan, relative to the server root. Default: the root." },
         "min_tokens": { "type": "integer", "minimum": 8, "description": "Smallest clone reported, in syntax tokens. Default 50." },
-        "languages": { "type": "array", "items": { "type": "string" }, "description": format!("Restrict to these languages: {}.", known_langs()) },
+        "languages": { "type": "array", "items": { "type": "string" }, "description": format!("Restrict to these languages: {}. yaml is scanned only when listed here.", known_langs()) },
         "exclude": { "type": "array", "items": { "type": "string" }, "description": "Globs to skip, e.g. \"**/*.test.ts\"." },
         "strict": { "type": "boolean", "description": "Require identical names and literals (copy-paste clones only)." },
     });
@@ -394,7 +395,7 @@ fn tool_definitions() -> Value {
         {
             "name": "find_duplicates",
             "title": "Find duplicated code",
-            "description": "List clone groups in a codebase, ranked by how much code extracting a shared helper would remove. Each group lists its locations, the values that differ per occurrence (helper parameters) and names that are merely renamed locals.",
+            "description": "List clone groups in a codebase, ranked by how much code extracting a shared helper would remove. Each group lists its locations, the values that differ per occurrence (helper parameters) and names that are merely renamed locals (in languages read without a grammar, differing names are all listed as `name` parameters).",
             "inputSchema": { "type": "object", "properties": with(json!({
                 "limit": { "type": "integer", "description": "Groups to return; 0 for all. Default 15." },
                 "offset": { "type": "integer", "description": "Skip this many groups (pagination)." },
@@ -446,7 +447,7 @@ fn tool_definitions() -> Value {
         {
             "name": "find_near_duplicates",
             "title": "Find near-duplicate functions",
-            "description": "Functions that are mostly the same but not exact clones: a copy with statements added, removed or changed. Each group lists every copy and the line ranges where it differs from the others; read those lines before merging the copies into one function with an option or callback for the difference.",
+            "description": "Functions that are mostly the same but not exact clones: a copy with statements added, removed or changed. Each group lists every copy and the line ranges where it differs from the others; read those lines before merging the copies into one function with an option or callback for the difference. Languages read without a grammar (C, shell, SQL, ...) are skipped.",
             "inputSchema": { "type": "object", "properties": with(json!({
                 "similarity": { "type": "number", "minimum": 0, "maximum": 1, "description": "Smallest similarity reported. Default 0.8." },
                 "limit": { "type": "integer", "description": "Groups to return; 0 for all. Default 15." },

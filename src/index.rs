@@ -11,7 +11,8 @@ use tree_sitter::{Node, Parser, TreeCursor};
 
 use crate::hash::{combine, hash_bytes, seed};
 use crate::lang::{
-    KindClass, LANGS, Lang, is_binding_site, is_class_like, is_function_like, is_member_position,
+    KindClass, LANGS, Lang, Syntax, is_binding_site, is_class_like, is_function_like,
+    is_member_position,
 };
 
 /// Nodes cheaper than this are never stored; callers clamp `min_tokens` to it.
@@ -66,6 +67,9 @@ pub enum Role {
     /// An object member being read or written.
     Member,
     Value,
+    /// A name in a file read without a grammar, where nothing says what it
+    /// does.
+    Unresolved,
 }
 
 impl Role {
@@ -109,7 +113,7 @@ pub struct FileIndex {
     /// compares.
     pub units: Vec<Frag>,
     /// Byte offset where each line starts, for mapping leaves to lines.
-    line_starts: Vec<u32>,
+    pub(crate) line_starts: Vec<u32>,
     /// Qualified names ("Class.method") that `Frag::scope` indexes into.
     pub scopes: Vec<String>,
     /// Byte range of each scope's definition, parallel to `scopes`.
@@ -162,7 +166,17 @@ impl FileIndex {
     }
 }
 
-fn line_starts(source: &str) -> Vec<u32> {
+/// The hash of a name (category 1), string (2) or number (3): one value
+/// per category, so copies differing in them still collide, unless strict.
+pub(crate) fn placeholder(strict: bool, category: u64, text: &[u8]) -> u64 {
+    if strict {
+        combine(category, hash_bytes(text))
+    } else {
+        category.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+    }
+}
+
+pub(crate) fn line_starts(source: &str) -> Vec<u32> {
     std::iter::once(0)
         .chain(source.match_indices('\n').map(|(i, _)| i as u32 + 1))
         .collect()
@@ -175,7 +189,15 @@ pub fn index_source(
     source: String,
     strict: bool,
 ) -> Option<FileIndex> {
-    parser.set_language(&LANGS[lang].language).ok()?;
+    let language = match &LANGS[lang].syntax {
+        Syntax::Tree(language) => language,
+        Syntax::Tokens(lexicon) => {
+            return Some(crate::lexical::index_tokens(
+                path, lang, source, strict, lexicon,
+            ));
+        }
+    };
+    parser.set_language(language).ok()?;
     let tree = parser.parse(&source, None)?;
     let mut builder = Builder::new(&LANGS[lang], &source, strict);
     builder.walk(&mut tree.walk());
@@ -335,9 +357,9 @@ impl<'a> Builder<'a> {
     fn push_leaf(&mut self, node: Node, class: KindClass, field: Option<NonZeroU16>) -> u64 {
         let text = &self.source.as_bytes()[node.byte_range()];
         let (leaf_class, hash) = match class {
-            KindClass::Identifier => (LeafClass::Identifier, self.placeholder(1, text)),
-            KindClass::StringLit => (LeafClass::Literal, self.placeholder(2, text)),
-            KindClass::NumberLit => (LeafClass::Literal, self.placeholder(3, text)),
+            KindClass::Identifier => (LeafClass::Identifier, placeholder(self.strict, 1, text)),
+            KindClass::StringLit => (LeafClass::Literal, placeholder(self.strict, 2, text)),
+            KindClass::NumberLit => (LeafClass::Literal, placeholder(self.strict, 3, text)),
             _ => (
                 LeafClass::Other,
                 combine(node.kind_id() as u64, hash_bytes(text)),
@@ -376,14 +398,6 @@ impl<'a> Builder<'a> {
     fn claim_top_level(&mut self) {
         for i in self.pending_locals.drain(..) {
             self.leaves[i as usize].scope = WHOLE_FILE;
-        }
-    }
-
-    fn placeholder(&self, category: u64, text: &[u8]) -> u64 {
-        if self.strict {
-            combine(category, hash_bytes(text))
-        } else {
-            category.wrapping_mul(0x9E37_79B9_7F4A_7C15)
         }
     }
 

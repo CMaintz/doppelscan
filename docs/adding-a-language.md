@@ -16,6 +16,21 @@ grammar loads, so most languages work once their grammar is registered.
    minimum.
 4. Add the language to the list in `README.md`.
 
+A language without a usable grammar can be added as token-level instead:
+
+1. Add a `Lang::tokens(...)` entry with a `Lexicon`: its line and block
+   comment markers (`C_LIKE` and `HASH` cover the common ones), keywords
+   that are common names elsewhere (as SQL has), and `ignore_case` when its
+   keywords are case-insensitive. Names, numbers, strings and brackets are
+   read the same way for every language and cannot be configured.
+2. Call `.opt_in()` on it when its files are mostly data (as YAML's are),
+   so it is scanned only when named.
+3. Add its comment syntax to `every_token_language_skips_its_comments` in
+   `tests/lexical.rs`, and a test for anything it reads differently.
+4. Add it to the token-level list in `README.md`.
+
+Move it to a grammar once one fits.
+
 ## When it does not match
 
 Dump the syntax tree of a fixture to see what the grammar calls things:

@@ -22,7 +22,11 @@ Use the MCP tools when available (`find_duplicates`, `get_duplicate_group`,
 - `params`: values that differ per occurrence, one column per occurrence.
   Each becomes a helper argument, and its label says what kind: `$1:type`
   is a generic, `$2:function` a callback, `$3:member` a property key or
-  accessor; unlabelled ones are plain values or literals.
+  accessor; unlabelled ones are plain values or literals. `$4:name` appears
+  in languages read without a grammar (C, shell, SQL, ...): a differing name
+  that may be a parameter or a renamed local. Check the code; a name bound
+  inside the fragment (a local, its own parameter) needs no argument. Those
+  groups have no `renames`, and `find_near_duplicates` skips their files.
 - `renames`: locals the fragment binds itself. Pick one name in the helper;
   they need no argument.
 - `declares`: methods, fields or classes the fragment declares. Other code

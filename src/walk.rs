@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use ignore::overrides::{Override, OverrideBuilder};
 use ignore::{WalkBuilder, WalkState};
 
-use crate::lang::lang_index_for_path;
+use crate::lang::{LANGS, lang_index_for_path};
 
 const EXCLUDED_DIRS: &[&str] = &[
     "node_modules",
@@ -49,6 +49,10 @@ pub fn discover(
     exclude: &[String],
     languages: &[usize],
 ) -> anyhow::Result<Vec<(PathBuf, usize)>> {
+    // A file named directly is scanned even in an opt-in language.
+    let named = root.is_file() && languages.is_empty();
+    let own: Vec<usize> = lang_index_for_path(root).into_iter().collect();
+    let languages = if named { &own[..] } else { languages };
     let walker = WalkBuilder::new(root)
         .require_git(false)
         .overrides(exclude_overrides(root, exclude)?)
@@ -111,7 +115,12 @@ fn accept(path: &Path, languages: &[usize]) -> Option<(PathBuf, usize)> {
         return None;
     }
     let lang = lang_index_for_path(path)?;
-    (languages.is_empty() || languages.contains(&lang)).then(|| (path.to_path_buf(), lang))
+    let wanted = if languages.is_empty() {
+        !LANGS[lang].opt_in
+    } else {
+        languages.contains(&lang)
+    };
+    wanted.then(|| (path.to_path_buf(), lang))
 }
 
 /// Minified bundles and generated files are duplication nobody should

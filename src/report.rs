@@ -247,6 +247,7 @@ fn render_variations(
                 Kind::Type => ":type",
                 Kind::Function => ":function",
                 Kind::Member => ":member",
+                Kind::Name => ":name",
                 // Plain values and literals (which show their quotes or
                 // digits) stay unlabelled to keep listings short.
                 _ => "",
