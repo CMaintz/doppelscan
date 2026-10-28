@@ -123,6 +123,12 @@ pub static LANGS: LazyLock<Vec<Lang>> = LazyLock::new(|| {
         Lang::new("go", tree_sitter_go::LANGUAGE.into(), &["go"], false),
         Lang::new("rust", tree_sitter_rust::LANGUAGE.into(), &["rs"], false),
         Lang::new("css", tree_sitter_css::LANGUAGE.into(), &["css"], false),
+        Lang::new(
+            "html",
+            tree_sitter_html::LANGUAGE.into(),
+            &["html", "htm"],
+            false,
+        ),
     ]
 });
 
@@ -151,7 +157,7 @@ fn classify_kind(language: &Language, id: u16) -> KindClass {
         KindClass::Comment
     } else if is_noise(kind) {
         KindClass::Noise
-    } else if kind.contains("identifier") || kind == "name" {
+    } else if kind.contains("identifier") || kind == "name" || kind == "implicit_parameter" {
         KindClass::Identifier
     } else if is_string(kind) {
         KindClass::StringLit
@@ -175,6 +181,10 @@ fn is_noise(kind: &str) -> bool {
 }
 
 fn is_string(kind: &str) -> bool {
+    // Markup's text and attribute values are its literals.
+    if kind == "text" || kind.contains("attribute_value") {
+        return true;
+    }
     let stringy = kind.contains("string") || (kind.contains("char") && kind.contains("literal"));
     // Interpolated strings are walked so the embedded expressions still count.
     stringy && !kind.contains("interpolat") && !kind.contains("template")
@@ -214,6 +224,9 @@ fn is_block(kind: &str) -> bool {
         "default_case",
         "communication_case",
         "chunk",
+        // Markup: an element's children are a sequence like statements.
+        "document",
+        "element",
     ];
     [
         "block",
@@ -289,12 +302,111 @@ pub fn is_binding_site(lang: &Lang, parent_kind: &str, field: Option<&str>) -> b
         "for",
         "item",
         "range_clause",
+        "lambda",
+        "closure",
+        "arrow_function",
     ]
     .iter()
     .any(|w| parent_kind.contains(w));
     let binding_field = matches!(
         field,
-        None | Some("name" | "pattern" | "bound_identifier" | "left")
+        None | Some("name" | "pattern" | "left" | "parameter" | "parameters" | "item")
     );
-    declish && binding_field
+    // `{ id: first }` binds `first`, but `x = first` only reads it.
+    let pattern_value = field == Some("value") && parent_kind.contains("pattern");
+    declish && (binding_field || pattern_value)
+}
+
+/// Kinds that open a scope for their parameters and locals.
+pub fn is_function_like(kind: &str) -> bool {
+    // Swift initialisers and Go function literals use none of the words.
+    let named = matches!(
+        kind,
+        "init_declaration" | "deinit_declaration" | "subscript_declaration" | "func_literal"
+    );
+    let callable = [
+        "function",
+        "method",
+        "lambda",
+        "closure",
+        "constructor",
+        "arrow",
+        "accessor",
+    ]
+    .iter()
+    .any(|w| kind.contains(w));
+    // `lambda_parameter(s)` sits inside the lambda, not around it, and
+    // PHP's `function_static_declaration` is a statement.
+    let reference = [
+        "invocation",
+        "call",
+        "type",
+        "reference",
+        "modifier",
+        "parameter",
+        "static",
+        // `constructor_body` is the block, not the constructor.
+        "body",
+    ]
+    .iter()
+    .any(|w| kind.contains(w));
+    named || (callable && !reference)
+}
+
+/// Kinds whose direct bindings are members other code can reach.
+pub fn is_class_like(kind: &str) -> bool {
+    let owner = [
+        "class",
+        "interface",
+        "struct",
+        "object",
+        "enum",
+        "trait",
+        "protocol",
+        "record",
+    ]
+    .iter()
+    .any(|w| kind.contains(w));
+    // Rust's `impl` blocks, matched exactly: `simple_parameter` contains it.
+    let owner = owner || kind == "impl_item";
+    let value = ["pattern", "literal", "expression", "type", "creation"]
+        .iter()
+        .any(|w| kind.contains(w));
+    owner && !value
+}
+
+/// A name read where an object's member goes: `order.amount`, `self.x`.
+pub fn is_member_position(
+    kind: &str,
+    parent_kind: &str,
+    field: Option<&str>,
+    first_child: bool,
+) -> bool {
+    // Kotlin's `navigation_expression` has no fields: the receiver comes
+    // first and the member after it.
+    if parent_kind == "navigation_expression" && field.is_none() {
+        return !first_child;
+    }
+    // `{ name }` is shorthand for `{ name: name }`: it reads the local.
+    if kind.contains("shorthand") {
+        return false;
+    }
+    if kind.contains("property_identifier") || kind.contains("field_identifier") {
+        return true;
+    }
+    let access = [
+        "member",
+        "field_access",
+        "attribute",
+        "selector",
+        "navigation",
+        "field_expression",
+    ]
+    .iter()
+    .any(|w| parent_kind.contains(w));
+    access
+        && matches!(
+            field,
+            Some("property" | "field" | "attribute" | "name" | "suffix")
+        )
 }

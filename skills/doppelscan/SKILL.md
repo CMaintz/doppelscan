@@ -9,19 +9,26 @@ doppelscan finds code with the same syntax structure even when names and
 literals differ, and tells you what a shared helper would take as arguments.
 
 Use the MCP tools when available (`find_duplicates`, `get_duplicate_group`,
-`duplicates_at`, `find_similar_code`). Otherwise use the CLI: `doppelscan`,
-`doppelscan show <fingerprint>`, `doppelscan at <file>:<from>-<to>`,
-`doppelscan similar --lang <ext> < snippet`.
+`find_near_duplicates`, `duplicates_at`, `find_similar_code`,
+`check_new_duplicates`). Otherwise use the CLI: `doppelscan`,
+`doppelscan show <fingerprint>`, `doppelscan near`,
+`doppelscan at <file>:<from>-<to>`, `doppelscan similar --lang <ext> < snippet`,
+`doppelscan check`.
 
 ## Reading a group
 
 - `x9`: nine occurrences. `score` is tokens x (occurrences - 1), the code an
   extraction removes. Work on high scores first.
 - `params`: values that differ per occurrence, one column per occurrence.
-  Each becomes a helper argument. An identifier parameter that is called is a
-  function to pass in; a type parameter means a generic.
-- `renames`: names the fragment declares itself. Pick one name in the helper;
+  Each becomes a helper argument, and its label says what kind: `$1:type`
+  is a generic, `$2:function` a callback, `$3:member` a property key or
+  accessor; unlabelled ones are plain values or literals.
+- `renames`: locals the fragment binds itself. Pick one name in the helper;
   they need no argument.
+- `declares`: methods, fields or classes the fragment declares. Other code
+  calls them by name, so keeping one means updating the callers of the
+  others. Many `member` params plus `declares` usually mean parallel
+  classes (entities, DTOs); prefer a shared base or generation over a helper.
 - `template`: the helper body, with parameters as `$1`, `$2`, ...
 
 ## Extracting a helper
@@ -41,10 +48,29 @@ Use the MCP tools when available (`find_duplicates`, `get_duplicate_group`,
 5. Run the tests, then `duplicates_at` on a former occurrence: the group should
    be gone.
 
+## Near duplicates
+
+`find_near_duplicates` (CLI: `doppelscan near`) lists functions that are
+copies with statements added, removed or changed. It gives no template:
+read each copy's `differs` lines (code that copy has and another lacks; a
+copy without any only lacks code), then merge the copies into one function
+and turn each difference into a parameter, an option or a callback. If the
+differences are most of the function, leave the copies alone. Near groups
+have no fingerprint and are not covered by `check_new_duplicates`.
+
 ## Before writing new code
 
 Call `find_similar_code` with the function or statements you are about to
 write. If it matches, reuse or generalise the existing code instead.
+
+## Before committing
+
+Call `check_new_duplicates` (or run `doppelscan check`). It reports only the
+clone groups your change added: against the repo's baseline file when it has
+one, otherwise against HEAD (pass `base: "main"` to cover a whole branch). For each one, reuse the existing code it points to or
+extract a helper, then check again. Never run `doppelscan baseline` to make
+the check pass: that accepts the duplication. `doppelscan baseline --prune`
+after removing duplication is fine.
 
 ## Tuning
 

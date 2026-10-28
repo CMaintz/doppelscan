@@ -141,7 +141,9 @@ fn locals_are_renames_and_outside_values_are_parameters() {
     let a = scan(&[("a.ts", SUM_TOTALS), ("b.ts", SUM_REFUNDS)]);
     let g = a.group(1, true);
     let params: Vec<&str> = g.parameters.iter().map(|v| v.values[0].as_str()).collect();
-    let renames: Vec<&str> = g.renames.iter().map(|v| v.values[0].as_str()).collect();
+    let renames: Vec<&str> = (g.renames.iter().chain(&g.declares))
+        .map(|v| v.values[0].as_str())
+        .collect();
     for local in ["total", "order", "sumTotals", "orders", "config"] {
         assert!(
             renames.contains(&local),
@@ -550,4 +552,82 @@ fn brief_rendering_stays_small_for_widely_repeated_code() {
     assert!(brief.contains("$1=\"even\" | \"odd\"\n"), "{brief}");
     let full = doppelscan::report::render_group(&g, doppelscan::report::Detail::Full);
     assert_eq!(full.matches("\"even\"").count(), 4, "{full}");
+}
+
+const CARD: &str = r#"<section class="card">
+  <header class="card-header">
+    <h2 class="card-title">@title</h2>
+    <button type="button" class="close" (click)="@action()">Close</button>
+  </header>
+  <div class="card-body">
+    <p class="lead">@text</p>
+    <a class="more" href="@href">Read more</a>
+  </div>
+</section>
+"#;
+
+fn card(title: &str, action: &str, text: &str, href: &str) -> String {
+    CARD.replace("@title", title)
+        .replace("@action", action)
+        .replace("@text", text)
+        .replace("@href", href)
+}
+
+// Catches HTML text and attribute values hashed verbatim, which would hide
+// every template copy whose labels differ.
+#[test]
+fn html_copies_differing_in_text_and_attributes_are_one_clone() {
+    let a = scan(&[
+        (
+            "a.html",
+            &card("Orders", "closeOrders", "Your orders", "/orders"),
+        ),
+        (
+            "b.html",
+            &card("Refunds", "closeRefunds", "Your refunds", "/refunds"),
+        ),
+    ]);
+    assert_eq!(a.groups.len(), 1);
+    let g = a.group(1, false);
+    let params: Vec<&str> = g.parameters.iter().map(|v| v.values[0].as_str()).collect();
+    assert!(params.contains(&"Orders"), "{params:?}");
+    assert!(params.contains(&"\"/orders\""), "{params:?}");
+}
+
+// Catches tag names becoming placeholders: the same shape built from
+// different elements is different markup.
+#[test]
+fn html_with_different_tags_is_not_a_clone() {
+    let a = "<p class=\"note\"><b>One</b> and <i>two</i> and <u>three</u> and <s>four</s> and <q>five</q></p>
+";
+    let b = "<div class=\"note\"><em>One</em> and <strong>two</strong> and <mark>three</mark> and <small>four</small> and <cite>five</cite></div>
+";
+    assert!(scan(&[("a.html", a), ("b.html", b)]).groups.is_empty());
+}
+
+const FIELDS: &str = r#"
+    <label for="name">Name</label>
+    <input id="name" type="text" [(ngModel)]="model.name" required>
+    <label for="email">Email</label>
+    <input id="email" type="email" [(ngModel)]="model.email" required>
+    <label for="phone">Phone</label>
+    <input id="phone" type="tel" [(ngModel)]="model.phone">
+"#;
+
+// Catches element children not being searched for shared runs: the same
+// fields pasted into two different forms are one clone.
+#[test]
+fn a_run_of_elements_shared_by_two_templates_is_a_clone() {
+    let signup = format!(
+        "<form class=\"signup\">\n  <h1>Join</h1>{FIELDS}  <button>Sign up</button>\n</form>\n"
+    );
+    let profile = format!(
+        "<div class=\"profile\">\n  <img src=\"me.png\" alt=\"\">\n  <form>{FIELDS}  </form>\n  <p>Saved automatically.</p>\n</div>\n"
+    );
+    let a = scan(&[("a.html", &signup), ("b.html", &profile)]);
+    let g = groups(&a);
+    assert!(
+        g.iter().any(|g| g.occurrences.len() == 2 && g.lines >= 6),
+        "{g:?}"
+    );
 }

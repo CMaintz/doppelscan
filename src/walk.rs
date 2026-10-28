@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use ignore::overrides::OverrideBuilder;
+use ignore::overrides::{Override, OverrideBuilder};
 use ignore::{WalkBuilder, WalkState};
 
 use crate::lang::lang_index_for_path;
@@ -49,13 +49,9 @@ pub fn discover(
     exclude: &[String],
     languages: &[usize],
 ) -> anyhow::Result<Vec<(PathBuf, usize)>> {
-    let mut overrides = OverrideBuilder::new(root);
-    for glob in exclude {
-        overrides.add(&format!("!{glob}"))?;
-    }
     let walker = WalkBuilder::new(root)
         .require_git(false)
-        .overrides(overrides.build()?)
+        .overrides(exclude_overrides(root, exclude)?)
         .filter_entry(|e| {
             !e.file_type().is_some_and(|t| t.is_dir()) || !is_excluded_dir(e.file_name())
         })
@@ -72,6 +68,33 @@ pub fn discover(
     let mut files = found.into_inner().unwrap();
     files.sort();
     Ok(files)
+}
+
+pub fn exclude_overrides(root: &Path, exclude: &[String]) -> anyhow::Result<Override> {
+    let mut overrides = OverrideBuilder::new(root);
+    for glob in exclude {
+        overrides.add(&format!("!{glob}"))?;
+    }
+    Ok(overrides.build()?)
+}
+
+/// The language of a file known from a listing rather than a walk (a git
+/// revision), or `None` when a walk would have skipped it: an excluded or
+/// hidden directory, or an `--exclude` matching it or any parent. `rel` is
+/// relative to the scanned root.
+pub fn accept_listed(rel: &Path, overrides: &Override, languages: &[usize]) -> Option<usize> {
+    let skipped_name = rel.components().any(|c| {
+        let name = c.as_os_str();
+        is_excluded_dir(name) || name.to_str().is_some_and(|n| n.starts_with('.'))
+    });
+    let excluded = rel
+        .ancestors()
+        .filter(|a| !a.as_os_str().is_empty())
+        .any(|a| overrides.matched(a, a != rel).is_ignore());
+    if skipped_name || excluded {
+        return None;
+    }
+    accept(rel, languages).map(|(_, lang)| lang)
 }
 
 fn is_excluded_dir(name: &std::ffi::OsStr) -> bool {

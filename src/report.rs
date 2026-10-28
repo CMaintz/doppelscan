@@ -8,9 +8,9 @@ use std::time::Duration;
 use serde::Serialize;
 
 use crate::detect::RawGroup;
-use crate::engine::score;
+use crate::engine::{Against, Check, score};
 use crate::index::FileIndex;
-use crate::variation::{Variation, analyze, template};
+use crate::variation::{Kind, Variation, analyze, template};
 
 /// Ranked clone groups over a set of indexed files.
 pub struct Analysis {
@@ -46,8 +46,11 @@ pub struct Group {
     pub occurrences: Vec<Location>,
     /// Values that differ per occurrence and become helper arguments.
     pub parameters: Vec<Variation>,
-    /// Names the fragment binds itself; they differ but need no argument.
+    /// Locals the fragment binds itself; they differ but need no argument.
     pub renames: Vec<Variation>,
+    /// Names the fragment declares for other code (methods, fields,
+    /// classes): keeping one means updating the callers of the others.
+    pub declares: Vec<Variation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub template: Option<String>,
 }
@@ -65,9 +68,13 @@ impl Analysis {
         let raw = &self.groups[id - 1];
         let vars = analyze(raw, &self.files);
         let template = with_template.then(|| template(raw, &self.files, &vars));
+        let (declares, renames) = vars
+            .renames
+            .into_iter()
+            .partition(|v| v.kind == Kind::Declared);
         Group {
             id,
-            fingerprint: format!("{:012x}", raw.hash >> 16),
+            fingerprint: fingerprint(raw),
             kind: if raw.run_len == 1 { "node" } else { "run" },
             elements: raw.run_len,
             tokens: raw.tokens,
@@ -75,7 +82,8 @@ impl Analysis {
             score: score(raw),
             occurrences: raw.occs.iter().map(|o| self.location(o)).collect(),
             parameters: vars.parameters,
-            renames: vars.renames,
+            renames,
+            declares,
             template,
         }
     }
@@ -99,8 +107,8 @@ impl Analysis {
             return Some(id);
         }
         let key = key.to_ascii_lowercase();
-        let mut hits = (1..=self.groups.len())
-            .filter(|&i| format!("{:012x}", self.groups[i - 1].hash >> 16).starts_with(&key));
+        let mut hits =
+            (1..=self.groups.len()).filter(|&i| fingerprint(&self.groups[i - 1]).starts_with(&key));
         let first = hits.next()?;
         hits.next().is_none().then_some(first)
     }
@@ -141,6 +149,11 @@ impl Analysis {
             elapsed_ms: self.elapsed.as_millis(),
         }
     }
+}
+
+/// Stable across runs while the duplicated code keeps its structure.
+pub fn fingerprint(group: &RawGroup) -> String {
+    format!("{:012x}", group.hash >> 16)
 }
 
 const MAX_VALUE_CHARS: usize = 48;
@@ -185,13 +198,9 @@ pub fn render_group(g: &Group, detail: Detail) -> String {
     render_locations(&mut out, &g.occurrences, detail);
     render_variations(&mut out, "params", &g.parameters, true, detail);
     render_variations(&mut out, "renames", &g.renames, false, detail);
+    render_variations(&mut out, "declares", &g.declares, false, detail);
     if let Some(t) = &g.template {
-        let _ = writeln!(
-            out,
-            "  template:
-{}",
-            indent(t)
-        );
+        let _ = writeln!(out, "  template:\n{}", indent(t));
     }
     out
 }
@@ -234,8 +243,16 @@ fn render_variations(
         .enumerate()
         .map(|(i, v)| {
             let values = render_values(&v.values, detail);
+            let label = match v.kind {
+                Kind::Type => ":type",
+                Kind::Function => ":function",
+                Kind::Member => ":member",
+                // Plain values and literals (which show their quotes or
+                // digits) stay unlabelled to keep listings short.
+                _ => "",
+            };
             if numbered {
-                format!("${}={}", i + 1, values)
+                format!("${}{label}={}", i + 1, values)
             } else {
                 values
             }
@@ -288,4 +305,38 @@ fn indent(text: &str) -> String {
         .map(|l| format!("    {l}"))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// New groups in full (an agent has to see every copy to decide which one
+/// to keep), then a hint when the baseline file can shrink.
+pub fn render_check(check: &Check, against: &Against) -> String {
+    let what = against.label();
+    let mut out = if check.new.is_empty() {
+        format!("No new duplication against {what}.\n")
+    } else {
+        format!(
+            "{} new clone group(s) against {what}. Reuse or extract the existing \
+             code; `doppelscan show <fingerprint>` gives the helper template.\n",
+            check.new.len()
+        )
+    };
+    if let Some(note) = &check.note {
+        out.push_str(&format!("{note}\n"));
+    }
+    for &id in &check.new {
+        let group = check.analysis.group(id, false);
+        out.push_str(&format!("\n{}", render_group(&group, Detail::Full)));
+    }
+    if check.resolved > 0 && matches!(against, Against::File(_)) {
+        let entries = if check.resolved == 1 {
+            "entry"
+        } else {
+            "entries"
+        };
+        out.push_str(&format!(
+            "\n{} baseline {entries} no longer match; `doppelscan baseline --prune` shrinks it.\n",
+            check.resolved
+        ));
+    }
+    out
 }

@@ -10,7 +10,7 @@ use rustc_hash::FxHashMap;
 use serde::Serialize;
 
 use crate::detect::{Occ, RawGroup};
-use crate::index::{FileIndex, LeafClass};
+use crate::index::{FileIndex, Leaf, LeafClass, Role};
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Variation {
@@ -18,6 +18,31 @@ pub struct Variation {
     pub values: Vec<String>,
     /// How many leaf positions carry this substitution.
     pub uses: usize,
+    pub kind: Kind,
+}
+
+/// What a differing name means for the extracted helper.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Kind {
+    /// A rename the helper absorbs by picking one name.
+    Local,
+    /// A rename other code depends on: callers switch to the kept name.
+    Declared,
+    /// A parameter that becomes a generic.
+    Type,
+    /// A parameter that is called: a callback.
+    Function,
+    /// A parameter naming an object member: a key or an accessor.
+    Member,
+    Literal,
+    Value,
+}
+
+impl Kind {
+    pub fn is_rename(self) -> bool {
+        matches!(self, Kind::Local | Kind::Declared)
+    }
 }
 
 #[derive(Default)]
@@ -31,9 +56,18 @@ pub struct Variations {
 struct Slot {
     first: usize,
     offsets: Vec<usize>,
-    binds: bool,
+    roles: Vec<Role>,
     literal: bool,
 }
+
+struct Binding<'a> {
+    offset: usize,
+    texts: &'a [&'a str],
+    role: Role,
+    scope: (u32, u32),
+}
+
+type Differing<'f> = Vec<(usize, Vec<&'f str>)>;
 
 pub fn analyze(group: &RawGroup, files: &[impl AsRef<FileIndex>]) -> Variations {
     let columns: Vec<Vec<u32>> = group
@@ -41,29 +75,69 @@ pub fn analyze(group: &RawGroup, files: &[impl AsRef<FileIndex>]) -> Variations 
         .iter()
         .map(|o| o.leaf_indices().collect())
         .collect();
-    let mut slots: FxHashMap<Vec<&str>, Slot> = FxHashMap::default();
-    for offset in 0..columns[0].len() {
-        let texts: Vec<&str> = group
-            .occs
-            .iter()
-            .zip(&columns)
-            .map(|(o, c)| leaf_text(files, o, c[offset]))
-            .collect();
-        if texts.iter().all(|t| *t == texts[0]) {
-            continue;
-        }
-        let leaf = files[group.occs[0].file as usize].as_ref().leaves[columns[0][offset] as usize];
-        let slot = slots.entry(texts).or_insert(Slot {
-            first: offset,
+    let first = files[group.occs[0].file as usize].as_ref();
+    let leaf_at = |offset: usize| first.leaves[columns[0][offset] as usize];
+    let differing = differing(group, files, &columns);
+    let bindings = bindings(&differing, leaf_at);
+    let mut slots: FxHashMap<(Vec<&str>, Option<usize>), Slot> = FxHashMap::default();
+    for (offset, texts) in &differing {
+        let leaf = leaf_at(*offset);
+        let owner = owner(&bindings, texts, columns[0][*offset], leaf.role);
+        let slot = slots.entry((texts.clone(), owner)).or_insert(Slot {
+            first: *offset,
             offsets: Vec::new(),
-            binds: false,
+            roles: Vec::new(),
             literal: false,
         });
-        slot.offsets.push(offset);
-        slot.binds |= leaf.binds;
+        slot.offsets.push(*offset);
+        slot.roles.push(leaf.role);
         slot.literal |= leaf.class == LeafClass::Literal;
     }
     split(slots)
+}
+
+/// Offsets whose text is not the same in every occurrence, with the texts.
+fn differing<'f>(
+    group: &RawGroup,
+    files: &'f [impl AsRef<FileIndex>],
+    columns: &[Vec<u32>],
+) -> Differing<'f> {
+    (0..columns[0].len())
+        .filter_map(|offset| {
+            let texts: Vec<&str> = group
+                .occs
+                .iter()
+                .zip(columns)
+                .map(|(o, c)| leaf_text(files, o, c[offset]))
+                .collect();
+            (texts.iter().any(|t| *t != texts[0])).then_some((offset, texts))
+        })
+        .collect()
+}
+
+fn bindings<'a>(differing: &'a Differing, leaf_at: impl Fn(usize) -> Leaf) -> Vec<Binding<'a>> {
+    differing
+        .iter()
+        .filter(|(offset, _)| leaf_at(*offset).role.binds())
+        .map(|(offset, texts)| Binding {
+            offset: *offset,
+            texts,
+            role: leaf_at(*offset).role,
+            scope: leaf_at(*offset).scope,
+        })
+        .collect()
+}
+
+/// The binding a position refers to: the innermost one with the same
+/// spellings whose scope covers it. A member access can refer to a field
+/// the fragment declares, never to a local, however it is spelled.
+fn owner(bindings: &[Binding], texts: &[&str], leaf: u32, role: Role) -> Option<usize> {
+    bindings
+        .iter()
+        .filter(|b| role != Role::Member || b.role == Role::Declared)
+        .filter(|b| b.texts == texts && b.scope.0 <= leaf && leaf < b.scope.1)
+        .min_by_key(|b| b.scope.1 - b.scope.0)
+        .map(|b| b.offset)
 }
 
 fn leaf_text<'f>(files: &'f [impl AsRef<FileIndex>], occ: &Occ, leaf: u32) -> &'f str {
@@ -71,23 +145,60 @@ fn leaf_text<'f>(files: &'f [impl AsRef<FileIndex>], occ: &Occ, leaf: u32) -> &'
     file.leaf_text(&file.leaves[leaf as usize])
 }
 
-fn split(slots: FxHashMap<Vec<&str>, Slot>) -> Variations {
+fn split(slots: FxHashMap<(Vec<&str>, Option<usize>), Slot>) -> Variations {
     let mut ordered: Vec<_> = slots.into_iter().collect();
     ordered.sort_by_key(|(_, s)| s.first);
     let mut out = Variations::default();
-    for (texts, slot) in ordered {
+    for ((texts, _), slot) in ordered {
         let variation = Variation {
             values: texts.iter().map(|t| t.to_string()).collect(),
             uses: slot.offsets.len(),
+            kind: kind_of(&slot),
         };
-        if slot.binds && !slot.literal {
-            out.renames.push(variation);
+        if variation.kind.is_rename() {
+            merge_rename(&mut out.renames, variation);
         } else {
             out.parameters.push(variation);
             out.param_offsets.push(slot.offsets);
         }
     }
     out
+}
+
+/// Sibling scopes renaming alike (`id` to `key` in two methods) are one
+/// rename to the reader, as long as both are the same kind of rename.
+fn merge_rename(renames: &mut Vec<Variation>, variation: Variation) {
+    let same = renames
+        .iter_mut()
+        .find(|r| r.values == variation.values && r.kind == variation.kind);
+    match same {
+        Some(same) => same.uses += variation.uses,
+        None => renames.push(variation),
+    }
+}
+
+/// A name used both as a type and as a value is most constrained as a
+/// type, so the strongest role wins.
+fn kind_of(slot: &Slot) -> Kind {
+    let any = |r: Role| slot.roles.contains(&r);
+    if !slot.literal && slot.roles.iter().any(|r| r.binds()) {
+        return if any(Role::Declared) {
+            Kind::Declared
+        } else {
+            Kind::Local
+        };
+    }
+    if slot.literal {
+        Kind::Literal
+    } else if any(Role::Type) {
+        Kind::Type
+    } else if any(Role::Callee) {
+        Kind::Function
+    } else if any(Role::Member) {
+        Kind::Member
+    } else {
+        Kind::Value
+    }
 }
 
 /// The first occurrence's source with each parameter replaced by `$1`,
