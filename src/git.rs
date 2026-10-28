@@ -27,7 +27,7 @@ struct Listed {
 
 /// Files under `dir` at `rev`, with paths relative to `dir` (prefixed with
 /// `display_prefix`). A file that still exists is read only when a
-/// working-tree scan would read it, so hidden, ignored and excluded files
+/// working-tree scan would read it, so ignored and excluded files
 /// drop out on both sides alike; a deleted file is judged by its path.
 pub fn read_revision(
     dir: &Path,
