@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Serialize;
 
 use crate::engine::ScanOptions;
@@ -214,31 +214,69 @@ fn similar_pairs(
     prints: &[Prints],
     threshold: f32,
 ) -> Vec<(u32, u32, f32)> {
-    let mut index: FxHashMap<u64, Vec<(u32, u32)>> = FxHashMap::default();
+    candidates(files, units, prints)
+        .into_par_iter()
+        .filter_map(|(a, b)| {
+            let (pa, pb) = (&prints[a as usize], &prints[b as usize]);
+            // Jaccard is at most the smaller size over the larger, which
+            // skips the merge for most pairs of unequal size.
+            let (sa, sb) = (size(pa) as f32, size(pb) as f32);
+            if sa.min(sb) < threshold * sa.max(sb) {
+                return None;
+            }
+            let similarity = jaccard(pa, pb);
+            (similarity >= threshold).then_some((a, b, similarity))
+        })
+        .collect()
+}
+
+/// Pairs sharing a fingerprint that is not idiom. Idiom is skipped only
+/// here, where a fingerprint in thousands of functions would pair them
+/// all; scoring still counts it, so a pair alike in their idiom gets
+/// credit for it and a pair differing in it (4 field assignments against
+/// 12) does not look identical.
+fn candidates(
+    files: &[Arc<FileIndex>],
+    units: &[Unit],
+    prints: &[Prints],
+) -> FxHashSet<(u32, u32)> {
+    let mut index: FxHashMap<u64, Vec<u32>> = FxHashMap::default();
     for (id, fps) in prints.iter().enumerate() {
-        for &(fp, count) in fps {
-            index.entry(fp).or_default().push((id as u32, count));
+        for &(fp, _) in fps {
+            index.entry(fp).or_default().push(id as u32);
         }
     }
     let cull = MIN_CULL.max(units.len() / 200);
-    let mut shared: FxHashMap<(u32, u32), u32> = FxHashMap::default();
+    let mut pairs = FxHashSet::default();
     for list in index.values().filter(|l| l.len() <= cull) {
-        for (i, &(a, ca)) in list.iter().enumerate() {
-            for &(b, cb) in &list[i + 1..] {
+        for (i, &a) in list.iter().enumerate() {
+            for &b in &list[i + 1..] {
                 if comparable(files, &units[a as usize], &units[b as usize]) {
-                    *shared.entry((a, b)).or_default() += ca.min(cb);
+                    pairs.insert((a, b));
                 }
             }
         }
     }
-    shared
-        .into_iter()
-        .filter_map(|((a, b), common)| {
-            let union = size(&prints[a as usize]) + size(&prints[b as usize]) - common;
-            let similarity = common as f32 / union as f32;
-            (similarity >= threshold).then_some((a, b, similarity))
-        })
-        .collect()
+    pairs
+}
+
+/// Multiset Jaccard of two fingerprint lists sorted by hash, each hash at
+/// most once (as `winnow` builds them). Two empty lists give NaN, which no
+/// threshold accepts.
+fn jaccard(a: &Prints, b: &Prints) -> f32 {
+    let (mut i, mut j, mut common) = (0, 0, 0);
+    while i < a.len() && j < b.len() {
+        match a[i].0.cmp(&b[j].0) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                common += a[i].1.min(b[j].1);
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    common as f32 / (size(a) + size(b) - common) as f32
 }
 
 fn comparable(files: &[Arc<FileIndex>], a: &Unit, b: &Unit) -> bool {

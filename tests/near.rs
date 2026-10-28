@@ -324,3 +324,76 @@ fn a_constructor_is_one_unit() {
             .unwrap();
     assert_eq!(file.units.len(), 1, "{:?}", file.units);
 }
+
+const GUARD: &str = "    if (input === undefined || input === null) {\n        throw new Error(\"missing input\");\n    }\n";
+
+/// A function opening with `guards` copies of a guard clause, as an idiom
+/// that most functions in a codebase share.
+fn guarded(name: &str, guards: usize, body: &str) -> String {
+    format!(
+        "export function {name}(input: Input): number {{\n{}{body}}}\n",
+        GUARD.repeat(guards)
+    )
+}
+
+/// Groups found among `pair` plus enough functions sharing the guard idiom
+/// to make it common: more than the cull floor of 100 functions, below which
+/// no fingerprint counts as idiom and these tests would test nothing.
+fn near_with_idiom(pair: [(&str, String); 2]) -> Vec<NearGroup> {
+    let noise = (0..120).map(|i| {
+        let tail = "    log(input);\n".repeat(i + 1);
+        let name = format!("noise{i}");
+        (format!("{name}.ts"), guarded(&name, 2, &tail))
+    });
+    let files: Vec<(String, String)> = noise.chain(pair.map(|(p, t)| (p.to_string(), t))).collect();
+    let refs: Vec<(&str, String)> = files.iter().map(|(p, t)| (p.as_str(), t.clone())).collect();
+    groups(&scan_near(&refs, 0.8))
+}
+
+/// The similarity of the group holding both a.ts and b.ts, if any.
+fn pair_similarity(found: &[NearGroup]) -> Option<f32> {
+    let has = |g: &NearGroup, f: &str| g.occurrences.iter().any(|o| o.file == f);
+    found
+        .iter()
+        .find(|g| has(g, "a.ts") && has(g, "b.ts"))
+        .map(|g| g.similarity)
+}
+
+// Catches idiom fingerprints being dropped from what two functions share
+// but kept in their sizes: a pair alike apart from one statement, but
+// heavy with an idiom hundreds of other functions also use, would score
+// far below its real similarity and go unreported.
+#[test]
+fn a_shared_idiom_does_not_dilute_similarity() {
+    let body = "    const rows = input.rows.filter((r) => r.active);\n    const total = rows.reduce((s, r) => s + r.amount * input.rate, 0);\n    const label = `${input.name}: ${total.toFixed(2)}`;\n    report.write(label, rows.length, input.currency);\n";
+    let found = near_with_idiom([
+        (
+            "a.ts",
+            guarded("summarize", 6, &format!("{body}    return total;\n")),
+        ),
+        (
+            "b.ts",
+            guarded(
+                "summarizeAll",
+                6,
+                &format!("{body}    return rows.length;\n"),
+            ),
+        ),
+    ]);
+    let similarities: Vec<f32> = found.iter().map(|g| g.similarity).collect();
+    assert!(pair_similarity(&found).is_some(), "{similarities:?}");
+}
+
+// Catches idiom fingerprints being left out of the score altogether: two
+// functions that differ only in how much of the idiom they carry (2 guard
+// clauses against 12) are not 100% alike.
+#[test]
+fn a_different_amount_of_idiom_still_counts() {
+    let body = "    const rows = input.rows.filter((r) => r.active);\n    const total = rows.reduce((s, r) => s + r.amount * input.rate, 0);\n    return total;\n";
+    let found = near_with_idiom([
+        ("a.ts", guarded("summarize", 2, body)),
+        ("b.ts", guarded("summarizeAll", 12, body)),
+    ]);
+    let similarity = pair_similarity(&found);
+    assert!(similarity.is_none(), "reported as {similarity:?} alike");
+}
