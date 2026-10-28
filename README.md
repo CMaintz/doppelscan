@@ -181,11 +181,12 @@ with winnowing ([Schleimer, Wilkerson and Aiken, SIGMOD
 2003](https://theory.stanford.edu/~aiken/publications/papers/sigmod03.pdf)),
 which guarantees that any shared run of 17 tokens yields a shared
 fingerprint. An inverted index finds the functions that share fingerprints,
-fingerprints common to many functions are dropped as idiom, and pairs are
-scored by Jaccard similarity of their fingerprint counts (counts, so four
-repeated assignments and ten do not look alike). Union-find groups the
-pairs, exact clones are left to the exact scan, and the differing lines come
-from a token-level diff against another copy.
+skipping fingerprints common to many functions (idiom) so they do not pair
+everything, and each pair is scored by Jaccard similarity of all its
+fingerprint counts, idiom included (counts, so four repeated assignments and
+ten do not look alike). Union-find groups the pairs, exact clones are left to
+the exact scan, and the differing lines come from a token-level diff against
+another copy.
 
 ## Performance
 
