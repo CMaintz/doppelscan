@@ -5,25 +5,12 @@
 
 Fast, syntax-aware duplicate code finder built for coding agents.
 
-doppelscan parses your code with tree-sitter (or tokenizes it, for languages
-without a bundled grammar) and finds fragments that have the same structure, even when names and literals differ, in the spirit of
-IntelliJ's duplicate detection. Each clone group comes with what an agent needs
-to extract a shared helper:
-
-- **parameters**: values that differ between occurrences and would become
-  helper arguments, labelled by what the helper takes: `type` (a generic),
-  `function` (a callback), `member` (a key or accessor), `name` (in a
-  token-level language, a name that may be a parameter or a rename), or
-  unlabelled for a plain value or literal (`kind` in the JSON output),
-- **renames**: locals the fragment binds itself (variables, its own
-  parameters, loop and lambda variables), which differ but need no argument,
-- **declares**: names the fragment declares for other code (methods, fields,
-  classes), so callers have to switch to the one name the helper keeps,
-- **template**: the first occurrence with each parameter replaced by `$1`,
-  `$2`, ..., i.e. the helper body.
-
-It runs as a CLI and as an MCP server, so any Claude or other LLM session can
-call it as a tool.
+doppelscan finds code that has the same structure even when names and
+literals differ, in the spirit of IntelliJ's duplicate detection, and tells
+you how to merge it: which values become helper arguments, which names are
+just local renames, and what the helper body looks like. It runs as a CLI
+and as an MCP server, so Claude or any other LLM session can call it as a
+tool.
 
 ```
 #1 [b4a94232d76e] x9 | 71 tokens, 3 lines, run of 3 | score 568
@@ -38,22 +25,53 @@ call it as a tool.
     removeExperience(id: string): void { this.removeFrom($2, id); }
 ```
 
+## Quick start
+
+```sh
+cargo install --git https://github.com/CMaintz/doppelscan
+doppelscan                                  # top 20 clone groups in .
+doppelscan show b4a94232d76e                # one group, with its template
+claude mcp add doppelscan -- doppelscan mcp # give Claude Code the tools
+```
+
+## What a clone group tells you
+
+- **parameters**: values that differ between occurrences and would become
+  helper arguments, labelled by what the helper takes (`kind` in the JSON
+  output):
+  - `type`: a generic,
+  - `function`: a callback,
+  - `member`: a key or accessor,
+  - `name`: in a token-level language, a name that may be a parameter or a
+    rename,
+  - unlabelled: a plain value or literal.
+- **renames**: locals the fragment binds itself (variables, its own
+  parameters, loop and lambda variables), which differ but need no argument.
+- **declares**: names the fragment declares for other code (methods, fields,
+  classes), so callers have to switch to the one name the helper keeps.
+- **template**: the first occurrence with each parameter replaced by `$1`,
+  `$2`, ..., i.e. the helper body.
+
 ## Languages
 
-TypeScript, TSX, JavaScript, Java, C#, Kotlin, Swift, PHP, Python, Go, Rust, CSS, HTML
-(including Angular and other framework templates, matched as markup).
+| Matching | Languages |
+| --- | --- |
+| Syntax tree (tree-sitter) | TypeScript, TSX, JavaScript, Java, C#, Kotlin, Swift, PHP, Python, Go, Rust, CSS, HTML (including Angular and other framework templates, matched as markup) |
+| Token by token | C, C++, Objective-C, Scala, Groovy and Gradle, Dart, Zig, Solidity, Protobuf, SCSS/Less, Vue/Svelte, SQL, Lua, Haskell/Elm, Ruby, shell, PowerShell, Perl, R, Elixir, Terraform/HCL, YAML |
 
-Without a bundled grammar, these are matched token by token: C, C++,
-Objective-C, Scala, Groovy and Gradle, Dart, Zig, Solidity, Protobuf,
-SCSS/Less, Vue/Svelte, SQL, Lua, Haskell/Elm, Ruby, shell, PowerShell, Perl,
-R, Elixir, Terraform/HCL, and YAML. They find exact and renamed copies, with
-three differences: a name that differs is listed as a `name` parameter (the
-tokens cannot tell a parameter from a rename, so there are no `renames`),
-only names that differ in a single place count toward
-`--max-param-density`, and `near` skips them. YAML is mostly data (fixtures,
-API specs, manifests), so it is scanned only when asked for: `--only yaml`,
-a `.yml` file named directly, or `at` and `similar` on YAML. Other file
-types, JSON and lock files among them, are not scanned.
+Token-level languages find exact and renamed copies, with three
+differences:
+
+- a name that differs is listed as a `name` parameter (the tokens cannot
+  tell a parameter from a rename, so there are no `renames`),
+- only names that differ in a single place count toward
+  `--max-param-density`,
+- `near` skips them.
+
+YAML is mostly data (fixtures, API specs, manifests), so it is scanned only
+when asked for: `--only yaml`, a `.yml` file named directly, or `at` and
+`similar` on YAML. Other file types, JSON and lock files among them, are not
+scanned.
 
 ## Install
 
@@ -62,7 +80,8 @@ cargo install --git https://github.com/CMaintz/doppelscan
 ```
 
 From a checkout, `cargo install --path . --root ~/.local` puts the binary in
-`~/.local/bin` instead of cargo's own `bin` directory. Building needs a C compiler for the tree-sitter grammars.
+`~/.local/bin` instead of cargo's own `bin` directory. Building needs a C
+compiler for the tree-sitter grammars.
 
 The repo pins its Rust toolchain in `mise.toml` (`mise install` sets it up).
 On Windows the MSVC build tools are required.
@@ -95,11 +114,24 @@ option or a callback:
 are often near copies of each other by design, so `--exclude '**/*.test.ts'`
 (or your test glob) keeps them out when they are noise.
 
-Useful options: `--min-tokens` (default 50), `--strict` (identical names and
-literals only), `--only ts,java`, `--exclude 'generated/**'`,
-`--max-param-density` (default 8 per 100 tokens; higher shows data tables and
-mapping boilerplate too; in token-level languages a name that differs in
-several places is taken for a renamed local and not counted).
+### Options
+
+These apply to every command that scans (`scan`, `show`, `at`, `similar`,
+`near`, `check`, `baseline`):
+
+| Option | Default | Effect |
+| --- | --- | --- |
+| `PATH` | `.` | Directory or file to scan. |
+| `--min-tokens N` | 50 | Smallest clone reported, in syntax tokens. |
+| `--strict` | off | Identical names and literals only (copy-paste clones). |
+| `--only ts,java` | all | Only these languages, by name or extension. |
+| `--exclude GLOB` | none | Skip matching paths; repeatable. |
+| `--max-param-density N` | 8 | Drop groups needing more parameters per 100 tokens. Higher shows data tables and mapping boilerplate too. |
+| `--format json` | `text` | Machine-readable output. |
+
+`scan` also takes `--limit N` (default 20, 0 for all) and `--template` to
+print each group's helper template; `near` takes `--limit` and
+`--similarity` (default 0.8).
 
 `.gitignore` is honoured, and dependency/build directories, minified bundles
 and files marked as generated are skipped.
@@ -141,8 +173,18 @@ also sees unstaged edits. Commit the baseline with LF line endings
 (`.doppelscan-baseline.json text eol=lf` in `.gitattributes`), or a Windows
 checkout with `core.autocrlf` shows it modified after every prune.
 
-Exit codes: 0 clean, 1 new duplication, 2 error. In GitHub Actions, check out
-with `fetch-depth: 0` so the merge-base is available.
+Exit codes: 0 clean, 1 new duplication, 2 error.
+
+In GitHub Actions, check out with `fetch-depth: 0` so the merge-base is
+available:
+
+```yaml
+- uses: actions/checkout@v5
+  with:
+    fetch-depth: 0
+- run: cargo install --git https://github.com/CMaintz/doppelscan
+- run: doppelscan check --base ${{ github.base_ref || 'main' }}
+```
 
 ## MCP server
 
