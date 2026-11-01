@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 use serde::Serialize;
 
 use crate::engine::ScanOptions;
@@ -208,38 +208,44 @@ fn size(prints: &Prints) -> u32 {
 }
 
 /// Pairs of unit ids at or above `threshold`, with their similarity.
+/// Each unit is scored against its candidates as they are found: on a large
+/// repo the candidate pairs run to hundreds of millions, too many to hold.
 fn similar_pairs(
     files: &[Arc<FileIndex>],
     units: &[Unit],
     prints: &[Prints],
     threshold: f32,
 ) -> Vec<(u32, u32, f32)> {
-    candidates(files, units, prints)
+    let index = postings(units, prints);
+    (0..units.len() as u32)
         .into_par_iter()
-        .filter_map(|(a, b)| {
-            let (pa, pb) = (&prints[a as usize], &prints[b as usize]);
-            // Jaccard is at most the smaller size over the larger, which
-            // skips the merge for most pairs of unequal size.
-            let (sa, sb) = (size(pa) as f32, size(pb) as f32);
-            if sa.min(sb) < threshold * sa.max(sb) {
-                return None;
-            }
-            let similarity = jaccard(pa, pb);
-            (similarity >= threshold).then_some((a, b, similarity))
-        })
+        .map_init(
+            || vec![u32::MAX; units.len()],
+            |seen, a| {
+                let mut found = Vec::new();
+                for b in candidates_of(a, &prints[a as usize], &index, seen) {
+                    if !comparable(files, &units[a as usize], &units[b as usize]) {
+                        continue;
+                    }
+                    if let Some(similarity) =
+                        similarity(&prints[a as usize], &prints[b as usize], threshold)
+                    {
+                        found.push((a, b, similarity));
+                    }
+                }
+                found
+            },
+        )
+        .flatten()
         .collect()
 }
 
-/// Pairs sharing a fingerprint that is not idiom. Idiom is skipped only
-/// here, where a fingerprint in thousands of functions would pair them
-/// all; scoring still counts it, so a pair alike in their idiom gets
-/// credit for it and a pair differing in it (4 field assignments against
-/// 12) does not look identical.
-fn candidates(
-    files: &[Arc<FileIndex>],
-    units: &[Unit],
-    prints: &[Prints],
-) -> FxHashSet<(u32, u32)> {
+/// Unit ids by fingerprint, ascending, for fingerprints that are not idiom.
+/// Idiom is skipped only here, where a fingerprint in thousands of
+/// functions would pair them all; scoring still counts it, so a pair alike
+/// in their idiom gets credit for it and a pair differing in it (4 field
+/// assignments against 12) does not look identical.
+fn postings(units: &[Unit], prints: &[Prints]) -> FxHashMap<u64, Vec<u32>> {
     let mut index: FxHashMap<u64, Vec<u32>> = FxHashMap::default();
     for (id, fps) in prints.iter().enumerate() {
         for &(fp, _) in fps {
@@ -247,17 +253,43 @@ fn candidates(
         }
     }
     let cull = MIN_CULL.max(units.len() / 200);
-    let mut pairs = FxHashSet::default();
-    for list in index.values().filter(|l| l.len() <= cull) {
-        for (i, &a) in list.iter().enumerate() {
-            for &b in &list[i + 1..] {
-                if comparable(files, &units[a as usize], &units[b as usize]) {
-                    pairs.insert((a, b));
-                }
+    index.retain(|_, ids| ids.len() <= cull);
+    index
+}
+
+/// Units after `a` sharing a fingerprint with it, each once. `index` lists
+/// must be ascending, which lets the search start just past `a`. `seen`
+/// holds, per unit, the last `a` that listed it, so it needs no clearing
+/// between units.
+fn candidates_of(
+    a: u32,
+    prints: &Prints,
+    index: &FxHashMap<u64, Vec<u32>>,
+    seen: &mut [u32],
+) -> Vec<u32> {
+    let mut out = Vec::new();
+    for (fp, _) in prints {
+        let Some(ids) = index.get(fp) else { continue };
+        let after = ids.partition_point(|&b| b <= a);
+        for &b in &ids[after..] {
+            if seen[b as usize] != a {
+                seen[b as usize] = a;
+                out.push(b);
             }
         }
     }
-    pairs
+    out
+}
+
+fn similarity(a: &Prints, b: &Prints, threshold: f32) -> Option<f32> {
+    // Jaccard is at most the smaller size over the larger, which skips the
+    // merge for most pairs of unequal size.
+    let (sa, sb) = (size(a) as f32, size(b) as f32);
+    if sa.min(sb) < threshold * sa.max(sb) {
+        return None;
+    }
+    let similarity = jaccard(a, b);
+    (similarity >= threshold).then_some(similarity)
 }
 
 /// Multiset Jaccard of two fingerprint lists sorted by hash, each hash at
@@ -552,7 +584,9 @@ pub fn render_near_summary(a: &NearAnalysis, shown: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{K, W, winnow};
+    use rustc_hash::FxHashMap;
+
+    use super::{K, W, candidates_of, winnow};
 
     // Catches a winnowing window or k-gram size that breaks the guarantee
     // the threshold rests on: any shared run of W + K - 1 tokens is seen.
@@ -569,5 +603,19 @@ mod tests {
             let shared = fa.iter().any(|(f, _)| fb.iter().any(|(g, _)| f == g));
             assert!(shared, "offset {offset}");
         }
+    }
+
+    // Catches the candidate search stopping at the first idiom fingerprint
+    // (culled from the index) instead of skipping it, which would leave
+    // every pair sharing only later fingerprints unreported, and a unit
+    // listed once per shared fingerprint, which would score it again each
+    // time.
+    #[test]
+    fn candidates_skip_idiom_and_come_once() {
+        let index = FxHashMap::from_iter([(2, vec![0, 3]), (7, vec![0, 3, 5])]);
+        let prints = vec![(1, 4), (2, 1), (5, 2), (7, 1)];
+        let mut seen = vec![u32::MAX; 6];
+        assert_eq!(candidates_of(0, &prints, &index, &mut seen), vec![3, 5]);
+        assert_eq!(candidates_of(3, &prints, &index, &mut seen), vec![5]);
     }
 }
