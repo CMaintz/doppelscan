@@ -398,3 +398,23 @@ fn copies_in_local_history_are_skipped() {
     let (_, out) = doppelscan(&dir, &["."]);
     assert!(!out.contains(".history"), "{out}");
 }
+
+// Catches dropping the generated-source names from the skip list: build
+// tools write these without a "generated" header (Elasticsearch's
+// `src/main/generated` has none), so the path is the only sign.
+#[test]
+fn copies_in_generated_source_dirs_are_skipped() {
+    let dir = repo_with_copy_at("gendir", "src/main/generated/c.ts");
+    let (_, out) = doppelscan(&dir, &["."]);
+    assert!(!out.contains("generated"), "{out}");
+}
+
+// Catches matching generated directories by prefix or by a short name:
+// `gen` often holds a hand-written code generator.
+#[test]
+fn copies_in_a_gen_dir_are_found() {
+    let dir = repo_with_copy_at("gen", "tools/gen/c.ts");
+    let (code, out) = doppelscan(&dir, &["."]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("tools/gen/c.ts"), "{out}");
+}

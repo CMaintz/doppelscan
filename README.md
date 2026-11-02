@@ -102,7 +102,9 @@ mapping boilerplate too; in token-level languages a name that differs in
 several places is taken for a renamed local and not counted).
 
 `.gitignore` is honoured, and dependency/build directories, tool caches,
-minified bundles and files marked as generated are skipped. Other
+minified bundles, files marked as generated and generated-source
+directories (`generated`, `generated-src`, `__generated__` and the like) are
+skipped. Other
 dot-directories, such as `.github`, are scanned.
 
 ## Gating new duplication
