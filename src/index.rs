@@ -99,6 +99,35 @@ impl Frag {
 
 pub const NO_SCOPE: u32 = u32::MAX;
 
+/// Sequences stored end to end, one allocation per file: a Vec per block
+/// cost a header and spare capacity for each of millions of short runs.
+#[derive(Default)]
+pub struct Seqs {
+    elems: Vec<Frag>,
+    ends: Vec<u32>,
+}
+
+impl Seqs {
+    pub fn push(&mut self, seq: &[Frag]) {
+        self.elems.extend_from_slice(seq);
+        self.ends.push(self.elems.len() as u32);
+    }
+
+    pub fn get(&self, i: usize) -> &[Frag] {
+        let start = if i == 0 { 0 } else { self.ends[i - 1] };
+        &self.elems[start as usize..self.ends[i] as usize]
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &[Frag]> {
+        (0..self.ends.len()).map(|i| self.get(i))
+    }
+
+    fn shrink_to_fit(&mut self) {
+        self.elems.shrink_to_fit();
+        self.ends.shrink_to_fit();
+    }
+}
+
 pub struct FileIndex {
     pub path: String,
     pub lang: usize,
@@ -108,7 +137,7 @@ pub struct FileIndex {
     /// (a statement around a call) are all kept; detection picks one.
     pub nodes: Vec<Frag>,
     /// Child sequences of block-like nodes, split at noise such as imports.
-    pub seqs: Vec<Vec<Frag>>,
+    pub seqs: Seqs,
     /// Functions, methods and lambdas: the units near-miss detection
     /// compares.
     pub units: Vec<Frag>,
@@ -121,6 +150,17 @@ pub struct FileIndex {
 }
 
 impl FileIndex {
+    /// Indexing grows these by doubling, which left about a third of the
+    /// index as spare capacity held for the rest of the scan.
+    pub(crate) fn shrink_to_fit(&mut self) {
+        self.leaves.shrink_to_fit();
+        self.nodes.shrink_to_fit();
+        self.seqs.shrink_to_fit();
+        self.units.shrink_to_fit();
+        self.scopes.shrink_to_fit();
+        self.scope_spans.shrink_to_fit();
+    }
+
     pub fn text(&self, start: u32, end: u32) -> &str {
         &self.source[start as usize..end as usize]
     }
@@ -202,7 +242,7 @@ pub fn index_source(
     let mut builder = Builder::new(&LANGS[lang], &source, strict);
     builder.walk(&mut tree.walk());
     builder.claim_top_level();
-    Some(FileIndex {
+    let mut index = FileIndex {
         path,
         lang,
         leaves: builder.leaves,
@@ -213,7 +253,9 @@ pub fn index_source(
         scopes: builder.scopes,
         scope_spans: builder.scope_spans,
         source,
-    })
+    };
+    index.shrink_to_fit();
+    Some(index)
 }
 
 struct Frame {
@@ -241,7 +283,7 @@ struct Builder<'a> {
     /// Locals whose function has not closed yet, in leaf order.
     pending_locals: Vec<u32>,
     nodes: Vec<Frag>,
-    seqs: Vec<Vec<Frag>>,
+    seqs: Seqs,
     units: Vec<Frag>,
     scopes: Vec<String>,
     scope_spans: Vec<(u32, u32)>,
@@ -259,7 +301,7 @@ impl<'a> Builder<'a> {
             leaves: Vec::new(),
             pending_locals: Vec::new(),
             nodes: Vec::new(),
-            seqs: Vec::new(),
+            seqs: Seqs::default(),
             units: Vec::new(),
             scopes: Vec::new(),
             scope_spans: Vec::new(),
@@ -533,7 +575,7 @@ impl<'a> Builder<'a> {
 
     fn flush_run(&mut self, elems: Vec<Frag>) {
         if elems.len() >= 2 {
-            self.seqs.push(elems);
+            self.seqs.push(&elems);
         }
     }
 

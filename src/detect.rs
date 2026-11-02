@@ -193,7 +193,7 @@ fn run_group(
 
 fn run_elems<'f>(files: &'f [Arc<FileIndex>], text: &RunText, pos: u32, len: usize) -> &'f [Frag] {
     let (fi, si, ei) = text.owner[pos as usize];
-    &files[fi as usize].seqs[si as usize][ei as usize..ei as usize + len]
+    &files[fi as usize].seqs.get(si as usize)[ei as usize..ei as usize + len]
 }
 
 fn shares_a_block(sorted: &[u32], text: &RunText) -> bool {

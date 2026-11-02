@@ -12,7 +12,8 @@
 
 use crate::hash::{combine, hash_bytes, seed};
 use crate::index::{
-    FileIndex, Frag, Leaf, LeafClass, MIN_STORED_TOKENS, NO_SCOPE, Role, line_starts, placeholder,
+    FileIndex, Frag, Leaf, LeafClass, MIN_STORED_TOKENS, NO_SCOPE, Role, Seqs, line_starts,
+    placeholder,
 };
 use crate::lang::{LANGS, Lexicon};
 
@@ -204,7 +205,7 @@ pub fn index_tokens(
         scope_spans,
         ..
     } = builder;
-    FileIndex {
+    let mut index = FileIndex {
         path,
         lang,
         source,
@@ -215,7 +216,9 @@ pub fn index_tokens(
         line_starts: lines,
         scopes,
         scope_spans,
-    }
+    };
+    index.shrink_to_fit();
+    index
 }
 
 struct Lexer<'a> {
@@ -410,7 +413,7 @@ struct Builder<'a> {
     lang_seed: u64,
     leaves: Vec<Leaf>,
     nodes: Vec<Frag>,
-    seqs: Vec<Vec<Frag>>,
+    seqs: Seqs,
     scopes: Vec<String>,
     scope_spans: Vec<(u32, u32)>,
     blocks: Vec<Block>,
@@ -425,7 +428,7 @@ impl<'a> Builder<'a> {
             lang_seed,
             leaves: Vec::new(),
             nodes: Vec::new(),
-            seqs: Vec::new(),
+            seqs: Seqs::default(),
             scopes: Vec::new(),
             scope_spans: Vec::new(),
             blocks: vec![Block::new(false, None, lang_seed)],
@@ -636,7 +639,7 @@ impl<'a> Builder<'a> {
 
     fn flush_run(&mut self, elems: Vec<Frag>) {
         if elems.len() >= 2 {
-            self.seqs.push(elems);
+            self.seqs.push(&elems);
         }
     }
 
