@@ -100,7 +100,7 @@ pub fn near_analysis(
     let classes = exact_classes(&files, units);
     let edges = similar_classes(&files, &classes, threshold);
     let mut groups = without_nested(clusters(&classes, &edges));
-    groups.sort_by_key(|g| std::cmp::Reverse(near_score(g)));
+    rank(&mut groups);
     NearAnalysis {
         files,
         groups,
@@ -410,6 +410,17 @@ fn carried_by(inner: &RawNear, outer: &RawNear) -> bool {
     })
 }
 
+/// Best first; ties by where their first copy sits, so the order depends
+/// on the code and not on how the pairs were found.
+fn rank(groups: &mut [RawNear]) {
+    groups.sort_by_cached_key(|g| (std::cmp::Reverse(near_score(g)), first_copy(g)));
+}
+
+fn first_copy(g: &RawNear) -> (u32, u32) {
+    let at = g.members.iter().map(|m| (m.file, m.frag.start)).min();
+    at.unwrap_or_default()
+}
+
 fn near_score(g: &RawNear) -> u64 {
     smallest(g) as u64 * (g.members.len() as u64 - 1)
 }
@@ -586,7 +597,8 @@ pub fn render_near_summary(a: &NearAnalysis, shown: usize) -> String {
 mod tests {
     use rustc_hash::FxHashMap;
 
-    use super::{K, W, candidates_of, winnow};
+    use super::{K, RawNear, Unit, W, candidates_of, rank, winnow};
+    use crate::index::Frag;
 
     // Catches a winnowing window or k-gram size that breaks the guarantee
     // the threshold rests on: any shared run of W + K - 1 tokens is seen.
@@ -617,5 +629,37 @@ mod tests {
         let mut seen = vec![u32::MAX; 6];
         assert_eq!(candidates_of(0, &prints, &index, &mut seen), vec![3, 5]);
         assert_eq!(candidates_of(3, &prints, &index, &mut seen), vec![5]);
+    }
+
+    fn group_at(file: u32, start: u32) -> RawNear {
+        let frag = Frag {
+            hash: 0,
+            start,
+            end: start + 100,
+            start_line: 1,
+            end_line: 5,
+            leaf_start: 0,
+            leaf_end: 40,
+            scope: 0,
+        };
+        let unit = |class| Unit { file, frag, class };
+        RawNear {
+            members: vec![unit(0), unit(1)],
+            similarity: 0.9,
+        }
+    }
+
+    // Catches ties left in the order union-find happened to produce them:
+    // that order shifts with any change to how pairs are found, so the
+    // same code would list differently from one release to the next.
+    #[test]
+    fn groups_with_equal_scores_list_in_source_order() {
+        let mut groups = vec![group_at(1, 0), group_at(0, 500), group_at(0, 20)];
+        rank(&mut groups);
+        let firsts: Vec<(u32, u32)> = groups
+            .iter()
+            .map(|g| (g.members[0].file, g.members[0].frag.start))
+            .collect();
+        assert_eq!(firsts, [(0, 20), (0, 500), (1, 0)]);
     }
 }
