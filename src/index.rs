@@ -223,6 +223,10 @@ struct Frame {
     leaf_start: u32,
     block: Option<Vec<Frag>>,
     scope_pushed: bool,
+    /// A child was handed up. A node whose children were all skipped
+    /// (`modifiers` holding only `@Override`) is dropped with them, or
+    /// `@Override void x()` would still differ from `void x()`.
+    kept_child: bool,
 }
 
 /// A finished child handed up to its parent frame.
@@ -311,6 +315,7 @@ impl<'a> Builder<'a> {
             leaf_start: self.leaves.len() as u32,
             block: (class == KindClass::Block).then(Vec::new),
             scope_pushed,
+            kept_child: false,
         });
     }
 
@@ -330,7 +335,7 @@ impl<'a> Builder<'a> {
         if frame.scope_pushed {
             self.scope_stack.pop();
         }
-        Some(Done {
+        frame.kept_child.then_some(Done {
             frag,
             class,
             named: node.is_named(),
@@ -519,6 +524,7 @@ impl<'a> Builder<'a> {
         let Some(parent) = self.frames.last_mut() else {
             return;
         };
+        parent.kept_child = true;
         parent.hash = combine(parent.hash, done.frag.hash);
         let Some(elems) = parent.block.as_mut() else {
             return;
