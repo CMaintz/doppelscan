@@ -1,4 +1,4 @@
-use std::io::{Read as _, Write as _};
+use std::io::{BufWriter, ErrorKind, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -9,6 +9,8 @@ use doppelscan::engine::{Against, Check, Engine, ScanOptions, anchor};
 use doppelscan::lang::{LANGS, lang_index_by_name, lang_index_for_path};
 use doppelscan::near::{render_near, render_near_summary};
 use doppelscan::report::{Analysis, Detail, render_check, render_group, render_summary};
+use serde::Serialize;
+use serde::ser::{Error as _, SerializeSeq as _, Serializer};
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -221,6 +223,12 @@ fn print_groups(
     template: bool,
     format: Format,
 ) -> anyhow::Result<()> {
+    if format == Format::Json {
+        return emit_json(&Report {
+            groups: Each(|| ids.iter().map(|&id| analysis.group(id, template))),
+            summary: Sorted(analysis.summary()),
+        });
+    }
     let groups: Vec<_> = ids.iter().map(|&id| analysis.group(id, template)).collect();
     // Asking for templates means drilling in, so show every occurrence too.
     let detail = if template {
@@ -228,24 +236,68 @@ fn print_groups(
     } else {
         Detail::Brief
     };
-    let out = if format == Format::Json {
-        let body = serde_json::json!({ "summary": analysis.summary(), "groups": groups });
-        serde_json::to_string_pretty(&body)? + "\n"
-    } else {
-        let mut out = render_summary(&analysis.summary(), groups.len());
-        groups
-            .iter()
-            .for_each(|g| out.push_str(&format!("\n{}", render_group(g, detail))));
-        out
-    };
+    let mut out = render_summary(&analysis.summary(), groups.len());
+    groups
+        .iter()
+        .for_each(|g| out.push_str(&format!("\n{}", render_group(g, detail))));
     emit(&out)
+}
+
+/// A report as `json!` writes it, keys sorted, but built one group at a
+/// time: a `Value` tree of every group took several times the size of the
+/// output on a large repo.
+#[derive(Serialize)]
+struct Report<G, S> {
+    groups: G,
+    summary: Sorted<S>,
+}
+
+/// Serialized through a `Value`, whose maps sort their keys.
+struct Sorted<T>(T);
+
+impl<T: Serialize> Serialize for Sorted<T> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        serde_json::to_value(&self.0)
+            .map_err(S::Error::custom)?
+            .serialize(s)
+    }
+}
+
+/// The items a closure yields, each made only when it is written.
+struct Each<F>(F);
+
+impl<F, I> Serialize for Each<F>
+where
+    F: Fn() -> I,
+    I: Iterator<Item: Serialize>,
+{
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let mut seq = s.serialize_seq(None)?;
+        for item in (self.0)() {
+            seq.serialize_element(&Sorted(item))?;
+        }
+        seq.end()
+    }
+}
+
+fn emit_json(body: &impl Serialize) -> anyhow::Result<()> {
+    let mut out = BufWriter::new(std::io::stdout().lock());
+    let written = serde_json::to_writer_pretty(&mut out, body)
+        .map_err(std::io::Error::from)
+        .and_then(|()| out.write_all(b"\n"))
+        .and_then(|()| out.flush());
+    ignore_closed_pipe(written)
 }
 
 /// A closed pipe (`doppelscan | head`) is a normal way to stop reading, not
 /// an error worth a panic.
 fn emit(text: &str) -> anyhow::Result<()> {
-    match std::io::stdout().lock().write_all(text.as_bytes()) {
-        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+    ignore_closed_pipe(std::io::stdout().lock().write_all(text.as_bytes()))
+}
+
+fn ignore_closed_pipe(written: std::io::Result<()>) -> anyhow::Result<()> {
+    match written {
+        Err(e) if e.kind() == ErrorKind::BrokenPipe => Ok(()),
         other => Ok(other?),
     }
 }
@@ -393,14 +445,14 @@ fn near(engine: &Engine, similarity: f32, limit: usize, common: &Common) -> anyh
         "--similarity is a fraction between 0 and 1"
     );
     let analysis = engine.near(&common.path, &options(common)?, similarity)?;
-    let groups: Vec<_> = first_ids(limit, analysis.groups.len())
-        .into_iter()
-        .map(|id| analysis.group(id))
-        .collect();
+    let ids = first_ids(limit, analysis.groups.len());
     if common.format == Format::Json {
-        let body = serde_json::json!({ "summary": analysis.summary(), "groups": groups });
-        return emit(&(serde_json::to_string_pretty(&body)? + "\n"));
+        return emit_json(&Report {
+            groups: Each(|| ids.iter().map(|&id| analysis.group(id))),
+            summary: Sorted(analysis.summary()),
+        });
     }
+    let groups: Vec<_> = ids.into_iter().map(|id| analysis.group(id)).collect();
     let mut out = render_near_summary(&analysis, groups.len());
     for g in &groups {
         out.push_str(&format!("\n{}", render_near(g, Detail::Brief)));
