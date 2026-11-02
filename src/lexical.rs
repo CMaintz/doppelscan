@@ -216,6 +216,7 @@ pub fn index_tokens(
         line_starts: lines,
         scopes,
         scope_spans,
+        local_scopes: Vec::new(),
     };
     index.shrink_to_fit();
     index
@@ -498,7 +499,6 @@ impl<'a> Builder<'a> {
                 _ => Role::Value,
             },
             token: (hash ^ (hash >> 32)) as u32,
-            scope: (0, 0),
         });
         self.fold_into_stmt(tok.start, index, hash);
     }

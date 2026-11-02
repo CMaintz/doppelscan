@@ -80,8 +80,9 @@ pub fn analyze(group: &RawGroup, files: &[impl AsRef<FileIndex>]) -> Variations 
         .collect();
     let first = files[group.occs[0].file as usize].as_ref();
     let leaf_at = |offset: usize| first.leaves[columns[0][offset] as usize];
+    let scope_at = |offset: usize| first.scope_of(columns[0][offset]);
     let differing = differing(group, files, &columns);
-    let bindings = bindings(&differing, leaf_at);
+    let bindings = bindings(&differing, leaf_at, scope_at);
     let mut slots: FxHashMap<(Vec<&str>, Option<usize>), Slot> = FxHashMap::default();
     for (offset, texts) in &differing {
         let leaf = leaf_at(*offset);
@@ -118,7 +119,11 @@ fn differing<'f>(
         .collect()
 }
 
-fn bindings<'a>(differing: &'a Differing, leaf_at: impl Fn(usize) -> Leaf) -> Vec<Binding<'a>> {
+fn bindings<'a>(
+    differing: &'a Differing,
+    leaf_at: impl Fn(usize) -> Leaf,
+    scope_at: impl Fn(usize) -> (u32, u32),
+) -> Vec<Binding<'a>> {
     differing
         .iter()
         .filter(|(offset, _)| leaf_at(*offset).role.binds())
@@ -126,7 +131,7 @@ fn bindings<'a>(differing: &'a Differing, leaf_at: impl Fn(usize) -> Leaf) -> Ve
             offset: *offset,
             texts,
             role: leaf_at(*offset).role,
-            scope: leaf_at(*offset).scope,
+            scope: scope_at(*offset),
         })
         .collect()
 }

@@ -34,9 +34,6 @@ pub struct Leaf {
     /// The normalized token (names and literals anonymised unless strict),
     /// for comparing token streams that do not align 1:1.
     pub token: u32,
-    /// For a binding, the leaf index range where its name refers to it: the
-    /// enclosing function for a local, the whole file for a declaration.
-    pub scope: (u32, u32),
 }
 
 const WHOLE_FILE: (u32, u32) = (0, u32::MAX);
@@ -50,7 +47,6 @@ const FIELD_MODIFIERS: &[&str] = &[
     "val",
     "var",
 ];
-const UNCLAIMED: (u32, u32) = (u32::MAX, u32::MAX);
 
 /// What an identifier does where it stands, which decides what an
 /// extracted helper has to do with a name that differs between copies.
@@ -147,6 +143,10 @@ pub struct FileIndex {
     pub scopes: Vec<String>,
     /// Byte range of each scope's definition, parallel to `scopes`.
     pub scope_spans: Vec<(u32, u32)>,
+    /// (leaf, scope start, scope end) for each local, by leaf. Kept apart
+    /// from `Leaf` because few leaves bind a local, and a range in every
+    /// leaf made the largest table in the index half as big again.
+    pub(crate) local_scopes: Vec<(u32, u32, u32)>,
 }
 
 impl FileIndex {
@@ -159,6 +159,7 @@ impl FileIndex {
         self.units.shrink_to_fit();
         self.scopes.shrink_to_fit();
         self.scope_spans.shrink_to_fit();
+        self.local_scopes.shrink_to_fit();
     }
 
     pub fn text(&self, start: u32, end: u32) -> &str {
@@ -172,6 +173,18 @@ impl FileIndex {
 
     pub fn leaf_text(&self, leaf: &Leaf) -> &str {
         self.text(leaf.start, leaf.end)
+    }
+
+    /// For a binding, the leaf index range where its name refers to it: the
+    /// enclosing function for a local, the whole file for a declaration.
+    /// Meaningless for other leaves.
+    pub fn scope_of(&self, leaf: u32) -> (u32, u32) {
+        if self.leaves[leaf as usize].role != Role::Local {
+            return WHOLE_FILE;
+        }
+        let at = self.local_scopes.partition_point(|s| s.0 < leaf);
+        let (_, start, end) = self.local_scopes[at];
+        (start, end)
     }
 
     pub fn scope_name(&self, scope: u32) -> Option<&str> {
@@ -252,6 +265,7 @@ pub fn index_source(
         line_starts: line_starts(&source),
         scopes: builder.scopes,
         scope_spans: builder.scope_spans,
+        local_scopes: builder.local_scopes,
         source,
     };
     index.shrink_to_fit();
@@ -282,6 +296,7 @@ struct Builder<'a> {
     leaves: Vec<Leaf>,
     /// Locals whose function has not closed yet, in leaf order.
     pending_locals: Vec<u32>,
+    local_scopes: Vec<(u32, u32, u32)>,
     nodes: Vec<Frag>,
     seqs: Seqs,
     units: Vec<Frag>,
@@ -300,6 +315,7 @@ impl<'a> Builder<'a> {
             lang_seed: hash_bytes(lang.name.as_bytes()),
             leaves: Vec::new(),
             pending_locals: Vec::new(),
+            local_scopes: Vec::new(),
             nodes: Vec::new(),
             seqs: Seqs::default(),
             units: Vec::new(),
@@ -411,7 +427,10 @@ impl<'a> Builder<'a> {
             LeafClass::Identifier => self.role(node, field),
             _ => Role::Value,
         };
-        let scope = self.scope_for(role);
+        if role == Role::Local {
+            // Its scope is only known when its function closes.
+            self.pending_locals.push(self.leaves.len() as u32);
+        }
         let range = node.byte_range();
         self.leaves.push(Leaf {
             start: range.start as u32,
@@ -419,28 +438,16 @@ impl<'a> Builder<'a> {
             class: leaf_class,
             role,
             token: (hash ^ (hash >> 32)) as u32,
-            scope,
         });
         hash
-    }
-
-    /// A local's scope is only known when its function closes.
-    fn scope_for(&mut self, role: Role) -> (u32, u32) {
-        match role {
-            Role::Declared => WHOLE_FILE,
-            Role::Local => {
-                self.pending_locals.push(self.leaves.len() as u32);
-                UNCLAIMED
-            }
-            _ => (0, 0),
-        }
     }
 
     /// Locals outside any function (script code) live for the whole file.
     fn claim_top_level(&mut self) {
         for i in self.pending_locals.drain(..) {
-            self.leaves[i as usize].scope = WHOLE_FILE;
+            self.local_scopes.push((i, WHOLE_FILE.0, WHOLE_FILE.1));
         }
+        self.local_scopes.sort_unstable();
     }
 
     fn role(&self, node: Node, field: Option<NonZeroU16>) -> Role {
@@ -475,7 +482,7 @@ impl<'a> Builder<'a> {
             && i >= leaf_start
         {
             self.pending_locals.pop();
-            self.leaves[i as usize].scope = (leaf_start, end);
+            self.local_scopes.push((i, leaf_start, end));
         }
     }
 
