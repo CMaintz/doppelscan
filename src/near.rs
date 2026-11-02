@@ -373,10 +373,11 @@ impl NearAnalysis {
             .expect("a group spans two classes");
         let file = &self.files[m.file as usize];
         let scope = file.own_scope(m.frag.start, m.frag.end, m.frag.scope);
+        let (start_line, end_line) = file.lines(m.frag.start, m.frag.end);
         NearOccurrence {
             file: file.path.clone(),
-            start_line: m.frag.start_line,
-            end_line: m.frag.end_line,
+            start_line,
+            end_line,
             scope: file.scope_name(scope).map(str::to_string),
             differs: differing_lines(file, m, &streams[i], &streams[other]),
         }

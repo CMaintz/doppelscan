@@ -87,7 +87,7 @@ fn node_groups(files: &[Arc<FileIndex>], min_tokens: u32) -> Vec<RawGroup> {
         .map(|c| {
             let occs = c
                 .iter()
-                .map(|&(_, fi, ni)| occ_of(fi, &[files[fi as usize].nodes[ni as usize]]))
+                .map(|&(_, fi, ni)| occ_of(files, fi, &[files[fi as usize].nodes[ni as usize]]))
                 .collect();
             RawGroup {
                 hash: c[0].0,
@@ -99,14 +99,15 @@ fn node_groups(files: &[Arc<FileIndex>], min_tokens: u32) -> Vec<RawGroup> {
         .collect()
 }
 
-fn occ_of(file: u32, elems: &[Frag]) -> Occ {
+fn occ_of(files: &[Arc<FileIndex>], file: u32, elems: &[Frag]) -> Occ {
     let (first, last) = (elems[0], elems[elems.len() - 1]);
+    let (start_line, end_line) = files[file as usize].lines(first.start, last.end);
     Occ {
         file,
         start: first.start,
         end: last.end,
-        start_line: first.start_line,
-        end_line: last.end_line,
+        start_line,
+        end_line,
         scope: first.scope,
         leaves: elems.iter().map(|e| (e.leaf_start, e.leaf_end)).collect(),
     }
@@ -178,7 +179,13 @@ fn run_group(
     }
     let occs: Vec<Occ> = kept
         .iter()
-        .map(|&p| occ_of(text.owner[p as usize].0, run_elems(files, text, p, len)))
+        .map(|&p| {
+            occ_of(
+                files,
+                text.owner[p as usize].0,
+                run_elems(files, text, p, len),
+            )
+        })
         .collect();
     let hash = run_elems(files, text, p0 as u32, len)
         .iter()

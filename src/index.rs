@@ -80,8 +80,6 @@ pub struct Frag {
     pub hash: u64,
     pub start: u32,
     pub end: u32,
-    pub start_line: u32,
-    pub end_line: u32,
     pub leaf_start: u32,
     pub leaf_end: u32,
     pub scope: u32,
@@ -169,6 +167,18 @@ impl FileIndex {
     /// 1-based line of a byte offset.
     pub fn line_of(&self, byte: u32) -> u32 {
         self.line_starts.partition_point(|&s| s <= byte) as u32
+    }
+
+    /// First and last line of `[start, end)`, looked up rather than stored
+    /// in every `Frag`: only reported fragments need them. A grammar's node
+    /// ends on the line of its end offset (tree-sitter's end row), a token
+    /// run on the line of its last byte.
+    pub fn lines(&self, start: u32, end: u32) -> (u32, u32) {
+        let last = match LANGS[self.lang].syntax {
+            Syntax::Tree(_) => end,
+            Syntax::Tokens(_) => end.saturating_sub(1),
+        };
+        (self.line_of(start), self.line_of(last))
     }
 
     pub fn leaf_text(&self, leaf: &Leaf) -> &str {
@@ -592,8 +602,6 @@ impl<'a> Builder<'a> {
             hash,
             start: range.start as u32,
             end: range.end as u32,
-            start_line: node.start_position().row as u32 + 1,
-            end_line: node.end_position().row as u32 + 1,
             leaf_start,
             leaf_end: self.leaves.len() as u32,
             scope: self.scope_stack.last().copied().unwrap_or(NO_SCOPE),

@@ -190,9 +190,9 @@ pub fn index_tokens(
     strict: bool,
     lexicon: &Lexicon,
 ) -> FileIndex {
-    let lines = line_starts(&source);
     let lang_seed = hash_bytes(LANGS[lang].name.as_bytes());
-    let mut builder = Builder::new(&source, &lines, strict, lang_seed);
+    let lines = line_starts(&source);
+    let mut builder = Builder::new(&source, strict, lang_seed);
     for tok in tokenize(&source, lexicon) {
         builder.push(&tok);
     }
@@ -409,7 +409,6 @@ struct Block {
 
 struct Builder<'a> {
     source: &'a str,
-    line_starts: &'a [u32],
     strict: bool,
     lang_seed: u64,
     leaves: Vec<Leaf>,
@@ -421,10 +420,9 @@ struct Builder<'a> {
 }
 
 impl<'a> Builder<'a> {
-    fn new(source: &'a str, line_starts: &'a [u32], strict: bool, lang_seed: u64) -> Self {
+    fn new(source: &'a str, strict: bool, lang_seed: u64) -> Self {
         Self {
             source,
-            line_starts,
             strict,
             lang_seed,
             leaves: Vec::new(),
@@ -620,8 +618,6 @@ impl<'a> Builder<'a> {
             hash: stmt.hash,
             start: stmt.start,
             end,
-            start_line: self.line_of(stmt.start),
-            end_line: self.line_of(end.saturating_sub(1)),
             leaf_start: stmt.leaf_start,
             leaf_end: self.leaves.len() as u32,
             scope: self
@@ -631,10 +627,6 @@ impl<'a> Builder<'a> {
                 .find_map(|b| b.scope)
                 .unwrap_or(NO_SCOPE),
         }
-    }
-
-    fn line_of(&self, byte: u32) -> u32 {
-        self.line_starts.partition_point(|&s| s <= byte) as u32
     }
 
     fn flush_run(&mut self, elems: Vec<Frag>) {
