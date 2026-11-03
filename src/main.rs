@@ -193,7 +193,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
 }
 
 fn options(c: &Common) -> anyhow::Result<ScanOptions> {
-    config(c)?.options(requested(c), ScanOptions::default().min_tokens)
+    config(c)?.options(requested(c))
 }
 
 fn config(c: &Common) -> anyhow::Result<Config> {

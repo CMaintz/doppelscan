@@ -5,10 +5,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use ignore::gitignore::{Gitignore, GitignoreBuilder};
-use ignore::overrides::{Override, OverrideBuilder};
 use ignore::{WalkBuilder, WalkState};
 
+use crate::filter::PathFilter;
 use crate::lang::{LANGS, lang_index_for_path};
 
 const EXCLUDED_DIRS: &[&str] = &[
@@ -45,124 +44,6 @@ const GENERATED_MARKERS: &[&str] = &[
 
 pub const MAX_FILE_BYTES: u64 = 1 << 20;
 
-/// A config file's `exclude` and `include`, as `.gitignore` patterns
-/// anchored at `dir` (canonical).
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct PathRules {
-    pub dir: PathBuf,
-    pub exclude: Vec<String>,
-    pub include: Vec<String>,
-}
-
-/// What a scan leaves out: `--exclude` globs (relative to the scanned
-/// path), each config's excludes (relative to its own directory), and the
-/// built-in skip list, apart from what a config's `include` names.
-#[derive(Clone)]
-pub struct PathFilter {
-    /// The scanned path, canonical, to anchor config patterns against.
-    root: PathBuf,
-    overrides: Override,
-    rules: Vec<Compiled>,
-}
-
-#[derive(Clone)]
-struct Compiled {
-    dir: PathBuf,
-    exclude: Gitignore,
-    include: Gitignore,
-    /// Directories an include reaches into, which the walk must enter
-    /// even though they are skipped (`vendor` for `vendor/ours`).
-    include_paths: Vec<PathBuf>,
-}
-
-impl PathFilter {
-    pub fn new(root: &Path, exclude: &[String], rules: &[PathRules]) -> anyhow::Result<Self> {
-        Ok(Self {
-            root: root.canonicalize()?,
-            overrides: exclude_overrides(root, exclude)?,
-            rules: rules.iter().map(compile).collect::<anyhow::Result<_>>()?,
-        })
-    }
-
-    /// `rel` is relative to the scanned path.
-    pub fn skips_dir(&self, rel: &Path) -> bool {
-        let abs = self.root.join(rel);
-        let builtin = rel.components().any(|c| is_excluded_dir(c.as_os_str()));
-        let wanted = self.included(&abs, true) || self.leads_to_include(&abs);
-        (builtin && !wanted) || self.config_excludes(&abs, true)
-    }
-
-    /// `rel` is relative to the scanned path.
-    pub fn skips_file(&self, rel: &Path) -> bool {
-        let abs = self.root.join(rel);
-        let parents = rel.parent().into_iter().flat_map(Path::components);
-        let builtin = parents.into_iter().any(|c| is_excluded_dir(c.as_os_str()));
-        (builtin && !self.included(&abs, false)) || self.config_excludes(&abs, false)
-    }
-
-    fn config_excludes(&self, abs: &Path, is_dir: bool) -> bool {
-        self.rules.iter().any(|r| {
-            abs.starts_with(&r.dir)
-                && r.exclude
-                    .matched_path_or_any_parents(abs, is_dir)
-                    .is_ignore()
-        })
-    }
-
-    fn included(&self, abs: &Path, is_dir: bool) -> bool {
-        self.rules.iter().any(|r| {
-            abs.starts_with(&r.dir)
-                && r.include
-                    .matched_path_or_any_parents(abs, is_dir)
-                    .is_ignore()
-        })
-    }
-
-    fn leads_to_include(&self, abs: &Path) -> bool {
-        let reaches = |p: &PathBuf| p.starts_with(abs) && p != abs;
-        self.rules
-            .iter()
-            .any(|r| r.include_paths.iter().any(reaches))
-    }
-}
-
-fn compile(rules: &PathRules) -> anyhow::Result<Compiled> {
-    let matcher = |patterns: &[String]| -> anyhow::Result<Gitignore> {
-        let mut builder = GitignoreBuilder::new(&rules.dir);
-        for p in patterns {
-            builder.add_line(None, p)?;
-        }
-        Ok(builder.build()?)
-    };
-    Ok(Compiled {
-        dir: rules.dir.clone(),
-        exclude: matcher(&rules.exclude)?,
-        include: matcher(&rules.include)?,
-        include_paths: rules
-            .include
-            .iter()
-            .filter_map(|p| literal_dir(&rules.dir, p))
-            .collect(),
-    })
-}
-
-/// The directory an anchored pattern names before its first wildcard:
-/// `vendor/ours/**` reaches `dir/vendor/ours`, `vendor/our*` only
-/// `dir/vendor`. A pattern with no inner slash (`build`) matches at any
-/// depth, as in `.gitignore`, so it names no one path; inside a skipped
-/// directory it only works anchored.
-fn literal_dir(dir: &Path, pattern: &str) -> Option<PathBuf> {
-    if !pattern.trim_end_matches('/').contains('/') {
-        return None;
-    }
-    let pattern = pattern.trim_start_matches('/');
-    let literal = match pattern.find(['*', '?', '[']) {
-        Some(at) => &pattern[..pattern[..at].rfind('/').unwrap_or(0)],
-        None => pattern.trim_end_matches('/'),
-    };
-    (!literal.is_empty()).then(|| dir.join(literal))
-}
-
 pub fn discover(
     root: &Path,
     filter: &PathFilter,
@@ -172,15 +53,15 @@ pub fn discover(
     let named = root.is_file() && languages.is_empty();
     let own: Vec<usize> = lang_index_for_path(root).into_iter().collect();
     let languages = if named { &own[..] } else { languages };
-    let (start, filter) = (root.to_path_buf(), filter.clone());
+    let (start, entry_filter) = (root.to_path_buf(), filter.clone());
     let walker = WalkBuilder::new(root)
         .require_git(false)
         .overrides(filter.overrides.clone())
         .filter_entry(move |e| {
             let rel = e.path().strip_prefix(&start).unwrap_or(e.path());
             match e.file_type().is_some_and(|t| t.is_dir()) {
-                true => !filter.skips_dir(rel),
-                false => !filter.skips_file(rel),
+                true => !entry_filter.skips_dir(rel),
+                false => !entry_filter.skips_file(rel),
             }
         })
         .build_parallel();
@@ -193,17 +74,12 @@ pub fn discover(
             WalkState::Continue
         })
     });
+    if let Some(e) = filter.take_error() {
+        return Err(e);
+    }
     let mut files = found.into_inner().unwrap();
     files.sort();
     Ok(files)
-}
-
-fn exclude_overrides(root: &Path, exclude: &[String]) -> anyhow::Result<Override> {
-    let mut overrides = OverrideBuilder::new(root);
-    for glob in exclude {
-        overrides.add(&format!("!{glob}"))?;
-    }
-    Ok(overrides.build()?)
 }
 
 /// The language of a file known from a listing rather than a walk (a git
@@ -218,13 +94,20 @@ pub fn accept_listed(rel: &Path, filter: &PathFilter, languages: &[usize]) -> Op
         .ancestors()
         .filter(|a| !a.as_os_str().is_empty())
         .any(|a| filter.overrides.matched(a, a != rel).is_ignore());
-    if hidden || excluded || filter.skips_file(rel) {
+    // Every directory on the way, as the walk would prune it: a file under
+    // an excluded directory stays out even where a pattern re-includes it.
+    let pruned = rel
+        .ancestors()
+        .skip(1)
+        .filter(|a| !a.as_os_str().is_empty())
+        .any(|a| filter.skips_dir(a));
+    if hidden || excluded || pruned || filter.skips_file(rel) {
         return None;
     }
     accept(rel, languages).map(|(_, lang)| lang)
 }
 
-fn is_excluded_dir(name: &std::ffi::OsStr) -> bool {
+pub(crate) fn is_excluded_dir(name: &std::ffi::OsStr) -> bool {
     name.to_str().is_some_and(|n| EXCLUDED_DIRS.contains(&n))
 }
 

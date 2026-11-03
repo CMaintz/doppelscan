@@ -189,11 +189,41 @@ fn scan_root(root: &Path, args: &Value) -> anyhow::Result<PathBuf> {
     Ok(path)
 }
 
-fn options(root: &Path, args: &Value, default_min: u32) -> anyhow::Result<ScanOptions> {
+fn options(root: &Path, args: &Value) -> anyhow::Result<ScanOptions> {
+    with_root(root, config(root, args)?.options(requested(args))?)
+}
+
+/// Snippets are small, so a snippet search keeps its own lower minimum
+/// unless the call sets one; the repository's is meant for whole files.
+fn snippet_options(root: &Path, args: &Value) -> anyhow::Result<ScanOptions> {
+    let asked = Requested {
+        min_tokens: requested(args).min_tokens.or(Some(SNIPPET_MIN_TOKENS)),
+        ..requested(args)
+    };
+    with_root(root, config(root, args)?.options(asked)?)
+}
+
+const SNIPPET_MIN_TOKENS: u32 = 20;
+
+fn with_root(root: &Path, opts: ScanOptions) -> anyhow::Result<ScanOptions> {
     Ok(ScanOptions {
         display_base: Some(root.to_path_buf()),
-        ..config(root, args)?.options(requested(args), default_min)?
+        ..opts
     })
+}
+
+fn similarity_arg(args: &Value) -> anyhow::Result<Option<f32>> {
+    let Some(v) = args.get("similarity") else {
+        return Ok(None);
+    };
+    let similarity = v
+        .as_f64()
+        .ok_or_else(|| anyhow::anyhow!("similarity must be a number"))? as f32;
+    anyhow::ensure!(
+        (0.0..=1.0).contains(&similarity),
+        "similarity is a fraction between 0 and 1"
+    );
+    Ok(Some(similarity))
 }
 
 fn requested(args: &Value) -> Requested {
@@ -230,7 +260,7 @@ fn render(analysis: &Analysis, ids: &[usize], template: bool) -> String {
 }
 
 fn find_duplicates(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<String> {
-    let analysis = engine.scan(&scan_root(root, args)?, &options(root, args, 50)?)?;
+    let analysis = engine.scan(&scan_root(root, args)?, &options(root, args)?)?;
     let ids = page(args, analysis.groups.len());
     let templates = args
         .get("include_templates")
@@ -260,7 +290,7 @@ fn more_hint(ids: &[usize], total: usize) -> String {
 fn get_group(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<String> {
     let key =
         str_arg(args, "id").ok_or_else(|| anyhow::anyhow!("missing required argument: id"))?;
-    let analysis = engine.scan(&scan_root(root, args)?, &options(root, args, 50)?)?;
+    let analysis = engine.scan(&scan_root(root, args)?, &options(root, args)?)?;
     let id = analysis
         .resolve(key)
         .ok_or_else(|| anyhow::anyhow!("no clone group {key:?}; run find_duplicates again"))?;
@@ -305,7 +335,7 @@ fn duplicates_at(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<S
             u32::MAX as u64
         },
     ) as u32;
-    let opts = options(root, args, 50)?.narrowed_to(lang_index_for_path(file.as_ref()));
+    let opts = options(root, args)?.narrowed_to(lang_index_for_path(file.as_ref()));
     let analysis = engine.scan(&scan_root(root, args)?, &opts)?;
     let ids = analysis.overlapping(file, from, to);
     if ids.is_empty() {
@@ -329,7 +359,7 @@ fn find_similar(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<St
         &scan_root(root, args)?,
         code,
         lang,
-        &options(root, args, 20)?,
+        &snippet_options(root, args)?,
     )?;
     if ids.is_empty() {
         return Ok("No existing code matches this snippet's structure.\n".into());
@@ -339,24 +369,10 @@ fn find_similar(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<St
 
 fn find_near(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<String> {
     let config = config(root, args)?;
-    let asked = match args.get("similarity") {
-        None => None,
-        Some(v) => Some(
-            v.as_f64()
-                .ok_or_else(|| anyhow::anyhow!("similarity must be a number"))? as f32,
-        ),
-    };
-    let similarity = config.similarity(asked);
-    anyhow::ensure!(
-        (0.0..=1.0).contains(&similarity),
-        "similarity is a fraction between 0 and 1"
-    );
+    let similarity = config.similarity(similarity_arg(args)?);
     let analysis = engine.near(
         &scan_root(root, args)?,
-        &ScanOptions {
-            display_base: Some(root.to_path_buf()),
-            ..config.near_options(requested(args))?
-        },
+        &with_root(root, config.near_options(requested(args))?)?,
         similarity,
     )?;
     let ids = page(args, analysis.groups.len());
@@ -382,7 +398,7 @@ fn check_new(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<Strin
         (None, Some(file)) => Against::File(file),
         (None, None) => Against::Rev("HEAD".into()),
     };
-    let check = engine.check(&path, &against, &options(root, args, 50)?)?;
+    let check = engine.check(&path, &against, &options(root, args)?)?;
     Ok(render_check(&check, &against))
 }
 
@@ -460,7 +476,7 @@ fn tool_definitions() -> Value {
             "title": "Find near-duplicate functions",
             "description": "Functions that are mostly the same but not exact clones: a copy with statements added, removed or changed. Each group lists every copy and the line ranges where it differs from the others; read those lines before merging the copies into one function with an option or callback for the difference. Languages read without a grammar (C, shell, SQL, ...) are skipped.",
             "inputSchema": { "type": "object", "properties": with(json!({
-                "similarity": { "type": "number", "minimum": 0, "maximum": 1, "description": "Smallest similarity reported. Default 0.8." },
+                "similarity": { "type": "number", "minimum": 0, "maximum": 1, "description": "Smallest similarity reported. Default 0.8, or the repo's .doppelscan.toml." },
                 "limit": { "type": "integer", "description": "Groups to return; 0 for all. Default 15." },
                 "offset": { "type": "integer", "description": "Skip this many groups (pagination)." },
             })) },

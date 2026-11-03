@@ -12,10 +12,11 @@ use tree_sitter::Parser;
 
 use crate::baseline::{Baseline, Settings};
 use crate::detect::{RawGroup, detect};
+use crate::filter::{PathFilter, PathRules};
 use crate::index::{FileIndex, MIN_STORED_TOKENS, index_source};
 use crate::report::Analysis;
 use crate::variation::{self, Kind, Variation};
-use crate::walk::{MAX_FILE_BYTES, PathFilter, PathRules, discover, looks_generated};
+use crate::walk::{MAX_FILE_BYTES, discover, looks_generated};
 
 #[derive(Clone, Debug)]
 pub struct ScanOptions {
@@ -28,6 +29,9 @@ pub struct ScanOptions {
     pub exclude: Vec<String>,
     /// Config files' path patterns, each anchored at its own directory.
     pub rules: Vec<PathRules>,
+    /// For `near`, which also applies `[near] exclude` from configs found
+    /// inside the scanned tree.
+    pub near: bool,
     /// Groups needing more parameters than this per 100 tokens (and more
     /// than [`FREE_PARAMS`]) are dropped: they are tables of data or mapping
     /// boilerplate, not a helper waiting to be extracted. Which parameters
@@ -45,6 +49,7 @@ impl Default for ScanOptions {
             languages: Vec::new(),
             exclude: Vec::new(),
             rules: Vec::new(),
+            near: false,
             max_param_density: 8.0,
             display_base: None,
         }
@@ -97,7 +102,7 @@ impl Engine {
         opts: &ScanOptions,
     ) -> anyhow::Result<Vec<Arc<FileIndex>>> {
         let (root, base) = comparable(root, opts)?;
-        let filter = PathFilter::new(&root, &opts.exclude, &opts.rules)?;
+        let filter = PathFilter::new(&root, &opts.exclude, &opts.rules, opts.near)?;
         let found = discover(&root, &filter, &opts.languages)?;
         let base = base.as_deref().unwrap_or(&root);
         let indexed: Vec<_> = found

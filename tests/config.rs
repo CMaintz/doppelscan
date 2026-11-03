@@ -165,6 +165,68 @@ fn include_scans_a_named_part_of_a_skipped_directory() {
     assert!(!out.contains("vendor/theirs"), "{out}");
 }
 
+// Catches an include written with a wildcard, as .gitignore patterns
+// usually are, never reaching its directory: `/**` matches only what is
+// inside, and a wildcard segment hides the path below it.
+#[test]
+fn wildcard_includes_reach_into_a_skipped_directory() {
+    for pattern in ["vendor/ours/**", "vendor/*/src/"] {
+        let config = format!("include = [\"{pattern}\"]\n");
+        let dir = repo_with_config("include-glob", &config);
+        write(
+            &dir,
+            "vendor/ours/src/c.ts",
+            &CLONE.replace("sumTotals", "sumTax"),
+        );
+        let (_, out, err) = run(&dir, &[".", "--format", "json"]);
+        assert!(
+            out.contains("vendor/ours/src/c.ts"),
+            "{pattern}: {out}{err}"
+        );
+    }
+}
+
+// Catches the revision side of `check` reading files a config excludes:
+// a committed copy there would excuse the same clone added elsewhere.
+#[test]
+fn check_against_a_revision_honours_config_excludes() {
+    let dir = repo_with_config("check", "exclude = [\"src/old/\"]\n");
+    std::fs::remove_file(dir.join("src/b.ts")).unwrap();
+    write(&dir, "src/old/b.ts", &CLONE.replace("sumTotals", "sumFees"));
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-qm", "excluded copy"]);
+    std::fs::remove_file(dir.join("src/old/b.ts")).unwrap();
+    write(&dir, "src/c.ts", &CLONE.replace("sumTotals", "sumTax"));
+    let (code, out, err) = run(&dir, &["check", "--base", "HEAD"]);
+    assert_eq!(code, 1, "{out}{err}");
+}
+
+// Catches the repository's min-tokens overriding the snippet search's own
+// lower default, which exists because snippets are small.
+#[test]
+fn snippet_search_keeps_its_own_default_over_the_config() {
+    let dir = repo_with_config("similar", "min-tokens = 50\n");
+    let snippet = "let total = 0;\nfor (const order of orders) {\n    if (order.status === \"paid\") {\n        total += order.amount * config.rate;\n    }\n}\n";
+    let msg = json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": { "name": "find_similar_code", "arguments": { "code": snippet, "language": "ts" } },
+    });
+    let reply = handle_line(&Engine::default(), &dir, &msg.to_string()).unwrap();
+    let reply: Value = serde_json::from_str(&reply).unwrap();
+    let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("src/a.ts"), "{text}");
+}
+
+// Catches a package's config being read only when scanning inside the
+// package: its excludes are about its own files, wherever the scan starts.
+#[test]
+fn a_nested_config_excludes_apply_to_a_scan_from_above() {
+    let dir = repo_with_config("below", "");
+    write(&dir, "src/.doppelscan.toml", "exclude = [\"a.ts\"]\n");
+    assert_eq!(group_count(&dir, &["src"]), 0);
+    assert_eq!(group_count(&dir, &["."]), 0);
+}
+
 // Catches near's excludes leaking into the exact scan, or being ignored by
 // near: tests are near copies by design, but exact copies still matter.
 #[test]

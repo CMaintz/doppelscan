@@ -9,6 +9,7 @@ pub mod baseline;
 pub mod config;
 pub mod detect;
 pub mod engine;
+pub mod filter;
 mod git;
 mod hash;
 mod ignore;

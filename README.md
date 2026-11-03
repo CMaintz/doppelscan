@@ -122,20 +122,26 @@ similarity = 0.85
 exclude = ["**/*.test.ts"]        # tests are near copies by design
 ```
 
-Every `.doppelscan.toml` from the scanned directory up to the repository
-root applies, the nearest winning where two set the same key, so a package
-in a monorepo can refine the root's settings; `root = true` stops the
-search at that file. `exclude` and `include` use `.gitignore` syntax and
-are relative to the file that lists them, whatever directory is scanned.
-`include` brings back directories the built-in list skips (dependencies,
-build output, generated code); inside one, name the path from the config
-file's directory (`vendor/ours/`, not `ours/`).
+Settings come from every `.doppelscan.toml` from the scanned directory up
+to the repository root, the nearest winning where two set the same key, so
+a package in a monorepo can refine the root's settings; `root = true`
+stops the search at that file.
+
+`exclude` and `include` use `.gitignore` syntax, relative to the file that
+lists them, and add up across files rather than override. They also apply
+from configs inside the scanned tree, so a package's excludes hold whether
+the scan starts at the package or at the root; that package's other
+settings only apply to a scan that starts inside it. `include` brings back
+directories the built-in list skips (dependencies, build output, generated
+code); inside one, anchor the path (`vendor/ours/`, not `ours/`). As in
+`.gitignore`, nothing inside an excluded directory can be re-included.
 
 A flag or tool argument overrides a setting, `--exclude` adds to the
 config's excludes, `--no-strict` turns off a configured `strict`,
 `--config FILE` reads that file instead and `--no-config` reads none. An
-unknown key is an error. A baseline keeps the settings it was written
-with, so `check` against one still uses those.
+unknown key is an error. A baseline keeps the token minimum, strictness,
+languages and `--exclude` it was written with; config paths are read
+fresh.
 
 ## Ignoring code
 

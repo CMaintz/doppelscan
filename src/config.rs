@@ -14,8 +14,8 @@ use anyhow::Context;
 use serde::Deserialize;
 
 use crate::engine::ScanOptions;
+use crate::filter::PathRules;
 use crate::lang::{LANGS, lang_index_by_name};
-use crate::walk::PathRules;
 
 pub const FILE: &str = ".doppelscan.toml";
 
@@ -121,8 +121,8 @@ impl Config {
     }
 
     /// What was asked for, with the gaps filled from the config and then
-    /// from the defaults (`default_min` for the token minimum).
-    pub fn options(&self, asked: Requested, default_min: u32) -> anyhow::Result<ScanOptions> {
+    /// from the defaults.
+    pub fn options(&self, asked: Requested) -> anyhow::Result<ScanOptions> {
         let defaults = ScanOptions::default();
         let only = match (asked.only.is_empty(), &self.only) {
             (true, Some(only)) => only.value.clone(),
@@ -132,7 +132,7 @@ impl Config {
             min_tokens: asked
                 .min_tokens
                 .or(value(&self.min_tokens))
-                .unwrap_or(default_min),
+                .unwrap_or(defaults.min_tokens),
             strict: asked.strict.or(value(&self.strict)).unwrap_or(false),
             languages: languages(&only)?,
             exclude: asked.exclude,
@@ -147,8 +147,9 @@ impl Config {
 
     /// As `options`, with `[near] exclude` added.
     pub fn near_options(&self, asked: Requested) -> anyhow::Result<ScanOptions> {
-        let mut opts = self.options(asked, ScanOptions::default().min_tokens)?;
+        let mut opts = self.options(asked)?;
         opts.rules.extend(self.near_rules.iter().cloned());
+        opts.near = true;
         Ok(opts)
     }
 
@@ -169,6 +170,19 @@ fn override_with<T>(slot: &mut Option<Set<T>>, nearer: Option<T>, from: &Path) {
 
 fn value<T: Clone>(set: &Option<Set<T>>) -> Option<T> {
     set.as_ref().map(|s| s.value.clone())
+}
+
+/// The path patterns of a config found inside a scanned tree. Its other
+/// settings are left out: one scan has one token minimum, from the
+/// configs at or above where it starts.
+pub(crate) fn nested_rules(path: &Path, near: bool) -> anyhow::Result<PathRules> {
+    let file = load(path)?;
+    let near_exclude = if near { file.near.exclude } else { Vec::new() };
+    Ok(PathRules {
+        dir: path.parent().unwrap_or(Path::new("")).to_path_buf(),
+        exclude: [file.exclude, near_exclude].concat(),
+        include: file.include,
+    })
 }
 
 fn load(path: &Path) -> anyhow::Result<File> {
