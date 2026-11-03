@@ -56,6 +56,29 @@ struct File {
     /// Settings for `doppelscan check`.
     #[serde(default)]
     check: CheckFile,
+    /// Clone groups the team has decided to keep, by fingerprint. They are
+    /// left out of every report and never fail `check`, however many
+    /// copies there are. A change to the code changes the fingerprint, so
+    /// the clone comes back for another look.
+    #[serde(default)]
+    accept: Vec<AcceptFile>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct AcceptFile {
+    /// The group's fingerprint, as `doppelscan` shows it in brackets.
+    fingerprint: String,
+    /// Why the duplication stays.
+    reason: String,
+}
+
+/// A clone group kept on purpose.
+#[derive(Clone, Debug)]
+pub struct Accept {
+    pub fingerprint: String,
+    pub reason: String,
+    pub from: PathBuf,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -98,6 +121,8 @@ pub struct Config {
     pub max_param_density: Option<Set<f32>>,
     pub similarity: Option<Set<f32>>,
     pub check_min_tokens: Option<Set<u32>>,
+    /// From every file, outermost first.
+    pub accepts: Vec<Accept>,
     /// Each file's `exclude` and `include`, outermost first.
     pub rules: Vec<PathRules>,
     /// Each file's `[near] exclude`, which only `near` applies.
@@ -144,6 +169,11 @@ impl Config {
         override_with(&mut self.max_param_density, file.max_param_density, &path);
         override_with(&mut self.similarity, file.near.similarity, &path);
         override_with(&mut self.check_min_tokens, file.check.min_tokens, &path);
+        self.accepts.extend(file.accept.into_iter().map(|a| Accept {
+            fingerprint: a.fingerprint,
+            reason: a.reason,
+            from: path.clone(),
+        }));
         let dir = path.parent().unwrap_or(Path::new("")).to_path_buf();
         self.rules.push(PathRules {
             dir: dir.clone(),
@@ -175,6 +205,7 @@ impl Config {
             languages: languages(&only)?,
             exclude: asked.exclude,
             rules: self.rules.clone(),
+            accept: self.accepts.iter().map(|a| a.fingerprint.clone()).collect(),
             max_param_density: asked
                 .max_param_density
                 .or(value(&self.max_param_density))

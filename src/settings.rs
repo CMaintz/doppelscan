@@ -21,7 +21,15 @@ pub struct Effective {
     pub exclude: Vec<Patterns>,
     pub include: Vec<Patterns>,
     pub near_exclude: Vec<Patterns>,
+    pub accepted: Vec<Accepted>,
     pub built_in_skips: Skips,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+pub struct Accepted {
+    pub fingerprint: String,
+    pub reason: String,
+    pub file: String,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -79,6 +87,15 @@ pub fn explain(config: &Config, asked: &Requested, near_similarity: Option<f32>)
         exclude: patterns(&config.rules, |r| &r.exclude),
         include: patterns(&config.rules, |r| &r.include),
         near_exclude: patterns(&config.near_rules, |r| &r.exclude),
+        accepted: config
+            .accepts
+            .iter()
+            .map(|a| Accepted {
+                fingerprint: a.fingerprint.clone(),
+                reason: a.reason.clone(),
+                file: shown(&a.from),
+            })
+            .collect(),
         built_in_skips: Skips {
             dirs: BUILT_IN_SKIPS.dirs.to_vec(),
             names: BUILT_IN_SKIPS.names.to_vec(),
@@ -163,6 +180,12 @@ pub fn render(e: &Effective) -> String {
                 p.patterns.join(", ")
             ));
         }
+    }
+    for a in &e.accepted {
+        out.push_str(&format!(
+            "accepted [{}] ({}): {}\n",
+            a.fingerprint, a.file, a.reason
+        ));
     }
     let skips = &e.built_in_skips;
     out.push_str(&format!(
@@ -285,6 +308,13 @@ fn template(langs: &[(usize, usize)], tests: &[&str]) -> String {
 # Only new clone groups of at least this many tokens fail `check`; smaller
 # ones are still reported. 0 leaves it to min-tokens.
 # min-tokens = 0
+
+# A clone group kept on purpose, by the fingerprint doppelscan shows in
+# brackets: left out of every report and never failing `check`. Editing
+# the code changes the fingerprint, so it comes back for another look.
+# [[accept]]
+# fingerprint = \"b4a94232d76e\"
+# reason = \"Generated from the OpenAPI spec; regenerated, never edited.\"
 ",
         found = if found.is_empty() {
             "none".to_string()

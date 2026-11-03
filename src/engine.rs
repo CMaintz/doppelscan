@@ -14,7 +14,7 @@ use crate::baseline::Baseline;
 use crate::detect::{RawGroup, detect};
 use crate::filter::{PathFilter, PathRules};
 use crate::index::{FileIndex, MIN_STORED_TOKENS, index_source};
-use crate::report::Analysis;
+use crate::report::{Analysis, fingerprint};
 use crate::variation::{self, Kind, Variation};
 use crate::walk::{MAX_FILE_BYTES, discover, looks_generated};
 
@@ -29,6 +29,8 @@ pub struct ScanOptions {
     pub exclude: Vec<String>,
     /// Config files' path patterns, each anchored at its own directory.
     pub rules: Vec<PathRules>,
+    /// Fingerprints of groups to leave out: duplication kept on purpose.
+    pub accept: Vec<String>,
     /// For `near`, which also applies `[near] exclude` from configs found
     /// inside the scanned tree.
     pub near: bool,
@@ -49,6 +51,7 @@ impl Default for ScanOptions {
             languages: Vec::new(),
             exclude: Vec::new(),
             rules: Vec::new(),
+            accept: Vec::new(),
             near: false,
             max_param_density: 8.0,
             display_base: None,
@@ -196,6 +199,9 @@ pub fn analyze(files: Vec<Arc<FileIndex>>, opts: &ScanOptions, started: Instant)
             .count();
         params as f32 <= allowed
     });
+    // After suppression, so the pieces inside an accepted clone stay
+    // hidden with it instead of surfacing as groups of their own.
+    groups.retain(|g| !opts.accept.contains(&fingerprint(g)));
     groups.sort_by(|a, b| score(b).cmp(&score(a)).then(a.hash.cmp(&b.hash)));
     Analysis {
         files,

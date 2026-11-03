@@ -167,6 +167,21 @@ matches nothing, so a clone that touches it is not reported, while its
 other copies still are when two or more are left. This applies to `near`,
 `check` and the MCP tools too.
 
+Where a comment can't go (vendored or generated code you don't edit), a
+clone can be accepted by its fingerprint, the hex id shown in brackets, in
+`.doppelscan.toml`:
+
+```toml
+[[accept]]
+fingerprint = "b4a94232d76e"
+reason = "Generated from the OpenAPI spec; regenerated, never edited."
+```
+
+An accepted group is left out of every report and never fails `check`,
+however many copies it has. Editing the code changes its fingerprint, so
+the clone comes back for another look. `near` groups have no fingerprint
+and are not affected.
+
 ## Gating new duplication
 
 `doppelscan check` fails (exit 1) only on duplication a change adds, so it

@@ -4,6 +4,13 @@
   "description": "doppelscan settings for a repository (.doppelscan.toml). Flags and MCP\ntool arguments override them.",
   "type": "object",
   "properties": {
+    "accept": {
+      "description": "Clone groups the team has decided to keep, by fingerprint. They are\nleft out of every report and never fail `check`, however many\ncopies there are. A change to the code changes the fingerprint, so\nthe clone comes back for another look.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/AcceptFile"
+      }
+    },
     "check": {
       "description": "Settings for `doppelscan check`.",
       "$ref": "#/$defs/CheckFile"
@@ -70,6 +77,24 @@
   },
   "additionalProperties": false,
   "$defs": {
+    "AcceptFile": {
+      "type": "object",
+      "properties": {
+        "fingerprint": {
+          "description": "The group's fingerprint, as `doppelscan` shows it in brackets.",
+          "type": "string"
+        },
+        "reason": {
+          "description": "Why the duplication stays.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "fingerprint",
+        "reason"
+      ]
+    },
     "CheckFile": {
       "type": "object",
       "properties": {
