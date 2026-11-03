@@ -104,6 +104,24 @@ several places is taken for a renamed local and not counted).
 `.gitignore` is honoured, and dependency/build directories, minified bundles
 and files marked as generated are skipped.
 
+## Ignoring code
+
+Duplication you have decided to keep can be marked in a comment, in any
+language:
+
+```ts
+// doppelscan-ignore-start
+...
+// doppelscan-ignore-end
+```
+
+The region runs from the line with the start marker to the line with the
+end marker, or to the end of the file when there is none.
+`doppelscan-ignore-file` anywhere in a file ignores all of it. Ignored code
+matches nothing, so a clone that touches it is not reported, while its
+other copies still are when two or more are left. This applies to `near`,
+`check` and the MCP tools too.
+
 ## Gating new duplication
 
 `doppelscan check` fails (exit 1) only on duplication a change adds, so it

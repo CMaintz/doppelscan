@@ -218,6 +218,7 @@ pub fn index_tokens(
         scope_spans,
         local_scopes: Vec::new(),
     };
+    index.drop_ignored();
     index.shrink_to_fit();
     index
 }

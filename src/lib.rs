@@ -10,6 +10,7 @@ pub mod detect;
 pub mod engine;
 mod git;
 mod hash;
+mod ignore;
 pub mod index;
 pub mod lang;
 mod lexical;

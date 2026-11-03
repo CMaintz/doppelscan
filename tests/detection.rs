@@ -631,3 +631,69 @@ fn a_run_of_elements_shared_by_two_templates_is_a_clone() {
         "{g:?}"
     );
 }
+
+fn ignored(code: &str) -> String {
+    format!("// doppelscan-ignore-start\n{code}// doppelscan-ignore-end\n")
+}
+
+// Catches markers being read but not applied: the marked copy must not
+// pair with its twin.
+#[test]
+fn code_between_ignore_markers_is_not_matched() {
+    let a = scan(&[("a.ts", SUM_TOTALS), ("b.ts", &ignored(SUM_REFUNDS))]);
+    assert_eq!(groups(&a).len(), 0);
+}
+
+// Catches dropping the whole group when one copy is ignored: the other
+// two copies are still duplication.
+#[test]
+fn an_ignored_copy_leaves_the_other_copies_grouped() {
+    let a = scan(&[
+        ("a.ts", SUM_TOTALS),
+        ("b.ts", SUM_REFUNDS),
+        (
+            "c.ts",
+            &ignored(&SUM_TOTALS.replace("sumTotals", "sumFees")),
+        ),
+    ]);
+    let gs = groups(&a);
+    assert_eq!(gs.len(), 1);
+    let files: Vec<&str> = gs[0].occurrences.iter().map(|o| o.file.as_str()).collect();
+    assert_eq!(files, ["a.ts", "b.ts"]);
+}
+
+// Catches an end marker that is ignored, so everything after a start
+// marker vanishes: code after the region still matches.
+#[test]
+fn code_after_an_ignore_end_is_matched() {
+    let b = format!("{}{SUM_REFUNDS}", ignored("const skipped = 1;\n"));
+    let a = scan(&[("a.ts", SUM_TOTALS), ("b.ts", &b)]);
+    assert_eq!(groups(&a).len(), 1);
+}
+
+// Catches a start marker without an end being dropped instead of covering
+// the rest of the file, which would let a forgotten end un-ignore code.
+#[test]
+fn an_unclosed_ignore_start_covers_the_rest_of_the_file() {
+    let b = format!("// doppelscan-ignore-start\n{SUM_REFUNDS}");
+    let a = scan(&[("a.ts", SUM_TOTALS), ("b.ts", &b)]);
+    assert_eq!(groups(&a).len(), 0);
+}
+
+// Catches the file marker being treated as a region start at its line:
+// it ignores code above it too.
+#[test]
+fn an_ignore_file_marker_covers_the_whole_file() {
+    let b = format!("{SUM_REFUNDS}// doppelscan-ignore-file\n");
+    let a = scan(&[("a.ts", SUM_TOTALS), ("b.ts", &b)]);
+    assert_eq!(groups(&a).len(), 0);
+}
+
+// Catches markers only working where comments parse with a grammar: files
+// read token by token honour them too.
+#[test]
+fn ignore_markers_work_in_token_level_languages() {
+    let code = "void sum_totals(struct order *orders, int n, double rate) {\n    double total = 0;\n    for (int i = 0; i < n; i++) {\n        if (orders[i].paid) {\n            total += orders[i].amount * rate;\n        }\n    }\n    printf(\"%f\n\", total);\n}\n";
+    let a = scan(&[("a.c", code), ("b.c", &ignored(code))]);
+    assert_eq!(groups(&a).len(), 0);
+}

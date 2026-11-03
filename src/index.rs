@@ -10,6 +10,7 @@ use std::num::NonZeroU16;
 use tree_sitter::{Node, Parser, TreeCursor};
 
 use crate::hash::{combine, hash_bytes, seed};
+use crate::ignore::{ignored_spans, overlaps};
 use crate::lang::{
     KindClass, LANGS, Lang, Syntax, is_binding_site, is_class_like, is_function_like,
     is_member_position,
@@ -117,6 +118,18 @@ impl Seqs {
         (0..self.ends.len()).map(|i| self.get(i))
     }
 
+    /// Only the elements `keep` accepts, each sequence split where one is
+    /// dropped so no run bridges the gap.
+    fn retain(&mut self, keep: impl Fn(&Frag) -> bool) {
+        let mut kept = Seqs::default();
+        for seq in self.iter() {
+            for run in seq.split(|e| !keep(e)).filter(|r| r.len() >= 2) {
+                kept.push(run);
+            }
+        }
+        *self = kept;
+    }
+
     fn shrink_to_fit(&mut self) {
         self.elems.shrink_to_fit();
         self.ends.shrink_to_fit();
@@ -150,6 +163,19 @@ pub struct FileIndex {
 }
 
 impl FileIndex {
+    /// Fragments touching code marked with ignore comments are dropped, so
+    /// that code matches nothing, exactly or near.
+    pub(crate) fn drop_ignored(&mut self) {
+        let spans = ignored_spans(&self.source, &self.line_starts);
+        if spans.is_empty() {
+            return;
+        }
+        let keep = |f: &Frag| !overlaps(&spans, f.start, f.end);
+        self.nodes.retain(keep);
+        self.units.retain(keep);
+        self.seqs.retain(keep);
+    }
+
     /// Indexing grows these by doubling, which leaves about a third of the
     /// index as spare capacity, held for the rest of the scan.
     pub(crate) fn shrink_to_fit(&mut self) {
@@ -281,6 +307,7 @@ pub fn index_source(
         local_scopes: builder.local_scopes,
         source,
     };
+    index.drop_ignored();
     index.shrink_to_fit();
     Some(index)
 }
