@@ -19,6 +19,7 @@ path = "src/main.rs"
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }
 ignore = "0.4.33"
+libsais = { version = "0.2.0", default-features = false }
 mimalloc = "0.1.52"
 rayon = "1.12.0"
 rustc-hash = "2.1.3"
