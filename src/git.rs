@@ -9,7 +9,7 @@ use anyhow::{Context, bail};
 use rustc_hash::FxHashSet;
 
 use crate::engine::{ScanOptions, Source};
-use crate::walk::{MAX_FILE_BYTES, accept_listed, discover, exclude_overrides, looks_generated};
+use crate::walk::{MAX_FILE_BYTES, PathFilter, accept_listed, discover, looks_generated};
 
 pub struct Revision {
     pub sources: Vec<Source>,
@@ -40,11 +40,11 @@ pub fn read_revision(
         "comparing against a revision needs a directory, not {}",
         dir.display()
     );
-    let scanned: FxHashSet<String> = discover(dir, &opts.exclude, &opts.languages)?
+    let filter = PathFilter::new(dir, &opts.exclude, &opts.rules)?;
+    let scanned: FxHashSet<String> = discover(dir, &filter, &opts.languages)?
         .into_iter()
         .filter_map(|(path, _)| relative(dir, &path))
         .collect();
-    let overrides = exclude_overrides(dir, &opts.exclude)?;
     let listed = list_tree(dir, rev)?;
     let submodules = listed
         .iter()
@@ -55,7 +55,7 @@ pub fn read_revision(
         .into_iter()
         .filter(|l| !l.submodule)
         .filter_map(|l| {
-            let lang = accept_listed(Path::new(&l.path), &overrides, &opts.languages)?;
+            let lang = accept_listed(Path::new(&l.path), &filter, &opts.languages)?;
             let wanted = !dir.join(&l.path).exists() || scanned.contains(&l.path);
             wanted.then_some((l, lang))
         })

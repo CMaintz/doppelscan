@@ -190,20 +190,23 @@ fn scan_root(root: &Path, args: &Value) -> anyhow::Result<PathBuf> {
 }
 
 fn options(root: &Path, args: &Value, default_min: u32) -> anyhow::Result<ScanOptions> {
-    let asked = Requested {
+    Ok(ScanOptions {
+        display_base: Some(root.to_path_buf()),
+        ..config(root, args)?.options(requested(args), default_min)?
+    })
+}
+
+fn requested(args: &Value) -> Requested {
+    Requested {
         min_tokens: args
             .get("min_tokens")
             .and_then(Value::as_u64)
             .map(|n| n as u32),
-        strict: args.get("strict").and_then(Value::as_bool).unwrap_or(false),
+        strict: args.get("strict").and_then(Value::as_bool),
         only: str_list(args, "languages"),
         exclude: str_list(args, "exclude"),
         max_param_density: None,
-    };
-    Ok(ScanOptions {
-        display_base: Some(root.to_path_buf()),
-        ..config(root, args)?.options(asked, default_min)?
-    })
+    }
 }
 
 /// The config for the scanned path; a path that does not exist is
@@ -335,20 +338,25 @@ fn find_similar(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<St
 }
 
 fn find_near(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<String> {
-    let similarity = match args.get("similarity") {
-        None => config(root, args)?.similarity.unwrap_or(0.8),
-        Some(v) => {
+    let config = config(root, args)?;
+    let asked = match args.get("similarity") {
+        None => None,
+        Some(v) => Some(
             v.as_f64()
-                .ok_or_else(|| anyhow::anyhow!("similarity must be a number"))? as f32
-        }
+                .ok_or_else(|| anyhow::anyhow!("similarity must be a number"))? as f32,
+        ),
     };
+    let similarity = config.similarity(asked);
     anyhow::ensure!(
         (0.0..=1.0).contains(&similarity),
         "similarity is a fraction between 0 and 1"
     );
     let analysis = engine.near(
         &scan_root(root, args)?,
-        &options(root, args, 50)?,
+        &ScanOptions {
+            display_base: Some(root.to_path_buf()),
+            ..config.near_options(requested(args))?
+        },
         similarity,
     )?;
     let ids = page(args, analysis.groups.len());

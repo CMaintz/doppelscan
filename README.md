@@ -106,23 +106,36 @@ and files marked as generated are skipped.
 
 ## Configuration
 
-A `.doppelscan.toml` in the scanned directory, or the nearest parent up to
-the repository root, sets a project's defaults for the CLI and the MCP
+A `.doppelscan.toml` sets a project's defaults for the CLI and the MCP
 server alike:
 
 ```toml
 min-tokens = 40
 only = ["ts", "java"]
-exclude = ["**/*.test.ts", "legacy/**"]
+exclude = ["legacy/", "*.generated.ts"]
+include = ["vendor/our-fork/"]   # scanned despite the built-in skips
 max-param-density = 10
 strict = false
-similarity = 0.85   # near
+
+[near]
+similarity = 0.85
+exclude = ["**/*.test.ts"]        # tests are near copies by design
 ```
 
-A flag or tool argument overrides a setting; `exclude` globs (relative to
-the scanned path) are added to any `--exclude`. An unknown key is an error.
-A baseline keeps the settings it was written with, so `check` against one
-still uses those.
+Every `.doppelscan.toml` from the scanned directory up to the repository
+root applies, the nearest winning where two set the same key, so a package
+in a monorepo can refine the root's settings; `root = true` stops the
+search at that file. `exclude` and `include` use `.gitignore` syntax and
+are relative to the file that lists them, whatever directory is scanned.
+`include` brings back directories the built-in list skips (dependencies,
+build output, generated code); inside one, name the path from the config
+file's directory (`vendor/ours/`, not `ours/`).
+
+A flag or tool argument overrides a setting, `--exclude` adds to the
+config's excludes, `--no-strict` turns off a configured `strict`,
+`--config FILE` reads that file instead and `--no-config` reads none. An
+unknown key is an error. A baseline keeps the settings it was written
+with, so `check` against one still uses those.
 
 ## Ignoring code
 

@@ -104,7 +104,7 @@ fn near_reads_its_similarity_from_the_config() {
         "    return",
         "    audit(total);\n    log(total);\n    return",
     );
-    let dir = repo_with_config("near", "similarity = 0.3\nmin-tokens = 20\n");
+    let dir = repo_with_config("near", "min-tokens = 20\n[near]\nsimilarity = 0.3\n");
     std::fs::write(dir.join("src/b.ts"), edited).unwrap();
     let (code, out, err) = run(&dir, &["near", "."]);
     assert_eq!(code, 0, "{err}");
@@ -126,4 +126,100 @@ fn mcp_tools_use_the_config() {
     let reply: Value = serde_json::from_str(&reply).unwrap();
     let text = reply["result"]["content"][0]["text"].as_str().unwrap();
     assert!(text.starts_with("0 clone groups"), "{text}");
+}
+
+fn write(dir: &Path, path: &str, text: &str) {
+    let path = dir.join(path);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, text).unwrap();
+}
+
+// Catches excludes matched against the scanned path instead of the config
+// file's directory: the same config would skip different files depending
+// on which directory is scanned.
+#[test]
+fn config_excludes_are_relative_to_the_config_file() {
+    let dir = repo_with_config("relative", "exclude = [\"src/a.ts\"]\n");
+    assert_eq!(group_count(&dir, &["src"]), 0);
+    assert_eq!(group_count(&dir, &["."]), 0);
+}
+
+// Catches `include` opening the whole skipped directory, or none of it:
+// only the named subtree comes back.
+#[test]
+fn include_scans_a_named_part_of_a_skipped_directory() {
+    let dir = repo_with_config("include", "include = [\"vendor/ours\"]\n");
+    write(
+        &dir,
+        "vendor/ours/c.ts",
+        &CLONE.replace("sumTotals", "sumTax"),
+    );
+    write(
+        &dir,
+        "vendor/theirs/d.ts",
+        &CLONE.replace("sumTotals", "sumVat"),
+    );
+    let (code, out, err) = run(&dir, &[".", "--format", "json"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("vendor/ours/c.ts"), "{out}");
+    assert!(!out.contains("vendor/theirs"), "{out}");
+}
+
+// Catches near's excludes leaking into the exact scan, or being ignored by
+// near: tests are near copies by design, but exact copies still matter.
+#[test]
+fn near_excludes_apply_to_near_only() {
+    let config = "min-tokens = 20\n[near]\nsimilarity = 0.3\nexclude = [\"src/b.ts\"]\n";
+    let dir = repo_with_config("near-exclude", config);
+    let edited = CLONE.replace("sumTotals", "sumTax").replace(
+        "    return",
+        "    audit(total);\n    log(total);\n    return",
+    );
+    write(&dir, "src/c.ts", &edited);
+    let (_, exact, _) = run(&dir, &[".", "--format", "json"]);
+    assert!(exact.contains("src/b.ts"), "{exact}");
+    let (_, near, _) = run(&dir, &["near", ".", "--format", "json"]);
+    assert!(near.contains("src/c.ts"), "{near}");
+    assert!(!near.contains("src/b.ts"), "{near}");
+}
+
+// Catches only the nearest config being read: a package's config adds to
+// the repository's instead of discarding it, and wins where both set a key.
+#[test]
+fn nested_configs_merge_with_the_nearest_winning() {
+    let dir = repo_with_config("nested", "min-tokens = 500\n");
+    write(&dir, "src/.doppelscan.toml", "max-param-density = 9\n");
+    assert_eq!(group_count(&dir, &["src"]), 0);
+    write(&dir, "src/.doppelscan.toml", "min-tokens = 20\n");
+    assert_eq!(group_count(&dir, &["src"]), 1);
+}
+
+// Catches `root = true` not stopping the search for parent configs.
+#[test]
+fn a_root_config_stops_the_merge() {
+    let dir = repo_with_config("root", "min-tokens = 500\n");
+    write(&dir, "src/.doppelscan.toml", "root = true\n");
+    assert_eq!(group_count(&dir, &["src"]), 1);
+}
+
+// Catches a config `strict = true` that no flag can turn off.
+#[test]
+fn no_strict_overrides_a_strict_config() {
+    let dir = repo_with_config("strict", "strict = true\n");
+    assert_eq!(group_count(&dir, &["."]), 0);
+    assert_eq!(group_count(&dir, &[".", "--no-strict"]), 1);
+}
+
+// Catches --no-config still reading the file, and --config adding to the
+// lookup instead of replacing it.
+#[test]
+fn config_flags_choose_the_file() {
+    let dir = repo_with_config("flags", "min-tokens = 500\n");
+    assert_eq!(group_count(&dir, &[".", "--no-config"]), 1);
+    let other = dir.join("other.toml");
+    std::fs::write(&other, "exclude = [\"nothing\"]\n").unwrap();
+    assert_eq!(
+        group_count(&dir, &[".", "--config", other.to_str().unwrap()]),
+        1
+    );
 }

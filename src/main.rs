@@ -5,7 +5,7 @@ use std::process::ExitCode;
 use anyhow::{Context, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use doppelscan::baseline::{Baseline, DEFAULT_FILE};
-use doppelscan::config::{Config, Requested, known_langs};
+use doppelscan::config::{Config, Requested, Source, known_langs};
 use doppelscan::engine::{Against, Check, Engine, ScanOptions, anchor};
 use doppelscan::lang::{lang_index_by_name, lang_index_for_path};
 use doppelscan::near::{render_near, render_near_summary};
@@ -111,6 +111,15 @@ struct Common {
     /// Match identifiers and literals exactly (copy-paste clones only).
     #[arg(long)]
     strict: bool,
+    /// Match names and literals loosely even where a config sets strict.
+    #[arg(long, conflicts_with = "strict")]
+    no_strict: bool,
+    /// Read settings from this file instead of looking for .doppelscan.toml.
+    #[arg(long, conflicts_with = "no_config")]
+    config: Option<PathBuf>,
+    /// Ignore any .doppelscan.toml.
+    #[arg(long)]
+    no_config: bool,
     /// Only these languages (comma-separated names or extensions); yaml is
     /// scanned only when named here.
     #[arg(long = "only", value_delimiter = ',')]
@@ -184,14 +193,25 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
 }
 
 fn options(c: &Common) -> anyhow::Result<ScanOptions> {
-    let asked = Requested {
+    config(c)?.options(requested(c), ScanOptions::default().min_tokens)
+}
+
+fn config(c: &Common) -> anyhow::Result<Config> {
+    Config::read(match (&c.config, c.no_config) {
+        (Some(file), _) => Source::File(file),
+        (None, true) => Source::None,
+        (None, false) => Source::Lookup(&c.path),
+    })
+}
+
+fn requested(c: &Common) -> Requested {
+    Requested {
         min_tokens: c.min_tokens,
-        strict: c.strict,
+        strict: (c.strict || c.no_strict).then_some(c.strict),
         only: c.only.clone(),
         exclude: c.exclude.clone(),
         max_param_density: c.max_param_density,
-    };
-    Config::for_scan(&c.path)?.options(asked, ScanOptions::default().min_tokens)
+    }
 }
 
 fn scan(engine: &Engine, args: &ScanArgs) -> anyhow::Result<()> {
@@ -444,14 +464,14 @@ fn near(
     limit: usize,
     common: &Common,
 ) -> anyhow::Result<()> {
-    let similarity = similarity
-        .or(Config::for_scan(&common.path)?.similarity)
-        .unwrap_or(0.8);
+    let config = config(common)?;
+    let similarity = config.similarity(similarity);
     anyhow::ensure!(
         (0.0..=1.0).contains(&similarity),
         "--similarity is a fraction between 0 and 1"
     );
-    let analysis = engine.near(&common.path, &options(common)?, similarity)?;
+    let opts = config.near_options(requested(common))?;
+    let analysis = engine.near(&common.path, &opts, similarity)?;
     let ids = first_ids(limit, analysis.groups.len());
     if common.format == Format::Json {
         return emit_json(&Report {
