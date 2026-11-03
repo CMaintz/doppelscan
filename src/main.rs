@@ -243,9 +243,9 @@ fn print_groups(
     emit(&out)
 }
 
-/// A report as `json!` writes it, keys sorted, but built one group at a
-/// time: a `Value` tree of every group took several times the size of the
-/// output on a large repo.
+/// A report with sorted keys, built one group at a time: a `Value` tree of
+/// every group would take several times the size of the output on a large
+/// repo.
 #[derive(Serialize)]
 struct Report<G, S> {
     groups: G,
@@ -289,12 +289,12 @@ fn emit_json(body: &impl Serialize) -> anyhow::Result<()> {
     ignore_closed_pipe(written)
 }
 
-/// A closed pipe (`doppelscan | head`) is a normal way to stop reading, not
-/// an error worth a panic.
 fn emit(text: &str) -> anyhow::Result<()> {
     ignore_closed_pipe(std::io::stdout().lock().write_all(text.as_bytes()))
 }
 
+/// A closed pipe (`doppelscan | head`) is a normal way to stop reading, not
+/// an error worth a panic.
 fn ignore_closed_pipe(written: std::io::Result<()>) -> anyhow::Result<()> {
     match written {
         Err(e) if e.kind() == ErrorKind::BrokenPipe => Ok(()),

@@ -94,7 +94,8 @@ impl Frag {
 pub const NO_SCOPE: u32 = u32::MAX;
 
 /// Sequences stored end to end, one allocation per file: a Vec per block
-/// cost a header and spare capacity for each of millions of short runs.
+/// would cost a header and spare capacity for each of millions of short
+/// runs.
 #[derive(Default)]
 pub struct Seqs {
     elems: Vec<Frag>,
@@ -141,15 +142,16 @@ pub struct FileIndex {
     pub scopes: Vec<String>,
     /// Byte range of each scope's definition, parallel to `scopes`.
     pub scope_spans: Vec<(u32, u32)>,
-    /// (leaf, scope start, scope end) for each local, by leaf. Kept apart
-    /// from `Leaf` because few leaves bind a local, and a range in every
-    /// leaf made the largest table in the index half as big again.
+    /// (leaf, scope start, scope end) for each local, sorted by leaf. Kept
+    /// apart from `Leaf` because few leaves bind a local, and a range in
+    /// every leaf would make the largest table in the index half as big
+    /// again.
     pub(crate) local_scopes: Vec<(u32, u32, u32)>,
 }
 
 impl FileIndex {
-    /// Indexing grows these by doubling, which left about a third of the
-    /// index as spare capacity held for the rest of the scan.
+    /// Indexing grows these by doubling, which leaves about a third of the
+    /// index as spare capacity, held for the rest of the scan.
     pub(crate) fn shrink_to_fit(&mut self) {
         self.leaves.shrink_to_fit();
         self.nodes.shrink_to_fit();
@@ -265,6 +267,7 @@ pub fn index_source(
     let mut builder = Builder::new(&LANGS[lang], &source, strict);
     builder.walk(&mut tree.walk());
     builder.claim_top_level();
+    builder.sort_local_scopes();
     let mut index = FileIndex {
         path,
         lang,
@@ -457,6 +460,11 @@ impl<'a> Builder<'a> {
         for i in self.pending_locals.drain(..) {
             self.local_scopes.push((i, WHOLE_FILE.0, WHOLE_FILE.1));
         }
+    }
+
+    /// Functions claim their locals as they close, innermost first, so the
+    /// table is out of leaf order until sorted; `scope_of` searches it.
+    fn sort_local_scopes(&mut self) {
         self.local_scopes.sort_unstable();
     }
 
