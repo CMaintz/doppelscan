@@ -11,6 +11,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
+use schemars::JsonSchema;
 use serde::Deserialize;
 
 use crate::engine::ScanOptions;
@@ -19,31 +20,55 @@ use crate::lang::{LANGS, lang_index_by_name};
 
 pub const FILE: &str = ".doppelscan.toml";
 
-/// One file as written. Unknown keys are an error: a misspelled setting
-/// would otherwise be silently left at its default.
-#[derive(Debug, Default, Deserialize)]
+// Unknown keys are an error: a misspelled setting would otherwise be
+// silently left at its default. The doc comments here become the schema's
+// descriptions, which editors show, so they are written for users.
+
+/// doppelscan settings for a repository (.doppelscan.toml). Flags and MCP
+/// tool arguments override them.
+#[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
+#[schemars(title = "doppelscan config")]
 struct File {
+    /// Stop looking for configs in parent directories.
     #[serde(default)]
     root: bool,
+    /// Smallest clone reported, in syntax tokens. Default 50.
     min_tokens: Option<u32>,
+    /// Match identifiers and literals exactly (copy-paste clones only).
     strict: Option<bool>,
+    /// Only these languages, by name or extension; yaml is scanned only
+    /// when listed.
     only: Option<Vec<String>>,
+    /// .gitignore patterns, relative to this file, to leave out.
     #[serde(default)]
     exclude: Vec<String>,
+    /// .gitignore patterns, relative to this file, of directories the
+    /// built-in skip list leaves out that should be scanned.
     #[serde(default)]
     include: Vec<String>,
+    /// Groups needing more parameters than this per 100 tokens are dropped
+    /// as data tables. Default 8.
     max_param_density: Option<f32>,
+    /// Settings for `doppelscan near`.
     #[serde(default)]
     near: NearFile,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 struct NearFile {
+    /// Smallest similarity reported, 0 to 1. Default 0.8.
     similarity: Option<f32>,
+    /// .gitignore patterns, relative to this file, that near leaves out
+    /// (tests are near copies of each other by design).
     #[serde(default)]
     exclude: Vec<String>,
+}
+
+/// The JSON schema of a config file, for editors.
+pub fn schema() -> String {
+    serde_json::to_string_pretty(&schemars::schema_for!(File)).unwrap() + "\n"
 }
 
 /// A value and the config file that set it.

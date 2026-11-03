@@ -77,6 +77,8 @@ doppelscan at src/user.ts:40-60    # clones touching these lines
 doppelscan similar --lang ts < snippet.ts   # does this code already exist?
 doppelscan near --similarity 0.8   # functions that are copies with edits
 doppelscan --format json           # machine-readable
+doppelscan init                    # write a commented .doppelscan.toml
+doppelscan config                  # the settings in use, and where each comes from
 ```
 
 `near` finds what the exact scan cannot: functions that match except for
@@ -107,7 +109,13 @@ and files marked as generated are skipped.
 ## Configuration
 
 A `.doppelscan.toml` sets a project's defaults for the CLI and the MCP
-server alike:
+server alike. `doppelscan init` writes one with every setting commented
+out at its default, the languages it found, and the test files it found
+already listed for `near` to skip. `doppelscan config` (or the MCP
+`get_settings` tool) shows the settings a scan uses, where each comes
+from, and the built-in skip list. Editors that read `#:schema` (Taplo,
+Even Better TOML) complete and check the keys from
+`doppelscan.schema.json`.
 
 ```toml
 min-tokens = 40
@@ -219,6 +227,7 @@ the 2026-07-28 protocol and the older `initialize` handshake.
 | `find_similar_code` | Before writing a helper: does equivalent code already exist? |
 | `check_new_duplicates` | After writing code: did this change duplicate anything? |
 | `find_near_duplicates` | Functions that are copies with small edits, and where each copy differs. |
+| `get_settings` | The settings a scan uses and where each comes from, as `doppelscan config` shows them. |
 
 The server keeps parsed files in memory and re-parses only files whose size or
 mtime changed, so follow-up calls on a large repo take tens of milliseconds.

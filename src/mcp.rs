@@ -19,6 +19,7 @@ use crate::engine::{Against, Engine, ScanOptions};
 use crate::lang::{lang_index_by_name, lang_index_for_path};
 use crate::near::{render_near, render_near_summary};
 use crate::report::{Analysis, Detail, render_check, render_group, render_summary};
+use crate::settings::explain;
 
 const MODERN: &str = "2026-07-28";
 const LEGACY: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
@@ -150,6 +151,7 @@ fn call_tool(engine: &Engine, root: &Path, params: &Value) -> ToolResult {
         "find_similar_code" => find_similar(engine, root, &args),
         "check_new_duplicates" => check_new(engine, root, &args),
         "find_near_duplicates" => find_near(engine, root, &args),
+        "get_settings" => get_settings(root, &args),
         _ => return Err((-32602, format!("Unknown tool: {name}"))),
     };
     Ok(match outcome {
@@ -367,6 +369,17 @@ fn find_similar(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<St
     Ok(render(&analysis, &ids, false))
 }
 
+/// The same as `doppelscan config --format json`, so an agent sees what a
+/// person does.
+fn get_settings(root: &Path, args: &Value) -> anyhow::Result<String> {
+    let effective = explain(
+        &config(root, args)?,
+        &requested(args),
+        similarity_arg(args)?,
+    );
+    Ok(serde_json::to_string_pretty(&effective)?)
+}
+
 fn find_near(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<String> {
     let config = config(root, args)?;
     let similarity = config.similarity(similarity_arg(args)?);
@@ -479,6 +492,15 @@ fn tool_definitions() -> Value {
                 "similarity": { "type": "number", "minimum": 0, "maximum": 1, "description": "Smallest similarity reported. Default 0.8, or the repo's .doppelscan.toml." },
                 "limit": { "type": "integer", "description": "Groups to return; 0 for all. Default 15." },
                 "offset": { "type": "integer", "description": "Skip this many groups (pagination)." },
+            })) },
+            "annotations": { "readOnlyHint": true },
+        },
+        {
+            "name": "get_settings",
+            "title": "Show the scan settings",
+            "description": "The settings a scan of a path uses (from tool arguments, the repository's .doppelscan.toml files or the defaults) and where each comes from, as JSON, plus the excludes, includes and built-in skip list. Use when results look wrong, before suggesting a config change.",
+            "inputSchema": { "type": "object", "properties": with(json!({
+                "similarity": { "type": "number", "minimum": 0, "maximum": 1, "description": "A threshold for near, to see it resolved like the others." },
             })) },
             "annotations": { "readOnlyHint": true },
         },

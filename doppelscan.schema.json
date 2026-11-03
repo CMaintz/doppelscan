@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "doppelscan config",
+  "description": "doppelscan settings for a repository (.doppelscan.toml). Flags and MCP\ntool arguments override them.",
+  "type": "object",
+  "properties": {
+    "exclude": {
+      "description": ".gitignore patterns, relative to this file, to leave out.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "string"
+      }
+    },
+    "include": {
+      "description": ".gitignore patterns, relative to this file, of directories the\nbuilt-in skip list leaves out that should be scanned.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "string"
+      }
+    },
+    "max-param-density": {
+      "description": "Groups needing more parameters than this per 100 tokens are dropped\nas data tables. Default 8.",
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "float"
+    },
+    "min-tokens": {
+      "description": "Smallest clone reported, in syntax tokens. Default 50.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0
+    },
+    "near": {
+      "description": "Settings for `doppelscan near`.",
+      "$ref": "#/$defs/NearFile"
+    },
+    "only": {
+      "description": "Only these languages, by name or extension; yaml is scanned only\nwhen listed.",
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "string"
+      }
+    },
+    "root": {
+      "description": "Stop looking for configs in parent directories.",
+      "type": "boolean",
+      "default": false
+    },
+    "strict": {
+      "description": "Match identifiers and literals exactly (copy-paste clones only).",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "NearFile": {
+      "type": "object",
+      "properties": {
+        "exclude": {
+          "description": ".gitignore patterns, relative to this file, that near leaves out\n(tests are near copies of each other by design).",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "similarity": {
+          "description": "Smallest similarity reported, 0 to 1. Default 0.8.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

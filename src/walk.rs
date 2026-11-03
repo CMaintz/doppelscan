@@ -107,17 +107,43 @@ pub fn accept_listed(rel: &Path, filter: &PathFilter, languages: &[usize]) -> Op
     accept(rel, languages).map(|(_, lang)| lang)
 }
 
+/// File names never scanned: minified bundles, declaration files and
+/// designer or generator output. `*.x.*` matches anywhere in the name,
+/// `*.x` at its end.
+const SKIPPED_NAMES: &[&str] = &["*.min.*", "*.d.ts", "*.designer.*", "*.g.*"];
+
+fn is_skipped_name(name: &str) -> bool {
+    SKIPPED_NAMES.iter().any(|glob| {
+        let glob = &glob[1..];
+        match glob.strip_suffix('*') {
+            Some(inner) => name.contains(inner),
+            None => name.ends_with(glob),
+        }
+    })
+}
+
+/// The skip list a config cannot see, for `doppelscan config` to show.
+pub struct BuiltInSkips {
+    pub dirs: &'static [&'static str],
+    /// File name globs.
+    pub names: &'static [&'static str],
+    /// A file with one of these in its first KB is taken for generated.
+    pub generated_markers: &'static [&'static str],
+}
+
+pub const BUILT_IN_SKIPS: BuiltInSkips = BuiltInSkips {
+    dirs: EXCLUDED_DIRS,
+    names: SKIPPED_NAMES,
+    generated_markers: GENERATED_MARKERS,
+};
+
 pub(crate) fn is_excluded_dir(name: &std::ffi::OsStr) -> bool {
     name.to_str().is_some_and(|n| EXCLUDED_DIRS.contains(&n))
 }
 
 fn accept(path: &Path, languages: &[usize]) -> Option<(PathBuf, usize)> {
     let name = path.file_name()?.to_str()?.to_ascii_lowercase();
-    if name.contains(".min.")
-        || name.ends_with(".d.ts")
-        || name.contains(".designer.")
-        || name.contains(".g.")
-    {
+    if is_skipped_name(&name) {
         return None;
     }
     let lang = lang_index_for_path(path)?;

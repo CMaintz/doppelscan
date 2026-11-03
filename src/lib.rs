@@ -19,6 +19,7 @@ mod lexical;
 pub mod mcp;
 pub mod near;
 pub mod report;
+pub mod settings;
 mod suffix;
 pub mod variation;
 pub mod walk;

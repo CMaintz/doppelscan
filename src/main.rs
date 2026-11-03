@@ -10,6 +10,7 @@ use doppelscan::engine::{Against, Check, Engine, ScanOptions, anchor};
 use doppelscan::lang::{lang_index_by_name, lang_index_for_path};
 use doppelscan::near::{render_near, render_near_summary};
 use doppelscan::report::{Analysis, Detail, render_check, render_group, render_summary};
+use doppelscan::settings::{explain, init_template, render as render_settings};
 use serde::Serialize;
 use serde::ser::{Error as _, SerializeSeq as _, Serializer};
 
@@ -91,6 +92,27 @@ enum Command {
         limit: usize,
         #[command(flatten)]
         common: Common,
+    },
+    /// The settings a scan of PATH uses and where each comes from: a flag,
+    /// a config file or the default.
+    Config {
+        /// Print the config file's JSON schema instead.
+        #[arg(long)]
+        schema: bool,
+        /// Threshold for `near`, to see it resolved like the others.
+        #[arg(long)]
+        similarity: Option<f32>,
+        #[command(flatten)]
+        common: Common,
+    },
+    /// Write a commented .doppelscan.toml for PATH: every setting with its
+    /// default, the languages found and the test files `near` should skip.
+    Init {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Replace an existing config.
+        #[arg(long)]
+        force: bool,
     },
     /// Run the MCP server on stdio.
     Mcp {
@@ -187,6 +209,12 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             limit,
             common,
         } => near(&engine, similarity, limit, &common),
+        Command::Config {
+            schema,
+            similarity,
+            common,
+        } => show_config(schema, similarity, &common),
+        Command::Init { path, force } => init(&path, force),
         Command::Mcp { root } => doppelscan::mcp::serve(&engine, &root),
     };
     done.map(|()| ExitCode::SUCCESS)
@@ -194,6 +222,30 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
 
 fn options(c: &Common) -> anyhow::Result<ScanOptions> {
     config(c)?.options(requested(c))
+}
+
+fn show_config(schema: bool, similarity: Option<f32>, c: &Common) -> anyhow::Result<()> {
+    if schema {
+        return emit(&doppelscan::config::schema());
+    }
+    let effective = explain(&config(c)?, &requested(c), similarity);
+    match c.format {
+        Format::Json => emit_json(&effective),
+        Format::Text => emit(&render_settings(&effective)),
+    }
+}
+
+fn init(path: &Path, force: bool) -> anyhow::Result<()> {
+    let file = path.join(doppelscan::config::FILE);
+    anyhow::ensure!(
+        force || !file.exists(),
+        "{} exists; pass --force to replace it",
+        file.display()
+    );
+    std::fs::write(&file, init_template(path)?)
+        .with_context(|| format!("writing {}", file.display()))?;
+    let _ = writeln!(std::io::stderr(), "Wrote {}.", file.display());
+    Ok(())
 }
 
 fn config(c: &Common) -> anyhow::Result<Config> {

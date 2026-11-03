@@ -285,3 +285,104 @@ fn config_flags_choose_the_file() {
         1
     );
 }
+
+fn settings_json(dir: &Path, args: &[&str]) -> Value {
+    let (code, out, err) = run(dir, &[&["config"], args, &["--format", "json"]].concat());
+    assert_eq!(code, 0, "{err}");
+    serde_json::from_str(&out).unwrap()
+}
+
+fn setting<'a>(settings: &'a Value, key: &str) -> &'a Value {
+    let all = settings["settings"].as_array().unwrap();
+    all.iter().find(|s| s["key"] == key).unwrap()
+}
+
+// Catches a setting shown with the wrong source, which would send someone
+// editing the wrong file (or a flag) to change it.
+#[test]
+fn config_shows_where_each_setting_comes_from() {
+    let dir = repo_with_config("show", "min-tokens = 500\n[near]\nsimilarity = 0.5\n");
+    let shown = settings_json(&dir, &[".", "--max-param-density", "9"]);
+    let min = setting(&shown, "min-tokens");
+    assert_eq!(min["value"], 500);
+    assert!(
+        min["from"].as_str().unwrap().ends_with(".doppelscan.toml"),
+        "{min}"
+    );
+    assert_eq!(setting(&shown, "max-param-density")["from"], "flag");
+    assert_eq!(setting(&shown, "strict")["from"], "default");
+    assert_eq!(setting(&shown, "similarity")["value"], 0.5);
+    let dirs = shown["built_in_skips"]["dirs"].as_array().unwrap();
+    assert!(dirs.iter().any(|d| d == "node_modules"), "{shown}");
+}
+
+// Catches the MCP settings tool and the CLI drifting apart: an agent and a
+// person must see the same settings for the same path.
+#[test]
+fn mcp_settings_match_the_cli() {
+    let dir = repo_with_config("show-mcp", "min-tokens = 500\nexclude = [\"legacy/\"]\n");
+    let msg = json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": { "name": "get_settings", "arguments": { "path": "src" } },
+    });
+    let reply = handle_line(&Engine::default(), &dir, &msg.to_string()).unwrap();
+    let reply: Value = serde_json::from_str(&reply).unwrap();
+    let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+    let from_mcp: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(from_mcp, settings_json(&dir, &["src"]));
+}
+
+// Catches init writing a config the scan then rejects, overwriting an
+// existing one, or missing the test files near should leave out.
+#[test]
+fn init_writes_a_working_config_once() {
+    let dir = repo_with_config("init", "");
+    std::fs::remove_file(dir.join(".doppelscan.toml")).unwrap();
+    write(&dir, "src/a.test.ts", "test('a', () => {});\n");
+    let (code, _, err) = run(&dir, &["init"]);
+    assert_eq!(code, 0, "{err}");
+    let written = std::fs::read_to_string(dir.join(".doppelscan.toml")).unwrap();
+    assert!(written.contains("\"**/*.test.ts\""), "{written}");
+    assert_eq!(group_count(&dir, &["."]), 1);
+    assert_eq!(run(&dir, &["init"]).0, 2);
+    assert_eq!(run(&dir, &["init", "--force"]).0, 0);
+}
+
+// Catches a key in the generated template that the config would reject,
+// which a user only finds when they uncomment it.
+#[test]
+fn every_key_init_suggests_is_accepted() {
+    let dir = repo_with_config("init-keys", "");
+    std::fs::remove_file(dir.join(".doppelscan.toml")).unwrap();
+    assert_eq!(run(&dir, &["init"]).0, 0);
+    let written = std::fs::read_to_string(dir.join(".doppelscan.toml")).unwrap();
+    let uncommented: String = written
+        .lines()
+        .map(|l| {
+            l.strip_prefix("# ")
+                .filter(|r| r.contains(" = "))
+                .unwrap_or(l)
+        })
+        .map(|l| format!("{l}\n"))
+        .collect();
+    assert!(uncommented.contains("min-tokens = "), "{uncommented}");
+    std::fs::write(dir.join(".doppelscan.toml"), &uncommented).unwrap();
+    let (code, _, err) = run(&dir, &["config", "."]);
+    assert_eq!(code, 0, "{err}\n{uncommented}");
+}
+
+// Catches the committed schema falling behind the config it describes:
+// editors would then flag valid keys or miss new ones.
+#[test]
+fn the_committed_schema_matches_the_config() {
+    let (code, out, err) = run(Path::new("."), &["config", "--schema"]);
+    assert_eq!(code, 0, "{err}");
+    let committed = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("doppelscan.schema.json"),
+    )
+    .unwrap();
+    assert_eq!(
+        out, committed,
+        "run `doppelscan config --schema > doppelscan.schema.json`"
+    );
+}
