@@ -4,6 +4,10 @@
   "description": "doppelscan settings for a repository (.doppelscan.toml). Flags and MCP\ntool arguments override them.",
   "type": "object",
   "properties": {
+    "check": {
+      "description": "Settings for `doppelscan check`.",
+      "$ref": "#/$defs/CheckFile"
+    },
     "exclude": {
       "description": ".gitignore patterns, relative to this file, to leave out.",
       "type": "array",
@@ -66,6 +70,21 @@
   },
   "additionalProperties": false,
   "$defs": {
+    "CheckFile": {
+      "type": "object",
+      "properties": {
+        "min-tokens": {
+          "description": "Only new clone groups of at least this many tokens fail the check;\nsmaller ones are still reported. Default: the report's min-tokens.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
     "NearFile": {
       "type": "object",
       "properties": {

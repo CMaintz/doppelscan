@@ -65,6 +65,10 @@ enum Command {
         /// Baseline file [default: PATH/.doppelscan-baseline.json].
         #[arg(long)]
         baseline: Option<PathBuf>,
+        /// Only new groups of at least this many tokens fail the check;
+        /// smaller ones are still reported [default: --min-tokens].
+        #[arg(long)]
+        check_min_tokens: Option<u32>,
         #[command(flatten)]
         common: Common,
     },
@@ -197,8 +201,9 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Command::Check {
             base,
             baseline,
+            check_min_tokens,
             common,
-        } => return check(&engine, base, baseline, &common),
+        } => return check(&engine, base, baseline, check_min_tokens, &common),
         Command::Baseline {
             prune,
             output,
@@ -263,6 +268,7 @@ fn requested(c: &Common) -> Requested {
         only: c.only.clone(),
         exclude: c.exclude.clone(),
         max_param_density: c.max_param_density,
+        check_min_tokens: None,
     }
 }
 
@@ -427,6 +433,7 @@ fn check(
     engine: &Engine,
     base: Option<String>,
     baseline: Option<PathBuf>,
+    check_min_tokens: Option<u32>,
     common: &Common,
 ) -> anyhow::Result<ExitCode> {
     let against = match (base, baseline.or_else(|| Baseline::find(&common.path))) {
@@ -434,7 +441,8 @@ fn check(
         (None, Some(file)) => Against::File(file),
         (None, None) => Against::Rev("HEAD".into()),
     };
-    let result = engine.check(&common.path, &against, &options(common)?)?;
+    let min_new = config(common)?.check_min_tokens(check_min_tokens);
+    let result = engine.check(&common.path, &against, &options(common)?, min_new)?;
     print_check(&result, &against, common.format)?;
     Ok(if result.new.is_empty() {
         ExitCode::SUCCESS
@@ -455,6 +463,12 @@ fn print_check(result: &Check, against: &Against, format: Format) -> anyhow::Res
             }),
             note: &result.note,
             resolved: result.resolved,
+            smaller: Each(|| {
+                result
+                    .smaller
+                    .iter()
+                    .map(|&id| result.analysis.group(id, false))
+            }),
             summary: Sorted(result.analysis.summary()),
         });
     }
@@ -464,11 +478,13 @@ fn print_check(result: &Check, against: &Against, format: Format) -> anyhow::Res
 /// `check`'s report, keys in sorted order like `Report`: against a large
 /// diff, its new groups can be as many as a full scan's.
 #[derive(Serialize)]
-struct CheckReport<'a, G> {
+struct CheckReport<'a, G, S> {
     against: String,
     new: G,
     note: &'a Option<String>,
     resolved: usize,
+    /// New groups under the check's own minimum, which do not fail it.
+    smaller: S,
     summary: Sorted<doppelscan::report::Summary>,
 }
 
@@ -486,7 +502,8 @@ fn write_baseline(
     let requested = options(common)?;
     let baseline = if prune {
         let old = Baseline::load(&path)?;
-        let opts = anchored(old.settings.apply(&requested)?, common, &path)?;
+        old.settings.require_same(&requested, &path)?;
+        let opts = anchored(requested, common, &path)?;
         old.pruned(&engine.scan(&common.path, &opts)?)
     } else {
         let opts = anchored(requested, common, &path)?;

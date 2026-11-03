@@ -48,6 +48,7 @@ pub struct Skips {
 /// The settings `asked` (flags or tool arguments) and `config` give, with
 /// `near_similarity` the threshold asked for `near`, if any.
 pub fn explain(config: &Config, asked: &Requested, near_similarity: Option<f32>) -> Effective {
+    let check_min = asked.check_min_tokens;
     let defaults = crate::engine::ScanOptions::default();
     let only = (!asked.only.is_empty()).then(|| asked.only.clone());
     Effective {
@@ -73,6 +74,7 @@ pub fn explain(config: &Config, asked: &Requested, near_similarity: Option<f32>)
                 &wide_set(&config.similarity),
                 0.8,
             ),
+            line("check.min-tokens", check_min, &config.check_min_tokens, 0),
         ],
         exclude: patterns(&config.rules, |r| &r.exclude),
         include: patterns(&config.rules, |r| &r.include),
@@ -129,7 +131,7 @@ fn patterns(rules: &[PathRules], which: impl Fn(&PathRules) -> &Vec<String>) -> 
 
 /// Without Windows' verbatim prefix (`\\?\`), which canonical paths carry
 /// and nobody types.
-fn shown(path: &Path) -> String {
+pub(crate) fn shown(path: &Path) -> String {
     let text = path.display().to_string();
     text.strip_prefix(r"\\?\").unwrap_or(&text).to_string()
 }
@@ -278,6 +280,11 @@ fn template(langs: &[(usize, usize)], tests: &[&str]) -> String {
 
 # Tests are near copies of each other by design.
 {near_exclude}
+
+[check]
+# Only new clone groups of at least this many tokens fail `check`; smaller
+# ones are still reported. 0 leaves it to min-tokens.
+# min-tokens = 0
 ",
         found = if found.is_empty() {
             "none".to_string()

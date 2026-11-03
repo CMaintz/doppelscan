@@ -328,6 +328,13 @@ pub fn render_check(check: &Check, against: &Against) -> String {
         let group = check.analysis.group(id, false);
         out.push_str(&format!("\n{}", render_group(&group, Detail::Full)));
     }
+    if !check.smaller.is_empty() {
+        out.push_str("\nSmaller new groups, not failing the check:\n");
+    }
+    for &id in &check.smaller {
+        let group = check.analysis.group(id, false);
+        out.push_str(&format!("\n{}", render_group(&group, Detail::Brief)));
+    }
     if check.resolved > 0 && matches!(against, Against::File(_)) {
         let entries = if check.resolved == 1 {
             "entry"

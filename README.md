@@ -147,9 +147,7 @@ code); inside one, anchor the path (`vendor/ours/`, not `ours/`). As in
 A flag or tool argument overrides a setting, `--exclude` adds to the
 config's excludes, `--no-strict` turns off a configured `strict`,
 `--config FILE` reads that file instead and `--no-config` reads none. An
-unknown key is an error. A baseline keeps the token minimum, strictness,
-languages and `--exclude` it was written with; config paths are read
-fresh.
+unknown key is an error.
 
 ## Ignoring code
 
@@ -190,10 +188,16 @@ branch does not exist, `origin/<rev>` is used, as on a CI checkout.
 
 Without `--base`, `check` uses the nearest `.doppelscan-baseline.json` in the
 scanned directory or above it (up to the repository root), and HEAD when
-there is none. A baseline keeps the settings it was written with
-(`--min-tokens`, `--strict`, `--only`, `--exclude`), and `check` uses those
-instead of its own flags so the comparison stays like for like; to change
-them, write the baseline again.
+there is none. Settings come from flags and `.doppelscan.toml` only; a
+baseline records the ones it was written with (`min-tokens`, `strict`,
+`only`, `max-param-density`, `--exclude`) just so `check` and `--prune` can
+refuse, listing the differences, when they have changed since, rather than
+compare unlike scans. To change them, write the baseline again.
+
+`check` fails on any new group the scan reports. To gate on bigger clones
+only while still seeing the small ones, set `[check] min-tokens` in the
+config (or `--check-min-tokens`): new groups under it are listed after
+the others (`smaller` in the JSON) and do not fail the check.
 
 A baseline stores each accepted group's fingerprint, copy count and the
 functions it sits in, not line numbers. Moving or renaming known duplication
@@ -297,9 +301,9 @@ skips because they cannot be extracted as one unit.
 - Token-level languages split statements by layout, so the same code
   formatted differently (a statement broken over lines outside brackets)
   can fail to match.
-- Baselines record the languages they cover. One written by an older
-  release (version 1) keeps covering only the grammar languages until it is
-  written again with `doppelscan baseline`.
+- A baseline written by an older release (version 1) records only the
+  grammar languages, so `check` asks for it to be written again with
+  `doppelscan baseline` before comparing.
 
 ## Contributing
 

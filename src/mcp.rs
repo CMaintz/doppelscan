@@ -237,7 +237,14 @@ fn requested(args: &Value) -> Requested {
         strict: args.get("strict").and_then(Value::as_bool),
         only: str_list(args, "languages"),
         exclude: str_list(args, "exclude"),
-        max_param_density: None,
+        max_param_density: args
+            .get("max_param_density")
+            .and_then(Value::as_f64)
+            .map(|d| d as f32),
+        check_min_tokens: args
+            .get("check_min_tokens")
+            .and_then(Value::as_u64)
+            .map(|n| n as u32),
     }
 }
 
@@ -411,7 +418,8 @@ fn check_new(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<Strin
         (None, Some(file)) => Against::File(file),
         (None, None) => Against::Rev("HEAD".into()),
     };
-    let check = engine.check(&path, &against, &options(root, args)?)?;
+    let min_new = config(root, args)?.check_min_tokens(requested(args).check_min_tokens);
+    let check = engine.check(&path, &against, &options(root, args)?, min_new)?;
     Ok(render_check(&check, &against))
 }
 
@@ -422,6 +430,7 @@ fn tool_definitions() -> Value {
         "languages": { "type": "array", "items": { "type": "string" }, "description": format!("Restrict to these languages: {}. yaml is scanned only when listed here.", known_langs()) },
         "exclude": { "type": "array", "items": { "type": "string" }, "description": "Globs to skip, e.g. \"**/*.test.ts\"." },
         "strict": { "type": "boolean", "description": "Require identical names and literals (copy-paste clones only)." },
+        "max_param_density": { "type": "number", "description": "Drop groups needing more parameters than this per 100 tokens. Default 8, or the repo's .doppelscan.toml." },
     });
     let with = |extra: Value| {
         let mut props = common.clone();
@@ -481,6 +490,7 @@ fn tool_definitions() -> Value {
             "inputSchema": { "type": "object", "properties": with(json!({
                 "base": { "type": "string", "description": "Git revision to compare against, e.g. \"main\" for a whole branch." },
                 "baseline": { "type": "string", "description": "Baseline file relative to the root. Default: the nearest .doppelscan-baseline.json in path or a parent, up to the repository root." },
+                "check_min_tokens": { "type": "integer", "description": "Only new groups of at least this many tokens fail the check; smaller ones are listed after them. Default: the repo's [check] min-tokens, else min_tokens." },
             })) },
             "annotations": { "readOnlyHint": true },
         },

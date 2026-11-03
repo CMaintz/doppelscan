@@ -53,6 +53,17 @@ struct File {
     /// Settings for `doppelscan near`.
     #[serde(default)]
     near: NearFile,
+    /// Settings for `doppelscan check`.
+    #[serde(default)]
+    check: CheckFile,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct CheckFile {
+    /// Only new clone groups of at least this many tokens fail the check;
+    /// smaller ones are still reported. Default: the report's min-tokens.
+    min_tokens: Option<u32>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -86,6 +97,7 @@ pub struct Config {
     pub only: Option<Set<Vec<String>>>,
     pub max_param_density: Option<Set<f32>>,
     pub similarity: Option<Set<f32>>,
+    pub check_min_tokens: Option<Set<u32>>,
     /// Each file's `exclude` and `include`, outermost first.
     pub rules: Vec<PathRules>,
     /// Each file's `[near] exclude`, which only `near` applies.
@@ -131,6 +143,7 @@ impl Config {
         override_with(&mut self.only, file.only, &path);
         override_with(&mut self.max_param_density, file.max_param_density, &path);
         override_with(&mut self.similarity, file.near.similarity, &path);
+        override_with(&mut self.check_min_tokens, file.check.min_tokens, &path);
         let dir = path.parent().unwrap_or(Path::new("")).to_path_buf();
         self.rules.push(PathRules {
             dir: dir.clone(),
@@ -176,6 +189,12 @@ impl Config {
         opts.rules.extend(self.near_rules.iter().cloned());
         opts.near = true;
         Ok(opts)
+    }
+
+    /// The size a new group needs to fail `check`: the one asked for, else
+    /// the config's, else 0, so the report's minimum decides.
+    pub fn check_min_tokens(&self, asked: Option<u32>) -> u32 {
+        asked.or(value(&self.check_min_tokens)).unwrap_or(0)
     }
 
     /// `near`'s threshold: the one asked for, else the config's, else 0.8.
@@ -248,6 +267,8 @@ pub struct Requested {
     pub only: Vec<String>,
     pub exclude: Vec<String>,
     pub max_param_density: Option<f32>,
+    /// `check`'s own minimum for new groups.
+    pub check_min_tokens: Option<u32>,
 }
 
 fn languages(names: &[String]) -> anyhow::Result<Vec<usize>> {

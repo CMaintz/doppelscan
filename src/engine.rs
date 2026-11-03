@@ -10,7 +10,7 @@ use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use tree_sitter::Parser;
 
-use crate::baseline::{Baseline, Settings};
+use crate::baseline::Baseline;
 use crate::detect::{RawGroup, detect};
 use crate::filter::{PathFilter, PathRules};
 use crate::index::{FileIndex, MIN_STORED_TOKENS, index_source};
@@ -295,31 +295,49 @@ pub struct Check {
     pub new: Vec<usize>,
     /// Baseline entries nothing in the working tree matches any more.
     pub resolved: usize,
-    /// Set when a baseline file's stored settings replaced the requested ones.
+    /// Ids of new groups smaller than the check's own minimum: shown, but
+    /// they do not fail it and are not in `new`.
+    pub smaller: Vec<usize>,
+    /// Says why some new groups do not count, when any do not.
     pub note: Option<String>,
 }
 
 impl Engine {
+    /// New duplication against `against`. New groups under `min_new_tokens`
+    /// are reported but do not count, so a gate can be stricter about size
+    /// than the report.
     pub fn check(
         &self,
         root: &Path,
         against: &Against,
         opts: &ScanOptions,
+        min_new_tokens: u32,
     ) -> anyhow::Result<Check> {
-        let (baseline, opts, note) = match against {
+        let (baseline, opts) = match against {
             Against::File(path) => against_file(root, path, opts)?,
             Against::Rev(rev) => {
                 let (base, opts) = self.scan_rev(root, rev, opts)?;
-                (Baseline::from_analysis(&base, &opts), opts, None)
+                (Baseline::from_analysis(&base, &opts), opts)
             }
         };
         let analysis = self.scan(root, &opts)?;
-        let new = baseline.new_groups(&analysis);
         let resolved = baseline.groups.len() - baseline.pruned(&analysis).groups.len();
+        let (new, small): (Vec<usize>, Vec<usize>) = baseline
+            .new_groups(&analysis)
+            .into_iter()
+            .partition(|&id| analysis.groups[id - 1].tokens >= min_new_tokens);
+        let note = (!small.is_empty()).then(|| {
+            let groups = if small.len() == 1 { "group is" } else { "groups are" };
+            format!(
+                "{} smaller new {groups} under {min_new_tokens} tokens, listed last; they do not fail the check.",
+                small.len()
+            )
+        });
         Ok(Check {
             analysis,
             new,
             resolved,
+            smaller: small,
             note,
         })
     }
@@ -372,19 +390,14 @@ fn against_file(
     root: &Path,
     path: &Path,
     opts: &ScanOptions,
-) -> anyhow::Result<(Baseline, ScanOptions, Option<String>)> {
+) -> anyhow::Result<(Baseline, ScanOptions)> {
     let baseline = Baseline::load(path)?;
-    let mut applied = baseline.settings.apply(opts)?;
-    applied.display_base = Some(anchor(root, path)?);
-    let note = (Settings::from_options(opts) != baseline.settings).then(|| {
-        format!(
-            "Using the settings stored in {} (min_tokens {}); \
-             rewrite the baseline to change them.",
-            path.display(),
-            baseline.settings.min_tokens
-        )
-    });
-    Ok((baseline, applied, note))
+    baseline.settings.require_same(opts, path)?;
+    let opts = ScanOptions {
+        display_base: Some(anchor(root, path)?),
+        ..opts.clone()
+    };
+    Ok((baseline, opts))
 }
 
 /// The directory a baseline file describes; `root` must lie inside it.
