@@ -5,8 +5,9 @@ use std::process::ExitCode;
 use anyhow::{Context, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use doppelscan::baseline::{Baseline, DEFAULT_FILE};
+use doppelscan::config::{Config, Requested, known_langs};
 use doppelscan::engine::{Against, Check, Engine, ScanOptions, anchor};
-use doppelscan::lang::{LANGS, lang_index_by_name, lang_index_for_path};
+use doppelscan::lang::{lang_index_by_name, lang_index_for_path};
 use doppelscan::near::{render_near, render_near_summary};
 use doppelscan::report::{Analysis, Detail, render_check, render_group, render_summary};
 use serde::Serialize;
@@ -82,9 +83,9 @@ enum Command {
     /// changed statements, which the exact scan cannot align. Languages
     /// read without a grammar are skipped.
     Near {
-        /// Smallest similarity reported, 0 to 1.
-        #[arg(long, default_value_t = 0.8)]
-        similarity: f32,
+        /// Smallest similarity reported, 0 to 1 [default: 0.8].
+        #[arg(long)]
+        similarity: Option<f32>,
         /// Groups to show; 0 for all.
         #[arg(long, default_value_t = 20)]
         limit: usize,
@@ -104,9 +105,9 @@ struct Common {
     /// Directory or file to scan.
     #[arg(default_value = ".")]
     path: PathBuf,
-    /// Smallest clone reported, in syntax tokens.
-    #[arg(long, default_value_t = 50)]
-    min_tokens: u32,
+    /// Smallest clone reported, in syntax tokens [default: 50].
+    #[arg(long)]
+    min_tokens: Option<u32>,
     /// Match identifiers and literals exactly (copy-paste clones only).
     #[arg(long)]
     strict: bool,
@@ -119,9 +120,9 @@ struct Common {
     exclude: Vec<String>,
     /// Drop groups needing more parameters than this per 100 tokens (in
     /// token-level languages, names differing in several places are not
-    /// counted).
-    #[arg(long, default_value_t = 8.0)]
-    max_param_density: f32,
+    /// counted) [default: 8].
+    #[arg(long)]
+    max_param_density: Option<f32>,
     #[arg(long, value_enum, default_value_t = Format::Text)]
     format: Format,
 }
@@ -183,26 +184,14 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
 }
 
 fn options(c: &Common) -> anyhow::Result<ScanOptions> {
-    let languages = c
-        .only
-        .iter()
-        .map(|l| {
-            lang_index_by_name(l)
-                .with_context(|| format!("unknown language {l:?}; known: {}", known_langs()))
-        })
-        .collect::<anyhow::Result<_>>()?;
-    Ok(ScanOptions {
+    let asked = Requested {
         min_tokens: c.min_tokens,
         strict: c.strict,
-        languages,
+        only: c.only.clone(),
         exclude: c.exclude.clone(),
         max_param_density: c.max_param_density,
-        display_base: None,
-    })
-}
-
-fn known_langs() -> String {
-    LANGS.iter().map(|l| l.name).collect::<Vec<_>>().join(", ")
+    };
+    Config::for_scan(&c.path)?.options(asked, ScanOptions::default().min_tokens)
 }
 
 fn scan(engine: &Engine, args: &ScanArgs) -> anyhow::Result<()> {
@@ -449,7 +438,15 @@ fn anchored(opts: ScanOptions, common: &Common, file: &Path) -> anyhow::Result<S
     })
 }
 
-fn near(engine: &Engine, similarity: f32, limit: usize, common: &Common) -> anyhow::Result<()> {
+fn near(
+    engine: &Engine,
+    similarity: Option<f32>,
+    limit: usize,
+    common: &Common,
+) -> anyhow::Result<()> {
+    let similarity = similarity
+        .or(Config::for_scan(&common.path)?.similarity)
+        .unwrap_or(0.8);
     anyhow::ensure!(
         (0.0..=1.0).contains(&similarity),
         "--similarity is a fraction between 0 and 1"

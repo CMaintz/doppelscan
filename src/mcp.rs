@@ -14,8 +14,9 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 
 use crate::baseline::Baseline;
+use crate::config::{Config, Requested, known_langs};
 use crate::engine::{Against, Engine, ScanOptions};
-use crate::lang::{LANGS, lang_index_by_name, lang_index_for_path};
+use crate::lang::{lang_index_by_name, lang_index_for_path};
 use crate::near::{render_near, render_near_summary};
 use crate::report::{Analysis, Detail, render_check, render_group, render_summary};
 
@@ -188,26 +189,27 @@ fn scan_root(root: &Path, args: &Value) -> anyhow::Result<PathBuf> {
     Ok(path)
 }
 
-fn options(root: &Path, args: &Value, default_min: u64) -> anyhow::Result<ScanOptions> {
-    let languages = str_list(args, "languages")
-        .iter()
-        .map(|l| {
-            lang_index_by_name(l)
-                .ok_or_else(|| anyhow::anyhow!("unknown language {l:?}; known: {}", known_langs()))
-        })
-        .collect::<anyhow::Result<_>>()?;
-    Ok(ScanOptions {
-        min_tokens: uint_arg(args, "min_tokens", default_min) as u32,
+fn options(root: &Path, args: &Value, default_min: u32) -> anyhow::Result<ScanOptions> {
+    let asked = Requested {
+        min_tokens: args
+            .get("min_tokens")
+            .and_then(Value::as_u64)
+            .map(|n| n as u32),
         strict: args.get("strict").and_then(Value::as_bool).unwrap_or(false),
-        languages,
+        only: str_list(args, "languages"),
         exclude: str_list(args, "exclude"),
+        max_param_density: None,
+    };
+    Ok(ScanOptions {
         display_base: Some(root.to_path_buf()),
-        ..ScanOptions::default()
+        ..config(root, args)?.options(asked, default_min)?
     })
 }
 
-fn known_langs() -> String {
-    LANGS.iter().map(|l| l.name).collect::<Vec<_>>().join(", ")
+/// The config for the scanned path; a path that does not exist is
+/// reported by the scan itself.
+fn config(root: &Path, args: &Value) -> anyhow::Result<Config> {
+    Config::for_scan(&scan_root(root, args).unwrap_or_else(|_| root.to_path_buf()))
 }
 
 fn render(analysis: &Analysis, ids: &[usize], template: bool) -> String {
@@ -306,7 +308,7 @@ fn duplicates_at(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<S
     if ids.is_empty() {
         return Ok(format!(
             "No clones overlap {file}:{from}-{to} (min_tokens {}).\n",
-            uint_arg(args, "min_tokens", 50)
+            opts.min_tokens
         ));
     }
     Ok(render(&analysis, &ids, true))
@@ -334,11 +336,12 @@ fn find_similar(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<St
 
 fn find_near(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<String> {
     let similarity = match args.get("similarity") {
-        None => 0.8,
-        Some(v) => v
-            .as_f64()
-            .ok_or_else(|| anyhow::anyhow!("similarity must be a number"))?,
-    } as f32;
+        None => config(root, args)?.similarity.unwrap_or(0.8),
+        Some(v) => {
+            v.as_f64()
+                .ok_or_else(|| anyhow::anyhow!("similarity must be a number"))? as f32
+        }
+    };
     anyhow::ensure!(
         (0.0..=1.0).contains(&similarity),
         "similarity is a fraction between 0 and 1"
@@ -378,7 +381,7 @@ fn check_new(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<Strin
 fn tool_definitions() -> Value {
     let common = json!({
         "path": { "type": "string", "description": "Directory or file to scan, relative to the server root. Default: the root." },
-        "min_tokens": { "type": "integer", "minimum": 8, "description": "Smallest clone reported, in syntax tokens. Default 50." },
+        "min_tokens": { "type": "integer", "minimum": 8, "description": "Smallest clone reported, in syntax tokens. Default 50, or the repo's .doppelscan.toml." },
         "languages": { "type": "array", "items": { "type": "string" }, "description": format!("Restrict to these languages: {}. yaml is scanned only when listed here.", known_langs()) },
         "exclude": { "type": "array", "items": { "type": "string" }, "description": "Globs to skip, e.g. \"**/*.test.ts\"." },
         "strict": { "type": "boolean", "description": "Require identical names and literals (copy-paste clones only)." },

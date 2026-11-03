@@ -105,17 +105,7 @@ impl Baseline {
     /// The baseline file for a scan of `start`: in it or the nearest parent
     /// directory up to the repository root.
     pub fn find(start: &Path) -> Option<PathBuf> {
-        let start = start.canonicalize().ok()?;
-        for dir in start.ancestors() {
-            let file = dir.join(DEFAULT_FILE);
-            if file.exists() {
-                return Some(file);
-            }
-            if dir.join(".git").exists() {
-                break;
-            }
-        }
-        None
+        crate::config::nearest(start, DEFAULT_FILE)
     }
 
     pub fn load(path: &Path) -> anyhow::Result<Self> {

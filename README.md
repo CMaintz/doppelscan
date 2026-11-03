@@ -104,6 +104,26 @@ several places is taken for a renamed local and not counted).
 `.gitignore` is honoured, and dependency/build directories, minified bundles
 and files marked as generated are skipped.
 
+## Configuration
+
+A `.doppelscan.toml` in the scanned directory, or the nearest parent up to
+the repository root, sets a project's defaults for the CLI and the MCP
+server alike:
+
+```toml
+min-tokens = 40
+only = ["ts", "java"]
+exclude = ["**/*.test.ts", "legacy/**"]
+max-param-density = 10
+strict = false
+similarity = 0.85   # near
+```
+
+A flag or tool argument overrides a setting; `exclude` globs (relative to
+the scanned path) are added to any `--exclude`. An unknown key is an error.
+A baseline keeps the settings it was written with, so `check` against one
+still uses those.
+
 ## Ignoring code
 
 Duplication you have decided to keep can be marked in a comment, in any
