@@ -383,22 +383,32 @@ fn check(
 }
 
 fn print_check(result: &Check, against: &Against, format: Format) -> anyhow::Result<()> {
-    let groups: Vec<_> = result
-        .new
-        .iter()
-        .map(|&id| result.analysis.group(id, false))
-        .collect();
     if format == Format::Json {
-        let body = serde_json::json!({
-            "against": against.label(),
-            "new": groups,
-            "resolved": result.resolved,
-            "note": result.note,
-            "summary": result.analysis.summary(),
+        return emit_json(&CheckReport {
+            against: against.label(),
+            new: Each(|| {
+                result
+                    .new
+                    .iter()
+                    .map(|&id| result.analysis.group(id, false))
+            }),
+            note: &result.note,
+            resolved: result.resolved,
+            summary: Sorted(result.analysis.summary()),
         });
-        return emit(&(serde_json::to_string_pretty(&body)? + "\n"));
     }
     emit(&render_check(result, against))
+}
+
+/// `check`'s report, keys in sorted order like `Report`: against a large
+/// diff, its new groups can be as many as a full scan's.
+#[derive(Serialize)]
+struct CheckReport<'a, G> {
+    against: String,
+    new: G,
+    note: &'a Option<String>,
+    resolved: usize,
+    summary: Sorted<doppelscan::report::Summary>,
 }
 
 fn write_baseline(

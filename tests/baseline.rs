@@ -361,20 +361,20 @@ fn checking_a_subdirectory_uses_the_baseline_above_it() {
     assert_eq!(doppelscan(&dir, &["check", "src"]).0, 1);
 }
 
-// Catches the streamed JSON report drifting from what a serde_json Value
+// Catches a streamed JSON report drifting from what a serde_json Value
 // writes (keys sorted at every level, pretty-printed, one trailing
 // newline), which scripts reading it have always seen.
 #[test]
-fn json_report_is_written_as_a_sorted_value() {
+fn json_reports_are_written_as_a_sorted_value() {
     let dir = repo("json");
-    let (code, out) = doppelscan(&dir, &["--format", "json"]);
-    assert_eq!(code, 0, "{out}");
-    let report: serde_json::Value = serde_json::from_str(&out).unwrap();
-    assert!(!report["groups"].as_array().unwrap().is_empty(), "{out}");
-    assert_eq!(
-        serde_json::to_string_pretty(&report).unwrap()
-            + "
-",
-        out
-    );
+    std::fs::write(dir.join("src/c.ts"), renamed(SUM_TOTALS, 3)).unwrap();
+    for (args, list) in [
+        (&["--format", "json"][..], "groups"),
+        (&["check", "--format", "json"][..], "new"),
+    ] {
+        let (_, out) = doppelscan(&dir, args);
+        let report: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(!report[list].as_array().unwrap().is_empty(), "{out}");
+        assert_eq!(serde_json::to_string_pretty(&report).unwrap() + "\n", out);
+    }
 }
