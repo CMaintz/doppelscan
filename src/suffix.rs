@@ -4,49 +4,31 @@
 //! maximal extent instead of once per sliding window, which is what keeps
 //! long duplicated blocks from flooding the report with sub-windows.
 
-use rayon::prelude::*;
+use libsais::SuffixArrayConstruction;
 
 pub struct Repeat {
     pub len: usize,
     pub positions: Vec<u32>,
 }
 
-/// Prefix doubling with parallel sorts. Rounds are log2 of the longest
-/// repeat, which for statement runs is small, so this beats SA-IS in
-/// practice while staying simple.
+/// SA-IS via libsais: linear in the text whatever the repeat lengths,
+/// where prefix doubling needs log2(longest repeat) full sorts and
+/// generated or vendored code makes that repeat long.
 pub fn suffix_array(text: &[u32]) -> Vec<u32> {
-    let n = text.len();
-    let mut sa: Vec<u32> = (0..n as u32).collect();
-    // Ranks are below n, which fits u32 like the positions do; the sort
-    // key widens them.
-    let mut rank: Vec<u32> = text.to_vec();
-    let mut next = vec![0u32; n];
-    let mut k = 1;
-    loop {
-        let key = |i: u32| {
-            let i = i as usize;
-            let second = if i + k < n { rank[i + k] as u64 + 1 } else { 0 };
-            ((rank[i] as u64) << 32) | second
-        };
-        sa.par_sort_unstable_by_key(|&i| key(i));
-        let distinct = rerank(&sa, &key, &mut next);
-        std::mem::swap(&mut rank, &mut next);
-        if distinct == n || k >= n {
-            return sa;
-        }
-        k *= 2;
+    if text.is_empty() {
+        return Vec::new();
     }
-}
-
-fn rerank(sa: &[u32], key: &impl Fn(u32) -> u64, out: &mut [u32]) -> usize {
-    let mut r = 0u32;
-    for w in 0..sa.len() {
-        if w > 0 && key(sa[w]) != key(sa[w - 1]) {
-            r += 1;
-        }
-        out[sa[w] as usize] = r;
-    }
-    if sa.is_empty() { 0 } else { r as usize + 1 }
+    // The integer-alphabet entry point takes i32 and may permute the text
+    // while it works; symbols are dense ids below the text length, so they
+    // fit. Single-threaded because libsais threads only through OpenMP,
+    // which would add a native runtime to every build target.
+    let mut symbols: Vec<i32> = text.iter().map(|&s| s as i32).collect();
+    let sa = SuffixArrayConstruction::for_text_mut(&mut symbols)
+        .in_owned_buffer32()
+        .single_threaded()
+        .run()
+        .expect("libsais rejects only negative symbols or a text over i32::MAX");
+    sa.into_vec().into_iter().map(|p| p as u32).collect()
 }
 
 /// Kasai: lcp[i] is the common prefix of suffixes sa[i-1] and sa[i].
@@ -142,6 +124,34 @@ mod tests {
     fn suffix_array_matches_naive_sort() {
         let text = [3, 1, 2, 1, 2, 1, 2, 3, 1, 2, 9, 1, 2, 1];
         assert_eq!(suffix_array(&text), naive_sa(&text));
+    }
+
+    // Small alphabets and periodic texts are where an induced sort goes wrong:
+    // equal LMS substrings, suffixes that prefix each other, and runs of one
+    // symbol all hit the bucket-boundary and recursion paths.
+    #[test]
+    fn suffix_array_matches_naive_sort_on_random_texts() {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for case in 0..2000 {
+            let len = (next() % 48) as usize;
+            let alphabet = 1 + (next() % 4) as u32;
+            let mut text: Vec<u32> = (0..len)
+                .map(|_| (next() % alphabet as u64) as u32)
+                .collect();
+            if case % 3 == 0 && len > 4 {
+                let period = 1 + (next() as usize % 3);
+                for i in period..len {
+                    text[i] = text[i - period];
+                }
+            }
+            assert_eq!(suffix_array(&text), naive_sa(&text), "text {text:?}");
+        }
     }
 
     // Catches reporting every right-truncated window: "1 2 3" twice must be
