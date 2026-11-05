@@ -289,6 +289,44 @@ fn pruning_one_of_two_copies_in_a_function_drops_one_place() {
     assert_eq!(pruned.groups[0].places.len(), 2);
 }
 
+fn repo_accepting_its_baseline(name: &str) -> PathBuf {
+    let dir = repo(name);
+    assert_eq!(doppelscan(&dir, &["baseline"]).0, 0);
+    let fingerprint = &written_entries(&dir)[0].fingerprint;
+    let accept = format!("[[accept]]\nfingerprint = \"{fingerprint}\"\nreason = \"vendored\"\n");
+    std::fs::write(dir.join(".doppelscan.toml"), accept).unwrap();
+    dir
+}
+
+// Catches pruning against visible groups only: accepting a group hides it
+// from the scan, and dropping its entry would fail `check` on untouched
+// code the day the accept line is removed.
+#[test]
+fn an_accepted_group_is_hidden_not_gone() {
+    let dir = repo_accepting_its_baseline("accept-kept");
+    let (code, out) = doppelscan(&dir, &["check"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(!out.contains("no longer match"), "{out}");
+
+    assert_eq!(doppelscan(&dir, &["baseline", "--prune"]).0, 0);
+    assert_eq!(written_entries(&dir).len(), 1);
+    std::fs::remove_file(dir.join(".doppelscan.toml")).unwrap();
+    let (code, out) = doppelscan(&dir, &["check"]);
+    assert_eq!(code, 0, "{out}");
+}
+
+// Catches keeping an entry for its accept line alone: once the code is
+// deleted the entry has nothing left to excuse and would stay forever.
+#[test]
+fn an_accepted_group_whose_code_is_gone_is_resolved() {
+    let dir = repo_accepting_its_baseline("accept-gone");
+    std::fs::remove_file(dir.join("src/b.ts")).unwrap();
+    let (_, out) = doppelscan(&dir, &["check"]);
+    assert!(out.contains("no longer match"), "{out}");
+    assert_eq!(doppelscan(&dir, &["baseline", "--prune"]).0, 0);
+    assert!(written_entries(&dir).is_empty());
+}
+
 // Catches errors exiting 1, which a CI gate would read as "new
 // duplication" instead of a broken setup.
 #[test]

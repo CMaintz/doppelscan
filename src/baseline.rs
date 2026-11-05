@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
+use crate::detect::RawGroup;
 use crate::engine::ScanOptions;
 use crate::lang::{LANGS, Syntax};
 use crate::report::{Analysis, fingerprint};
@@ -116,9 +117,8 @@ fn scanned_languages(languages: &[usize]) -> Vec<usize> {
 
 impl Baseline {
     pub fn from_analysis(analysis: &Analysis, opts: &ScanOptions) -> Self {
-        let mut groups: Vec<Entry> = (1..=analysis.groups.len())
-            .map(|id| entry(analysis, id))
-            .collect();
+        let raw = analysis.groups.iter();
+        let mut groups: Vec<Entry> = raw.map(|group| entry(analysis, group)).collect();
         groups.sort_by(|a, b| a.fingerprint.cmp(&b.fingerprint));
         Self {
             version: VERSION,
@@ -171,7 +171,7 @@ impl Baseline {
     /// Ids of the groups in `now` that this baseline does not account for.
     pub fn new_groups(&self, now: &Analysis) -> Vec<usize> {
         (1..=now.groups.len())
-            .filter(|&id| !self.excuses(&entry(now, id)))
+            .filter(|&id| !self.excuses(&entry(now, &now.groups[id - 1])))
             .collect()
     }
 
@@ -179,7 +179,8 @@ impl Baseline {
     /// places cut to what remains. Never adds an entry, a place or a copy,
     /// so pruning cannot accept new duplication.
     pub fn pruned(&self, now: &Analysis) -> Self {
-        let current: Vec<Entry> = (1..=now.groups.len()).map(|id| entry(now, id)).collect();
+        let found = now.groups.iter().chain(&now.accepted);
+        let current: Vec<Entry> = found.map(|group| entry(now, group)).collect();
         let groups = self
             .groups
             .iter()
@@ -254,8 +255,7 @@ fn is_shrunk_from(group: &Entry, accepted: &Entry) -> bool {
         && is_sub_multiset(&group.places, &accepted.places)
 }
 
-fn entry(analysis: &Analysis, id: usize) -> Entry {
-    let raw = &analysis.groups[id - 1];
+fn entry(analysis: &Analysis, raw: &RawGroup) -> Entry {
     let mut places: Vec<String> = raw
         .occs
         .iter()

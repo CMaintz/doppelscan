@@ -182,8 +182,9 @@ reason = "Generated from the OpenAPI spec; regenerated, never edited."
 
 An accepted group is left out of every report and never fails `check`,
 however many copies it has. Editing the code changes its fingerprint, so
-the clone comes back for another look. `near` groups have no fingerprint
-and are not affected.
+the clone comes back for another look. Its baseline entry, if it has one,
+stays until the code is gone. `near` groups have no fingerprint and are not
+affected.
 
 ## Gating new duplication
 

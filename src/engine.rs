@@ -190,7 +190,7 @@ pub fn index_sources(sources: Vec<Source>, strict: bool) -> Vec<Arc<FileIndex>> 
 pub fn analyze(files: Vec<Arc<FileIndex>>, opts: &ScanOptions, started: Instant) -> Analysis {
     let min_tokens = opts.min_tokens.max(MIN_STORED_TOKENS);
     let density = opts.max_param_density;
-    let mut groups: Vec<RawGroup> = detect(&files, min_tokens, |g| {
+    let groups: Vec<RawGroup> = detect(&files, min_tokens, |g| {
         let allowed = (density * g.tokens as f32 / 100.0).max(FREE_PARAMS);
         let params = variation::analyze(g, &files)
             .parameters
@@ -201,11 +201,14 @@ pub fn analyze(files: Vec<Arc<FileIndex>>, opts: &ScanOptions, started: Instant)
     });
     // After suppression, so the pieces inside an accepted clone stay
     // hidden with it instead of surfacing as groups of their own.
-    groups.retain(|g| !opts.accept.contains(&fingerprint(g)));
+    let (accepted, mut groups): (Vec<_>, Vec<_>) = groups
+        .into_iter()
+        .partition(|g| opts.accept.contains(&fingerprint(g)));
     groups.sort_by(|a, b| score(b).cmp(&score(a)).then(a.hash.cmp(&b.hash)));
     Analysis {
         files,
         groups,
+        accepted,
         elapsed: started.elapsed(),
     }
 }
