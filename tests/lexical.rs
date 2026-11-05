@@ -439,3 +439,80 @@ fn triple_quotes_span_lines_where_the_language_has_them() {
         assert_eq!(start_lines(&found), [1, 1], "{ext}: {quotes}");
     }
 }
+
+// Catches a call or an access on a word that also heads imports counting
+// as an import, which drops the statement and breaks the run around it.
+#[test]
+fn a_head_word_used_as_a_name_is_not_an_import() {
+    let cases = [
+        (
+            "sol",
+            "    require(amount > 0, \"zero\");\n    require(amount < limit, \"high\");\n    require(owner != sender, \"self\");\n    require(paused == false, \"off\");\n",
+        ),
+        (
+            "sol",
+            "    require(alpha);\n    require(beta);\n    require(gamma);\n    require(delta);\n    require(epsilon);\n",
+        ),
+        (
+            "c",
+            "    part->alpha = one;\n    part->beta = two;\n    part->gamma = three;\n    part->delta = four;\n",
+        ),
+        (
+            "c",
+            "    part.alpha = one;\n    part.beta = two;\n    part.gamma = three;\n    part.delta = four;\n",
+        ),
+        (
+            "c",
+            "    part[0] = one;\n    part[1] = two;\n    part[2] = three;\n    part[3] = four;\n",
+        ),
+    ];
+    for (ext, run) in cases {
+        let (a, b) = (format!("a.{ext}"), format!("b.{ext}"));
+        let one = format!("void first(void) {{\n    int x = 1;\n{run}}}\n");
+        let two = format!("void second(void) {{\n    char *s = name(3, 4);\n{run}}}\n");
+        let found = scan(&[(&a, &one), (&b, &two)]);
+        assert_eq!(start_lines(&found), [3, 3], "{run}");
+    }
+}
+
+// Catches the rule for calls and accesses also dropping a real import:
+// a repeated import block would be reported as a clone.
+#[test]
+fn every_import_form_stays_noise() {
+    let cases = [
+        ("pl", "use strict;"),
+        ("rb", "require \"json\""),
+        ("rb", "require 'json'"),
+        ("rb", "require_relative 'helpers'"),
+        ("scala", "import scala.util.Try"),
+        ("scala", "import scala.util.{Failure, Success}"),
+        ("vue", "import { ref } from 'vue'"),
+        ("vue", "import type { Ref } from 'vue'"),
+        ("vue", "import Store, { use } from './store'"),
+        ("vue", "import * as api from './api'"),
+        ("dart", "part 'cart.g.dart';"),
+        ("dart", "part of 'cart.dart';"),
+        ("dart", "library cart;"),
+        ("cpp", "using namespace std;"),
+        ("lua", "require(\"socket\")"),
+        ("r", "library(dplyr)"),
+        ("sql", "use [shop]"),
+    ];
+    for (ext, line) in cases {
+        let (a, b) = (format!("a.{ext}"), format!("b.{ext}"));
+        let imports = format!("{line}\n").repeat(12);
+        let found = scan(&[(&a, &imports), (&b, &imports)]);
+        assert!(found.groups.is_empty(), "{line}: {:?}", found.groups);
+    }
+}
+
+// Catches a head that opens a body being read as an import: a Solidity
+// library or a Scala package block is a definition, so it is a clone from
+// its header, not just from the statements inside it.
+#[test]
+fn a_head_with_a_body_is_a_definition() {
+    let body = "    function add(uint a, uint b) internal returns (uint) {\n        return a + b;\n    }\n    function sub(uint a, uint b) internal returns (uint) {\n        return a - b;\n    }\n";
+    let a = format!("event Paid(address payer);\nlibrary Math {{\n{body}}}\n");
+    let b = format!("error Empty();\nerror Full(uint size);\nlibrary Calc {{\n{body}}}\n");
+    assert_eq!(start_lines(&scan(&[("a.sol", &a), ("b.sol", &b)])), [2, 3]);
+}

@@ -148,6 +148,10 @@ const NOISE_HEADS: &[&str] = &[
     "part",
 ];
 
+/// Punctuation that can follow a head in a real import, for the heads that
+/// have such a form (`import { a } from`, `import * as`, T-SQL's `use [db]`).
+const NOISE_OPENERS: &[(&str, &str)] = &[("import", "{"), ("import", "*"), ("use", "[")];
+
 /// Directives after `#` (C's `#include`) or `@` (SCSS's `@use`) that
 /// import; `@include` in SCSS calls a mixin, so it is not one of them.
 const DIRECTIVE_NOISE: &[(&str, &str)] = &[
@@ -577,16 +581,45 @@ impl<'a> Builder<'a> {
     }
 
     fn is_noise(&self, stmt: &Stmt) -> bool {
-        let mut words = self.leaves[stmt.leaf_start as usize..]
-            .iter()
-            .map(|l| &self.source[l.start as usize..l.end as usize]);
-        let (Some(first), second) = (words.next(), words.next()) else {
+        let leaves = &self.leaves[stmt.leaf_start as usize..];
+        let [first, second, ..] = leaves else {
             return false;
         };
-        let directive = second.is_some_and(|s| DIRECTIVE_NOISE.contains(&(first, s)));
-        // `include:` and `package =` are keys being set, not imports.
-        let assigned = matches!(second, Some(":" | "="));
-        directive || (NOISE_HEADS.contains(&first) && !assigned)
+        let (head, next) = (self.leaf_text(first), self.leaf_text(second));
+        DIRECTIVE_NOISE.contains(&(head, next))
+            || (NOISE_HEADS.contains(&head) && self.imports(stmt, head, leaves))
+    }
+
+    /// Whether a statement opening with a head word is an import: what it
+    /// brings in has to come next. `include:`, `package =`, `part->a` and
+    /// `require(a > 0, "x")` use the word as a key, a name or a function.
+    fn imports(&self, stmt: &Stmt, head: &str, leaves: &[Leaf]) -> bool {
+        let next = &leaves[1];
+        let named = next.class == LeafClass::Literal
+            || is_word_byte(self.source.as_bytes()[next.start as usize]);
+        if named {
+            // `library L { ... }` and `package p { ... }` hold code; every
+            // other head with braces lists names (`import a.{b, c}`).
+            return !(stmt.closed_block && matches!(head, "library" | "package"));
+        }
+        NOISE_OPENERS.contains(&(head, self.leaf_text(next))) || self.is_load_call(head, leaves)
+    }
+
+    /// `require("socket")` and R's `library(dplyr)` import through a call
+    /// taking only what they load. A name passes for `library` alone:
+    /// Solidity's `require(ok)` is a check.
+    fn is_load_call(&self, head: &str, leaves: &[Leaf]) -> bool {
+        let [_, open, arg, close, rest @ ..] = leaves else {
+            return false;
+        };
+        self.leaf_text(open) == "("
+            && self.leaf_text(close) == ")"
+            && rest.len() <= 1
+            && (arg.class == LeafClass::Literal || head == "library")
+    }
+
+    fn leaf_text(&self, leaf: &Leaf) -> &'a str {
+        &self.source[leaf.start as usize..leaf.end as usize]
     }
 
     /// Names the block about to open after the statement read so far: the
