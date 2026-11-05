@@ -180,8 +180,28 @@ fn str_arg<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
     args.get(key).and_then(Value::as_str)
 }
 
-fn uint_arg(args: &Value, key: &str, default: u64) -> u64 {
-    args.get(key).and_then(Value::as_u64).unwrap_or(default)
+/// An explicit null is how some clients spell "unset".
+fn present<'a>(args: &'a Value, key: &str) -> Option<&'a Value> {
+    args.get(key).filter(|v| !v.is_null())
+}
+
+/// A value that does not fit is an error rather than a default or a
+/// truncation, which would answer a different question than the one asked.
+fn uint_arg<T: TryFrom<u64>>(args: &Value, key: &str) -> anyhow::Result<Option<T>> {
+    let Some(v) = present(args, key) else {
+        return Ok(None);
+    };
+    let n = v.as_u64().and_then(|n| T::try_from(n).ok());
+    n.map(Some)
+        .ok_or_else(|| anyhow::anyhow!("{key} must be a non-negative integer in range, not {v}"))
+}
+
+fn number_arg(args: &Value, key: &str) -> anyhow::Result<Option<f32>> {
+    let Some(v) = present(args, key) else {
+        return Ok(None);
+    };
+    let n = v.as_f64().map(|n| Some(n as f32));
+    n.ok_or_else(|| anyhow::anyhow!("{key} must be a number, not {v}"))
 }
 
 fn str_list(args: &Value, key: &str) -> Vec<String> {
@@ -206,15 +226,16 @@ fn scan_root(root: &Path, args: &Value) -> anyhow::Result<PathBuf> {
 }
 
 fn options(root: &Path, args: &Value) -> anyhow::Result<ScanOptions> {
-    with_root(root, config(root, args)?.options(requested(args))?)
+    with_root(root, config(root, args)?.options(requested(args)?)?)
 }
 
 /// Snippets are small, so a snippet search keeps its own lower minimum
 /// unless the call sets one; the repository's is meant for whole files.
 fn snippet_options(root: &Path, args: &Value) -> anyhow::Result<ScanOptions> {
+    let asked = requested(args)?;
     let asked = Requested {
-        min_tokens: requested(args).min_tokens.or(Some(SNIPPET_MIN_TOKENS)),
-        ..requested(args)
+        min_tokens: asked.min_tokens.or(Some(SNIPPET_MIN_TOKENS)),
+        ..asked
     };
     with_root(root, config(root, args)?.options(asked)?)
 }
@@ -229,37 +250,23 @@ fn with_root(root: &Path, opts: ScanOptions) -> anyhow::Result<ScanOptions> {
 }
 
 fn similarity_arg(args: &Value) -> anyhow::Result<Option<f32>> {
-    let Some(v) = args.get("similarity") else {
-        return Ok(None);
-    };
-    let similarity = v
-        .as_f64()
-        .ok_or_else(|| anyhow::anyhow!("similarity must be a number"))? as f32;
+    let similarity = number_arg(args, "similarity")?;
     anyhow::ensure!(
-        (0.0..=1.0).contains(&similarity),
+        similarity.is_none_or(|s| (0.0..=1.0).contains(&s)),
         "similarity is a fraction between 0 and 1"
     );
-    Ok(Some(similarity))
+    Ok(similarity)
 }
 
-fn requested(args: &Value) -> Requested {
-    Requested {
-        min_tokens: args
-            .get("min_tokens")
-            .and_then(Value::as_u64)
-            .map(|n| n as u32),
+fn requested(args: &Value) -> anyhow::Result<Requested> {
+    Ok(Requested {
+        min_tokens: uint_arg(args, "min_tokens")?,
         strict: args.get("strict").and_then(Value::as_bool),
         only: str_list(args, "languages"),
         exclude: str_list(args, "exclude"),
-        max_param_density: args
-            .get("max_param_density")
-            .and_then(Value::as_f64)
-            .map(|d| d as f32),
-        check_min_tokens: args
-            .get("check_min_tokens")
-            .and_then(Value::as_u64)
-            .map(|n| n as u32),
-    }
+        max_param_density: number_arg(args, "max_param_density")?,
+        check_min_tokens: uint_arg(args, "check_min_tokens")?,
+    })
 }
 
 /// The config for the scanned path; a path that does not exist is
@@ -283,8 +290,9 @@ fn render(analysis: &Analysis, ids: &[usize], template: bool) -> String {
 }
 
 fn find_duplicates(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<String> {
+    let page = Page::of(args)?;
     let analysis = engine.scan(&scan_root(root, args)?, &options(root, args)?)?;
-    let ids = page(args, analysis.groups.len());
+    let ids = page.ids(analysis.groups.len());
     let templates = args
         .get("include_templates")
         .and_then(Value::as_bool)
@@ -293,14 +301,31 @@ fn find_duplicates(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result
     Ok(out + &more_hint(&ids, analysis.groups.len()))
 }
 
-/// The ids an `offset`/`limit` page covers; a limit of 0 means the rest.
-fn page(args: &Value, total: usize) -> Vec<usize> {
-    let offset = uint_arg(args, "offset", 0) as usize;
-    let limit = match uint_arg(args, "limit", 15) as usize {
-        0 => usize::MAX,
-        n => n,
-    };
-    (offset + 1..=total).take(limit).collect()
+struct Page {
+    offset: usize,
+    limit: usize,
+}
+
+impl Page {
+    /// Read before scanning, so a bad argument does not cost a scan. A limit
+    /// of 0 means the rest.
+    fn of(args: &Value) -> anyhow::Result<Self> {
+        Ok(Self {
+            offset: uint_arg(args, "offset")?.unwrap_or(0),
+            limit: match uint_arg(args, "limit")?.unwrap_or(15) {
+                0 => usize::MAX,
+                n => n,
+            },
+        })
+    }
+
+    /// Ids start at 1, so wrapping here would ask for a group 0 that the
+    /// id-to-index subtraction cannot survive.
+    fn ids(&self, total: usize) -> Vec<usize> {
+        (self.offset.saturating_add(1)..=total)
+            .take(self.limit)
+            .collect()
+    }
 }
 
 fn more_hint(ids: &[usize], total: usize) -> String {
@@ -348,16 +373,7 @@ fn occurrence_code(analysis: &Analysis, id: usize) -> String {
 fn duplicates_at(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<String> {
     let file =
         str_arg(args, "file").ok_or_else(|| anyhow::anyhow!("missing required argument: file"))?;
-    let from = uint_arg(args, "start_line", 1) as u32;
-    let to = uint_arg(
-        args,
-        "end_line",
-        if args.get("start_line").is_some() {
-            from as u64
-        } else {
-            u32::MAX as u64
-        },
-    ) as u32;
+    let (from, to) = line_range(args)?;
     let opts = options(root, args)?.narrowed_to(lang_index_for_path(file.as_ref()));
     let analysis = engine.scan(&scan_root(root, args)?, &opts)?;
     let ids = analysis.overlapping(file, from, to);
@@ -368,6 +384,13 @@ fn duplicates_at(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<S
         ));
     }
     Ok(render(&analysis, &ids, true))
+}
+
+/// The whole file by default; a start line alone is that one line.
+fn line_range(args: &Value) -> anyhow::Result<(u32, u32)> {
+    let from = uint_arg(args, "start_line")?;
+    let to = uint_arg(args, "end_line")?;
+    Ok((from.unwrap_or(1), to.or(from).unwrap_or(u32::MAX)))
 }
 
 fn find_similar(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<String> {
@@ -395,21 +418,22 @@ fn find_similar(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<St
 fn get_settings(root: &Path, args: &Value) -> anyhow::Result<String> {
     let effective = explain(
         &config(root, args)?,
-        &requested(args),
+        &requested(args)?,
         similarity_arg(args)?,
     );
     Ok(serde_json::to_string_pretty(&effective)?)
 }
 
 fn find_near(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<String> {
+    let page = Page::of(args)?;
     let config = config(root, args)?;
     let similarity = config.similarity(similarity_arg(args)?);
     let analysis = engine.near(
         &scan_root(root, args)?,
-        &with_root(root, config.near_options(requested(args))?)?,
+        &with_root(root, config.near_options(requested(args)?)?)?,
         similarity,
     )?;
-    let ids = page(args, analysis.groups.len());
+    let ids = page.ids(analysis.groups.len());
     let mut out = render_near_summary(&analysis, ids.len());
     for &id in &ids {
         out.push_str(&format!(
@@ -432,7 +456,7 @@ fn check_new(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<Strin
         (None, Some(file)) => Against::File(file),
         (None, None) => Against::Rev("HEAD".into()),
     };
-    let min_new = config(root, args)?.check_min_tokens(requested(args).check_min_tokens);
+    let min_new = config(root, args)?.check_min_tokens(requested(args)?.check_min_tokens);
     let check = engine.check(&path, &against, &options(root, args)?, min_new)?;
     Ok(render_check(&check, &against))
 }

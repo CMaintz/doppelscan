@@ -322,3 +322,78 @@ fn json_that_is_not_an_object_is_an_invalid_request() {
         assert_eq!(reply["id"], Value::Null, "{line}");
     }
 }
+
+fn tool(engine: &Engine, root: &Path, name: &str, arguments: Value) -> Value {
+    let params = json!({ "name": name, "arguments": arguments });
+    call(engine, root, modern("tools/call", params)).unwrap()
+}
+
+// Catches `offset + 1` wrapping to 0: the page then starts at group 0 and
+// the id-to-index subtraction panics, which aborts a release server.
+#[test]
+fn an_offset_past_every_group_is_an_empty_page() {
+    let (engine, root) = (Engine::default(), fixture("offset"));
+    for name in ["find_duplicates", "find_near_duplicates"] {
+        for offset in [u64::MAX, 1000] {
+            let args =
+                json!({ "path": "src", "min_tokens": 20, "similarity": 0.5, "offset": offset });
+            let reply = tool(&engine, &root, name, args);
+            assert_eq!(reply["result"]["isError"], false, "{reply}");
+            assert!(tool_text(&reply).contains("Showing 0"), "{reply}");
+        }
+    }
+}
+
+// Catches numeric arguments falling back to their default on a wrong type,
+// or truncating to a different number that fits: the caller gets an answer
+// to a question it did not ask.
+#[test]
+fn numeric_arguments_that_cannot_be_used_are_tool_errors() {
+    let (engine, root) = (Engine::default(), fixture("numbers"));
+    let cases = [
+        ("duplicates_at", "start_line", json!("2")),
+        ("duplicates_at", "start_line", json!(-1)),
+        ("duplicates_at", "start_line", json!(4294967297u64)),
+        ("duplicates_at", "end_line", json!(4294967297u64)),
+        ("duplicates_at", "end_line", json!(1.5)),
+        ("find_duplicates", "min_tokens", json!(4294967296u64)),
+        ("find_duplicates", "min_tokens", json!("20")),
+        ("find_duplicates", "limit", json!("5")),
+        ("find_duplicates", "limit", json!(-1)),
+        ("find_duplicates", "offset", json!("1")),
+        ("find_duplicates", "max_param_density", json!("8")),
+        ("find_near_duplicates", "limit", json!(-1)),
+        (
+            "check_new_duplicates",
+            "check_min_tokens",
+            json!(4294967296u64),
+        ),
+    ];
+    for (name, key, value) in cases {
+        let mut args = json!({ "path": "src", "file": "src/a.ts" });
+        args[key] = value.clone();
+        let reply = tool(&engine, &root, name, args);
+        assert_eq!(reply["result"]["isError"], true, "{name} {key}={value}");
+        assert!(tool_text(&reply).contains(key), "{reply}");
+    }
+}
+
+// Catches an explicit null, how some clients spell "unset", being refused
+// now that wrong types are.
+#[test]
+fn a_null_argument_means_unset() {
+    let (engine, root) = (Engine::default(), fixture("nulls"));
+    let args = json!({ "path": "src", "min_tokens": 20, "limit": null, "offset": null });
+    let reply = tool(&engine, &root, "find_duplicates", args);
+    assert!(tool_text(&reply).contains("src/a.ts:2-10"), "{reply}");
+}
+
+// Catches `end_line` no longer defaulting to `start_line`, which would widen
+// a one-line question to the rest of the file.
+#[test]
+fn a_start_line_alone_asks_about_one_line() {
+    let (engine, root) = (Engine::default(), fixture("one-line"));
+    let args = json!({ "file": "src/b.ts", "start_line": 1, "min_tokens": 20 });
+    let reply = tool(&engine, &root, "duplicates_at", args);
+    assert!(tool_text(&reply).starts_with("No clones"), "{reply}");
+}
