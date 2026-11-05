@@ -698,15 +698,39 @@ impl<'a> Builder<'a> {
     /// `dependencies {`). Control flow (`if (x) {`) names nothing.
     fn header_name(&mut self) -> Option<&'a str> {
         let leaf_start = self.top().stmt.as_ref()?.leaf_start as usize;
-        let source = self.source;
-        let text = |l: &Leaf| &source[l.start as usize..l.end as usize];
         let header = &self.leaves[leaf_start..];
-        let name = match header.iter().position(|l| text(l) == "(") {
-            Some(0) => None,
-            Some(p) => Some(&header[p - 1]),
-            None => header.iter().find(|l| l.class == LeafClass::Identifier),
+        let at = match header.iter().position(|l| self.leaf_text(l) == "(") {
+            Some(0) => return None,
+            Some(p) => p - 1,
+            None => first_name(header)?,
         };
-        name.filter(|l| l.class == LeafClass::Identifier).map(text)
+        (header[at].class == LeafClass::Identifier).then(|| self.hyphenated(header, at))
+    }
+
+    /// The whole of a name around `header[at]`: shell's `my-task` and
+    /// PowerShell's `Get-Total` are three tokens each.
+    fn hyphenated(&self, header: &[Leaf], at: usize) -> &'a str {
+        let (mut first, mut last) = (at, at);
+        while first >= 2 && self.hyphen_joins(&header[first - 2..]) {
+            first -= 2;
+        }
+        while self.hyphen_joins(&header[last..]) {
+            last += 2;
+        }
+        &self.source[header[first].start as usize..header[last].end as usize]
+    }
+
+    /// `a-b` with no spaces, so `a - b` stays arithmetic and `a->b` an access.
+    fn hyphen_joins(&self, leaves: &[Leaf]) -> bool {
+        let [left, dash, right, ..] = leaves else {
+            return false;
+        };
+        let word = |l: &Leaf| is_word_byte(self.source.as_bytes()[l.start as usize]);
+        self.leaf_text(dash) == "-"
+            && left.end == dash.start
+            && dash.end == right.start
+            && word(left)
+            && word(right)
     }
 
     fn open_scope(&mut self) -> Option<u32> {
@@ -755,6 +779,14 @@ impl<'a> Builder<'a> {
         let block = self.blocks.pop().expect("the file block");
         self.flush_run(block.elems);
     }
+}
+
+/// Two names in a row are a kind word no keyword list covers and the name
+/// it introduces: `contract Cart`, `message Order`, `task build`.
+fn first_name(header: &[Leaf]) -> Option<usize> {
+    let is_name = |l: &Leaf| l.class == LeafClass::Identifier;
+    let at = header.iter().position(is_name)?;
+    Some(at + usize::from(header.get(at + 1).is_some_and(is_name)))
 }
 
 impl Block {

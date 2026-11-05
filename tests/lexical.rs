@@ -700,3 +700,44 @@ fn block_comments_do_not_nest_in_c() {
         [2, 1]
     );
 }
+
+// Catches a block labelled with its kind or half its name: a word that is
+// no keyword in the shared list (`contract`) took the label from the name
+// after it, and a hyphenated name kept only one part.
+#[test]
+fn a_block_is_labelled_with_its_whole_name() {
+    let cases = [
+        ("sol", "contract Cart", "Cart"),
+        ("sol", "abstract contract Cart is Base", "Cart"),
+        ("sol", "library Cart", "Cart"),
+        ("ps1", "function Get-Total($items)", "Get-Total"),
+        ("ps1", "function Get-Total", "Get-Total"),
+        ("sh", "my-task()", "my-task"),
+        ("scala", "class Cart", "Cart"),
+        ("gradle", "dependencies", "dependencies"),
+        ("c", "long total(int a, int b)", "total"),
+    ];
+    let run = "    open_log(path, mode, flags);\n    write_header(log, version, stamp);\n    flush_all(log, buffers, count);\n";
+    for (ext, header, name) in cases {
+        let (a, b) = (format!("a.{ext}"), format!("b.{ext}"));
+        let one = format!("{header} {{\n    int x = 1;\n{run}}}\n");
+        let two = format!("other() {{\n    char *s = name(3, 4);\n{run}}}\n");
+        let found = scan(&[(&a, &one), (&b, &two)]);
+        let scope = groups(&found)[0].occurrences[0].scope.clone();
+        assert_eq!(scope.as_deref(), Some(name), "{header}");
+    }
+}
+
+// Catches hyphen joining reaching past a name: `a->b` is an access, so the
+// block belongs to `b`, and subtraction is not a hyphen.
+#[test]
+fn only_an_unspaced_hyphen_joins_a_name() {
+    let run = "    open_log(path, mode, flags);\n    write_header(log, version, stamp);\n    flush_all(log, buffers, count);\n";
+    for (header, name) in [("run->go()", "go"), ("run - go()", "go")] {
+        let one = format!("{header} {{\n    int x = 1;\n{run}}}\n");
+        let two = format!("other() {{\n    char *s = name(3, 4);\n{run}}}\n");
+        let found = scan(&[("a.c", &one), ("b.c", &two)]);
+        let scope = groups(&found)[0].occurrences[0].scope.clone();
+        assert_eq!(scope.as_deref(), Some(name), "{header}");
+    }
+}
