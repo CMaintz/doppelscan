@@ -176,7 +176,8 @@ find-extract-verify loop for agents.
 
 1. Every file is parsed; every syntax node gets a hash built bottom-up from its
    kind and its children. Identifiers and literals hash to a placeholder by
-   category, operators and keywords by text, comments not at all.
+   category, operators and keywords by text, comments and Java marker
+   annotations (`@Override`, no arguments) not at all.
 2. Equal hashes across the codebase are whole-node clones.
 3. Child sequences of blocks, class bodies, argument lists and literals are
    concatenated and searched with a suffix array for maximal repeated runs, so a
