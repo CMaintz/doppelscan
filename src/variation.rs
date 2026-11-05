@@ -11,6 +11,7 @@ use serde::Serialize;
 
 use crate::detect::{Occ, RawGroup};
 use crate::index::{FileIndex, Leaf, LeafClass, Role};
+use crate::lang::LANGS;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Variation {
@@ -106,6 +107,8 @@ fn differing<'f>(
     files: &'f [impl AsRef<FileIndex>],
     columns: &[Vec<u32>],
 ) -> Differing<'f> {
+    let first = files[group.occs[0].file as usize].as_ref();
+    let folds = LANGS[first.lang].ignores_case();
     (0..columns[0].len())
         .filter_map(|offset| {
             let texts: Vec<&str> = group
@@ -114,9 +117,17 @@ fn differing<'f>(
                 .zip(columns)
                 .map(|(o, c)| leaf_text(files, o, c[offset]))
                 .collect();
-            (texts.iter().any(|t| *t != texts[0])).then_some((offset, texts))
+            let class = first.leaves[columns[0][offset] as usize].class;
+            texts_differ(&texts, folds && class != LeafClass::Literal).then_some((offset, texts))
         })
         .collect()
+}
+
+/// `SELECT` and `select` are one word to a language that ignores case,
+/// while `'Paid'` and `'paid'` are two values, hence `any_case` per leaf.
+fn texts_differ(texts: &[&str], any_case: bool) -> bool {
+    texts.iter().any(|t| *t != texts[0])
+        && !(any_case && texts.iter().all(|t| t.eq_ignore_ascii_case(texts[0])))
 }
 
 fn bindings<'a>(

@@ -394,3 +394,350 @@ fn data_files_are_not_scanned() {
     assert!(lang_index_for_path("package.json".as_ref()).is_none());
     assert!(lang_index_for_path("Cargo.lock".as_ref()).is_none());
 }
+
+const CALLS: &str = "call(alpha, beta, gamma, delta)\ncall(alpha, beta, gamma, delta, 1)\ncall(alpha, beta, gamma, delta, 2)\n";
+
+// Catches `''''` opening a triple-quoted string where the language has
+// none: a quoted quote would swallow the rest of the file as one literal.
+#[test]
+fn a_doubled_quote_does_not_open_a_triple_quoted_string() {
+    let cases = [
+        ("sql", "SELECT REPLACE(name, '''', '') FROM t;"),
+        ("sql", "SELECT 'a''''b' FROM t;"),
+        ("ps1", "$s = ''''"),
+        ("sh", "echo ''''"),
+    ];
+    for (ext, line) in cases {
+        let (a, b) = (format!("a.{ext}"), format!("b.{ext}"));
+        let with = format!("{line}\n{CALLS}");
+        let found = scan(&[(&a, &with), (&b, CALLS)]);
+        assert_eq!(start_lines(&found), [2, 1], "{line}");
+    }
+}
+
+// Catches a language with triple quotes reading them as three strings:
+// the text of a heredoc would count as code, so copies with different
+// text would not match.
+#[test]
+fn triple_quotes_span_lines_where_the_language_has_them() {
+    let cases = [
+        ("scala", "\"\"\""),
+        ("groovy", "\"\"\""),
+        ("groovy", "'''"),
+        ("dart", "\"\"\""),
+        ("dart", "'''"),
+        ("ex", "\"\"\""),
+        ("ex", "'''"),
+        ("hs", "\"\"\""),
+    ];
+    for (ext, quotes) in cases {
+        let wrap = |text: &str| format!("doc({quotes}\n{text}\n{quotes})\n{CALLS}");
+        let (a, b) = (format!("a.{ext}"), format!("b.{ext}"));
+        let one = wrap("select * from rows where id = ? and live");
+        let two = wrap("update rows set seen = now() where id = ?");
+        let found = scan(&[(&a, &one), (&b, &two)]);
+        assert_eq!(start_lines(&found), [1, 1], "{ext}: {quotes}");
+    }
+}
+
+// Catches a call or an access on a word that also heads imports counting
+// as an import, which drops the statement and breaks the run around it.
+#[test]
+fn a_head_word_used_as_a_name_is_not_an_import() {
+    let cases = [
+        (
+            "sol",
+            "    require(amount > 0, \"zero\");\n    require(amount < limit, \"high\");\n    require(owner != sender, \"self\");\n    require(paused == false, \"off\");\n",
+        ),
+        (
+            "sol",
+            "    require(alpha);\n    require(beta);\n    require(gamma);\n    require(delta);\n    require(epsilon);\n",
+        ),
+        (
+            "c",
+            "    part->alpha = one;\n    part->beta = two;\n    part->gamma = three;\n    part->delta = four;\n",
+        ),
+        (
+            "c",
+            "    part.alpha = one;\n    part.beta = two;\n    part.gamma = three;\n    part.delta = four;\n",
+        ),
+        (
+            "c",
+            "    part[0] = one;\n    part[1] = two;\n    part[2] = three;\n    part[3] = four;\n",
+        ),
+    ];
+    for (ext, run) in cases {
+        let (a, b) = (format!("a.{ext}"), format!("b.{ext}"));
+        let one = format!("void first(void) {{\n    int x = 1;\n{run}}}\n");
+        let two = format!("void second(void) {{\n    char *s = name(3, 4);\n{run}}}\n");
+        let found = scan(&[(&a, &one), (&b, &two)]);
+        assert_eq!(start_lines(&found), [3, 3], "{run}");
+    }
+}
+
+// Catches the rule for calls and accesses also dropping a real import:
+// a repeated import block would be reported as a clone.
+#[test]
+fn every_import_form_stays_noise() {
+    let cases = [
+        ("pl", "use strict;"),
+        ("rb", "require \"json\""),
+        ("rb", "require 'json'"),
+        ("rb", "require_relative 'helpers'"),
+        ("scala", "import scala.util.Try"),
+        ("scala", "import scala.util.{Failure, Success}"),
+        ("vue", "import { ref } from 'vue'"),
+        ("vue", "import type { Ref } from 'vue'"),
+        ("vue", "import Store, { use } from './store'"),
+        ("vue", "import * as api from './api'"),
+        ("dart", "part 'cart.g.dart';"),
+        ("dart", "part of 'cart.dart';"),
+        ("dart", "library cart;"),
+        ("cpp", "using namespace std;"),
+        ("lua", "require(\"socket\")"),
+        ("r", "library(dplyr)"),
+        ("sql", "use [shop]"),
+    ];
+    for (ext, line) in cases {
+        let (a, b) = (format!("a.{ext}"), format!("b.{ext}"));
+        let imports = format!("{line}\n").repeat(12);
+        let found = scan(&[(&a, &imports), (&b, &imports)]);
+        assert!(found.groups.is_empty(), "{line}: {:?}", found.groups);
+    }
+}
+
+// Catches a head that opens a body being read as an import: a Solidity
+// library or a Scala package block is a definition, so it is a clone from
+// its header, not just from the statements inside it.
+#[test]
+fn a_head_with_a_body_is_a_definition() {
+    let body = "    function add(uint a, uint b) internal returns (uint) {\n        return a + b;\n    }\n    function sub(uint a, uint b) internal returns (uint) {\n        return a - b;\n    }\n";
+    let a = format!("event Paid(address payer);\nlibrary Math {{\n{body}}}\n");
+    let b = format!("error Empty();\nerror Full(uint size);\nlibrary Calc {{\n{body}}}\n");
+    assert_eq!(start_lines(&scan(&[("a.sol", &a), ("b.sol", &b)])), [2, 3]);
+}
+
+const BOM: &str = "\u{feff}";
+
+const PS_FUNCTION: &str = "function Get-Total($items) {\n    $sum = Measure-Items $items -Property Amount\n    Write-Output $sum.Sum\n    return $sum.Sum * 2\n}\n";
+
+// Catches a BOM being glued to the first token: `function` becomes a name,
+// so a file saved with a BOM no longer matches its copy from line 1.
+#[test]
+fn a_bom_does_not_change_the_first_token() {
+    let with = format!("{BOM}{PS_FUNCTION}");
+    let found = scan(&[("a.ps1", PS_FUNCTION), ("b.ps1", &with)]);
+    let group = &groups(&found)[0];
+    assert_eq!(group.kind, "node");
+    let spans: Vec<_> = group
+        .occurrences
+        .iter()
+        .map(|o| (o.start_line, o.end_line))
+        .collect();
+    assert_eq!(spans, [(1, 5), (1, 5)]);
+}
+
+// Catches `#` after a BOM not opening a comment because the byte before
+// it is not whitespace: the unclosed bracket would fold the file into one
+// statement.
+#[test]
+fn a_comment_can_follow_a_bom() {
+    let with = format!("{BOM}# note (\n{CALLS}");
+    let found = scan(&[("a.ps1", CALLS), ("b.ps1", &with)]);
+    assert_eq!(start_lines(&found), [1, 2]);
+}
+
+// Catches BOM skipping shifting token offsets: a clone's text is cut from
+// the file by those offsets, so a shift would cut into the BOM or lose
+// the last byte.
+#[test]
+fn offsets_after_a_bom_still_slice_the_source() {
+    let with = format!("{BOM}{CALLS}");
+    let found = scan(&[("a.ps1", &with), ("b.ps1", &with)]);
+    let template = found.group(1, true).template.unwrap();
+    assert_eq!(template, CALLS.trim_end());
+}
+
+// Catches `'` continuing a word in a language without primes: `N'New York
+// City'` splits into `N'New`, `York` and `City'`, so the literal counts as
+// three tokens and its copy with one word in it no longer matches.
+#[test]
+fn a_prefixed_string_is_one_literal() {
+    let cases = [
+        ("sql", "city = N'New York City'\n", "city = N'Oslo'\n"),
+        ("c", "int s = L' ';\n", "int s = L'x';\n"),
+    ];
+    for (ext, one, two) in cases {
+        let (a, b) = (format!("a.{ext}"), format!("b.{ext}"));
+        let found = scan(&[
+            (&a, &format!("{one}{CALLS}")),
+            (&b, &format!("{two}{CALLS}")),
+        ]);
+        assert_eq!(start_lines(&found), [1, 1], "{one}");
+    }
+}
+
+// Catches `'` ending every number: a C++ digit separator would open a
+// string, so the same constant written with one would stop matching.
+#[test]
+fn a_digit_separator_stays_in_the_number() {
+    let a = format!("long limit = 1'000'000;\n{CALLS}");
+    let b = format!("long limit = 1000000;\n{CALLS}");
+    assert_eq!(start_lines(&scan(&[("a.cpp", &a), ("b.cpp", &b)])), [1, 1]);
+}
+
+const RUBY_METHOD: &str = "def total(items)\n  sum = items.map(&:price).sum\n  tax = sum * rate(0.25)\n  sum + tax\nend\n";
+
+// Catches `=begin` matching mid-line: an assignment with no space after
+// `=` would turn the rest of the file into a comment.
+#[test]
+fn ruby_begin_mid_line_is_not_a_comment() {
+    let a = format!("start =begin_index\n{RUBY_METHOD}");
+    let b = format!("reset(1)\n{RUBY_METHOD}");
+    assert_eq!(start_lines(&scan(&[("a.rb", &a), ("b.rb", &b)])), [2, 2]);
+}
+
+// Catches the line-start rule breaking real block comments, and `=end`
+// closing one mid-line: the unclosed bracket on the line after it would
+// then be code and fold the rest of the file into one statement.
+#[test]
+fn ruby_block_comments_run_from_line_start_to_line_start() {
+    let a = format!("=begin\nsee x =end_value\nstill a comment (\n=end\n{RUBY_METHOD}");
+    let found = scan(&[("a.rb", &a), ("b.rb", RUBY_METHOD)]);
+    assert_eq!(start_lines(&found), [5, 1]);
+}
+
+const CASED_QUERY: &str = "SELECT Id, Total, Status\nFROM Orders\nWHERE Total > 10\nORDER BY Id DESC;\nDELETE FROM Audit WHERE Age > 30;\n";
+
+// Catches keywords being hashed with their case: SQL's `SELECT` and
+// `select` are one keyword, so a query and its lowercased copy are a clone.
+#[test]
+fn sql_keywords_match_in_any_case() {
+    let lower = CASED_QUERY.to_lowercase();
+    assert_eq!(
+        scan(&[("a.sql", CASED_QUERY), ("b.sql", &lower)])
+            .groups
+            .len(),
+        1
+    );
+}
+
+// Catches names differing only in case being hashed apart under --strict:
+// `Orders` and `orders` are the same table, as PowerShell's `$Sum` and
+// `$sum` are the same variable.
+#[test]
+fn strict_folds_names_where_the_language_does() {
+    let lower = CASED_QUERY.to_lowercase();
+    let found = scan_with(&[("a.sql", CASED_QUERY), ("b.sql", &lower)], true);
+    assert_eq!(found.groups.len(), 1);
+    let found = scan_with(
+        &[("a.c", SUM_PAID), ("b.c", &SUM_PAID.to_lowercase())],
+        true,
+    );
+    assert!(found.groups.is_empty(), "{:?}", found.groups);
+}
+
+// Catches a keyword or name differing in case counting as a parameter:
+// there is nothing for a helper to take, and enough of them trip the
+// density veto and drop the group.
+#[test]
+fn case_alone_is_not_a_parameter() {
+    let lower = CASED_QUERY.to_lowercase();
+    let found = scan(&[("a.sql", CASED_QUERY), ("b.sql", &lower)]);
+    assert!(groups(&found)[0].parameters.is_empty());
+}
+
+// Catches case folding reaching literals: `'Paid'` and `'paid'` are
+// different values even in SQL, so they stay a parameter.
+#[test]
+fn a_string_keeps_its_case() {
+    let a = format!("UPDATE Orders SET Status = 'Paid' WHERE Id = 7;\n{CASED_QUERY}");
+    let b = a.replace("'Paid'", "'paid'");
+    let g = &groups(&scan(&[("a.sql", &a), ("b.sql", &b)]))[0];
+    assert_eq!(g.parameters.len(), 1);
+    assert_eq!(g.parameters[0].values, ["'Paid'", "'paid'"]);
+}
+
+// Catches an uppercase import escaping the noise list: `USE shop` is `use
+// shop`, and a repeated block of it is not a clone.
+#[test]
+fn imports_match_in_any_case_where_keywords_do() {
+    for line in ["USE shop;", "USE [shop]"] {
+        let imports = format!("{line}\n").repeat(12);
+        let found = scan(&[("a.sql", &imports), ("b.sql", &imports)]);
+        assert!(found.groups.is_empty(), "{line}: {:?}", found.groups);
+    }
+}
+
+// Catches a nested block comment closing at its first closer: what is
+// left of it reads as code, and the bracket in it folds the rest of the
+// file into one statement.
+#[test]
+fn nested_block_comments_close_at_their_own_closer() {
+    let cases = [
+        ("hs", "{- outer {- inner -} tail (\n-}\n"),
+        ("scala", "/* outer /* inner */ tail (\n*/\n"),
+        ("dart", "/* outer /* inner */ tail (\n*/\n"),
+    ];
+    for (ext, comment) in cases {
+        let (a, b) = (format!("a.{ext}"), format!("b.{ext}"));
+        let with = format!("{comment}{CALLS}");
+        assert_eq!(
+            start_lines(&scan(&[(&a, &with), (&b, CALLS)])),
+            [3, 1],
+            "{ext}"
+        );
+    }
+}
+
+// Catches nesting reaching a language without it: C's `/* /* */` is a
+// whole comment, and counting the inner opener would eat the file.
+#[test]
+fn block_comments_do_not_nest_in_c() {
+    let with = format!("/* one /* two */\n{CALLS}");
+    assert_eq!(
+        start_lines(&scan(&[("a.c", &with), ("b.c", CALLS)])),
+        [2, 1]
+    );
+}
+
+// Catches a block labelled with its kind or half its name: a word that is
+// no keyword in the shared list (`contract`) took the label from the name
+// after it, and a hyphenated name kept only one part.
+#[test]
+fn a_block_is_labelled_with_its_whole_name() {
+    let cases = [
+        ("sol", "contract Cart", "Cart"),
+        ("sol", "abstract contract Cart is Base", "Cart"),
+        ("sol", "library Cart", "Cart"),
+        ("ps1", "function Get-Total($items)", "Get-Total"),
+        ("ps1", "function Get-Total", "Get-Total"),
+        ("sh", "my-task()", "my-task"),
+        ("scala", "class Cart", "Cart"),
+        ("gradle", "dependencies", "dependencies"),
+        ("c", "long total(int a, int b)", "total"),
+    ];
+    let run = "    open_log(path, mode, flags);\n    write_header(log, version, stamp);\n    flush_all(log, buffers, count);\n";
+    for (ext, header, name) in cases {
+        let (a, b) = (format!("a.{ext}"), format!("b.{ext}"));
+        let one = format!("{header} {{\n    int x = 1;\n{run}}}\n");
+        let two = format!("other() {{\n    char *s = name(3, 4);\n{run}}}\n");
+        let found = scan(&[(&a, &one), (&b, &two)]);
+        let scope = groups(&found)[0].occurrences[0].scope.clone();
+        assert_eq!(scope.as_deref(), Some(name), "{header}");
+    }
+}
+
+// Catches hyphen joining reaching past a name: `a->b` is an access, so the
+// block belongs to `b`, and subtraction is not a hyphen.
+#[test]
+fn only_an_unspaced_hyphen_joins_a_name() {
+    let run = "    open_log(path, mode, flags);\n    write_header(log, version, stamp);\n    flush_all(log, buffers, count);\n";
+    for (header, name) in [("run->go()", "go"), ("run - go()", "go")] {
+        let one = format!("{header} {{\n    int x = 1;\n{run}}}\n");
+        let two = format!("other() {{\n    char *s = name(3, 4);\n{run}}}\n");
+        let found = scan(&[("a.c", &one), ("b.c", &two)]);
+        let scope = groups(&found)[0].occurrences[0].scope.clone();
+        assert_eq!(scope.as_deref(), Some(name), "{header}");
+    }
+}

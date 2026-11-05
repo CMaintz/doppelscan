@@ -20,9 +20,11 @@ A language without a usable grammar can be added as token-level instead:
 
 1. Add a `Lang::tokens(...)` entry with a `Lexicon`: its line and block
    comment markers (`C_LIKE` and `HASH` cover the common ones), keywords
-   that are common names elsewhere (as SQL has), and `ignore_case` when its
-   keywords are case-insensitive. Names, numbers, strings and brackets are
-   read the same way for every language and cannot be configured.
+   that are common names elsewhere (as SQL has), `ignore_case` when its
+   keywords and names are case-insensitive, and the optional syntax
+   `Lexicon` documents (such as `triple_quotes`). Everything else about
+   names, numbers, strings and brackets is read the same way for every
+   language.
 2. Call `.opt_in()` on it when its files are mostly data (as YAML's are),
    so it is scanned only when named.
 3. Add its comment syntax to `every_token_language_skips_its_comments` in
