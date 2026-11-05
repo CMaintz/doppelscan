@@ -774,3 +774,67 @@ fn an_annotation_with_arguments_still_tells_methods_apart() {
         [("A.java".to_string(), 5), ("B.java".to_string(), 4)]
     );
 }
+
+const MULTI_LINE_IMPORT_TS: &str = r#"export function describe(items: string[], config: Config): string {
+    const header = `first line
+second line`;
+    let out = header;
+    for (const item of items) {
+        if (item.length > config.min) {
+            out += alpha(item) + beta(item);
+        }
+    }
+    return out;
+}
+
+import {
+    alpha,
+    beta,
+} from "./letters";
+
+export function count(items: string[], config: Config): number {
+    let total = 0;
+    for (const item of items) {
+        if (item.length > config.max) {
+            total += item.length * config.rate;
+        }
+    }
+    return total;
+}
+"#;
+
+const MULTI_LINE_STRING_SQL: &str = "SELECT id, name, 'first line\nsecond line' AS label, total\nFROM orders\nWHERE status = 'paid' AND total > 100 AND region = 'north'\nORDER BY total DESC, name ASC, id ASC;\n";
+
+fn fingerprints(a: &Analysis) -> Vec<String> {
+    let mut prints: Vec<String> = groups(a).into_iter().map(|g| g.fingerprint).collect();
+    prints.sort();
+    prints
+}
+
+// Catches raw bytes reaching the hashes: a mid-file multi-line import is
+// hashed as text, so an LF and a CRLF copy lose their whole-file group;
+// strict multi-line literals differ the same way; and normalising past the
+// early return for grammar-less languages would miss the SQL case.
+#[test]
+fn line_endings_do_not_change_fingerprints() {
+    let cases = [
+        ("a.ts", "b.ts", MULTI_LINE_IMPORT_TS),
+        ("a.sql", "b.sql", MULTI_LINE_STRING_SQL),
+    ];
+    for (a, b, lf) in cases {
+        let crlf = lf.replace('\n', "\r\n");
+        for strict in [false, true] {
+            let opts = || ScanOptions {
+                min_tokens: 20,
+                strict,
+                ..ScanOptions::default()
+            };
+            let both_lf = fingerprints(&scan_with(&[(a, lf), (b, lf)], opts()));
+            assert!(!both_lf.is_empty(), "{a} strict={strict}");
+            let mixed = scan_with(&[(a, lf), (b, &crlf)], opts());
+            let both_crlf = scan_with(&[(a, &crlf), (b, &crlf)], opts());
+            assert_eq!(fingerprints(&mixed), both_lf, "{a} strict={strict}");
+            assert_eq!(fingerprints(&both_crlf), both_lf, "{a} strict={strict}");
+        }
+    }
+}

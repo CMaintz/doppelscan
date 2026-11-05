@@ -481,3 +481,66 @@ fn copies_in_a_gen_dir_are_found() {
     assert_eq!(code, 0, "{out}");
     assert!(out.contains("tools/gen/c.ts"), "{out}");
 }
+
+const CARD_TSX: &str = r#"export function Card({ title, items }: Props) {
+    return (
+        <section className="card">
+            <h2 className="title">
+                {title}
+            </h2>
+            <ul>
+                {items.map((item) => (
+                    <li key={item.id}>
+                        {item.label}
+                    </li>
+                ))}
+            </ul>
+        </section>
+    );
+}
+"#;
+
+fn commit_lf_then_check_crlf(name: &str, files: &[(&str, String)]) -> (i32, String) {
+    let dir = std::env::temp_dir().join(format!("doppelscan-crlf-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    git(&dir, &["init", "-q"]);
+    for (path, text) in files {
+        std::fs::write(dir.join(path), text).unwrap();
+    }
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-qm", "init"]);
+    // Written directly rather than through core.autocrlf, so the working
+    // tree is CRLF on every platform.
+    for (path, text) in files {
+        std::fs::write(dir.join(path), text.replace('\n', "\r\n")).unwrap();
+    }
+    doppelscan(&dir, &["check", "--base", "HEAD"])
+}
+
+// Catches JSX text parsing to a different token count under CRLF, which
+// fails `check` on a clean Windows checkout with core.autocrlf=true.
+#[test]
+fn check_is_clean_when_only_line_endings_differ() {
+    let files = [
+        ("a.tsx", CARD_TSX.to_string()),
+        ("b.tsx", CARD_TSX.replace("Card", "Tile")),
+    ];
+    let (code, out) = commit_lf_then_check_crlf("tsx", &files);
+    assert_eq!(code, 0, "{out}");
+}
+
+// Catches the generated-file check reading raw bytes: the CRs push the
+// marker out of the head it searches, so generated files committed with LF
+// turn into new clones in a CRLF working tree.
+#[test]
+fn check_skips_a_generated_file_under_crlf_too() {
+    let padding = "// padding line, 24 bytes\n".repeat(38);
+    let generated = format!("{padding}// @generated\n{SUM_TOTALS}");
+    let files = [
+        ("a.ts", generated.clone()),
+        ("b.ts", generated.replace("sumTotals", "sumAll")),
+    ];
+    let (code, out) = commit_lf_then_check_crlf("generated", &files);
+    assert_eq!(code, 0, "{out}");
+}

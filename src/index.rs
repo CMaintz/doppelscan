@@ -273,6 +273,19 @@ pub(crate) fn line_starts(source: &str) -> Vec<u32> {
         .collect()
 }
 
+/// `source` with CRLF line ends as LF, so a checkout's line endings reach
+/// no token, hash or fingerprint. Line numbers stay the same. An LF file
+/// comes back uncopied: the scan for a CR is all it pays. `index_source`
+/// applies this to everything, and readers apply it earlier for the
+/// generated-file check.
+pub(crate) fn normalize_line_endings(source: String) -> String {
+    if source.contains('\r') {
+        source.replace("\r\n", "\n")
+    } else {
+        source
+    }
+}
+
 pub fn index_source(
     parser: &mut Parser,
     path: String,
@@ -280,6 +293,7 @@ pub fn index_source(
     source: String,
     strict: bool,
 ) -> Option<FileIndex> {
+    let source = normalize_line_endings(source);
     let language = match &LANGS[lang].syntax {
         Syntax::Tree(language) => language,
         Syntax::Tokens(lexicon) => {
