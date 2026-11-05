@@ -1,5 +1,6 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use doppelscan::detect::RawGroup;
 use doppelscan::engine::{ScanOptions, Source, analyze, index_sources};
 use doppelscan::lang::lang_index_for_path;
 use doppelscan::report::{Analysis, Group};
@@ -283,13 +284,71 @@ fn identical_imports_are_not_reported() {
     );
 }
 
+/// Groups with exactly these fingerprints, in this id order.
+fn with_fingerprints(prints: &[u64]) -> Analysis {
+    let group = |&print: &u64| RawGroup {
+        hash: print << 16,
+        tokens: 20,
+        run_len: 1,
+        occs: Vec::new(),
+    };
+    Analysis {
+        files: Vec::new(),
+        groups: prints.iter().map(group).collect(),
+        elapsed: Duration::ZERO,
+    }
+}
+
+// Catches a number past the last id falling through to a fingerprint that
+// happens to start with it, so `show 54` on 47 groups shows an unrelated one.
+#[test]
+fn a_number_out_of_id_range_is_no_group_even_if_a_fingerprint_starts_with_it() {
+    let a = with_fingerprints(&[0x54ab12345678, 0x41cd12345678, 0xabcdef123456]);
+    for key in ["54", "41", "4", "0", "99999999999999999999999"] {
+        assert_eq!(a.resolve(key), None, "{key:?}");
+    }
+    assert_eq!(a.resolve("2"), Some(2));
+    assert_eq!(a.resolve(" #3 "), Some(3));
+}
+
+// Catches an empty key being a prefix of every fingerprint, which resolves
+// to the only group when there is one.
+#[test]
+fn a_key_with_nothing_in_it_is_no_group() {
+    let a = with_fingerprints(&[0xabcdef123456]);
+    for key in ["", "#", "  ", "# "] {
+        assert_eq!(a.resolve(key), None, "{key:?}");
+    }
+}
+
+// Catches prefixes short enough to pick a group by accident, and a prefix
+// shared by two groups picking one of them.
+#[test]
+fn a_fingerprint_prefix_must_be_long_and_unique() {
+    let a = with_fingerprints(&[0x54ab12345678, 0xabcdef123456, 0xabcd00000001]);
+    assert_eq!(a.resolve("54"), None);
+    assert_eq!(a.resolve("ab"), None);
+    assert_eq!(a.resolve("abcd"), None);
+    assert_eq!(a.resolve("54ab"), Some(1));
+    assert_eq!(a.resolve("ABCDEF"), Some(2));
+    assert_eq!(a.resolve("#abcd00000001"), Some(3));
+}
+
+// Catches the all-digit rule hiding a whole fingerprint that happens to have
+// no letter: results print it, so it has to resolve.
+#[test]
+fn a_whole_fingerprint_resolves_even_if_it_is_all_digits() {
+    let a = with_fingerprints(&[0x123456789012]);
+    assert_eq!(a.resolve("123456789012"), Some(1));
+    assert_eq!(a.resolve("1234567890"), None);
+}
+
 // Catches location lookup missing a clone that covers the asked-for lines.
 #[test]
 fn overlapping_finds_the_group_covering_a_line() {
     let a = scan(&[("src/a.ts", SUM_TOTALS), ("src/b.ts", SUM_REFUNDS)]);
-    assert_eq!(a.overlapping("src/b.ts", 5, 5), vec![1]);
-    assert_eq!(a.overlapping("b.ts", 5, 5), vec![1]);
-    assert!(a.overlapping("src/b.ts", 40, 50).is_empty());
+    assert_eq!(a.overlapping("src/b.ts", 5, 5).unwrap(), vec![1]);
+    assert!(a.overlapping("src/b.ts", 40, 50).unwrap().is_empty());
 }
 
 // Catches a grammar whose identifier or literal kinds are misclassified,

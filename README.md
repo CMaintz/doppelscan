@@ -97,7 +97,8 @@ option or a callback:
 are often near copies of each other by design, so `--exclude '**/*.test.ts'`
 (or your test glob) keeps them out when they are noise.
 
-Useful options: `--min-tokens` (default 50), `--strict` (identical names and
+Useful options: `--min-tokens` (default 50; 20 for `similar`, since snippets
+are small), `--strict` (identical names and
 literals only), `--only ts,java`, `--exclude 'generated/**'`,
 `--max-param-density` (default 8 per 100 tokens; higher shows data tables and
 mapping boilerplate too; in token-level languages a name that differs in
