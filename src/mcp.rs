@@ -446,15 +446,11 @@ fn find_near(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<Strin
         similarity,
     )?;
     let ids = page.ids(analysis.groups.len());
+    let groups = ids.iter().map(|&id| analysis.group(id));
+    let shown = groups.map(|g| format!("\n{}", render_near(&g, Detail::Full)));
     let mut out = render_near_summary(&analysis, ids.len());
-    for &id in &ids {
-        out.push_str(&format!(
-            "\n{}",
-            render_near(&analysis.group(id), Detail::Brief)
-        ));
-    }
-    out.push_str(&more_hint(&ids, analysis.groups.len()));
-    Ok(out)
+    out.extend(shown);
+    Ok(out + &more_hint(&ids, analysis.groups.len()))
 }
 
 fn check_new(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<String> {

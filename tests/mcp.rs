@@ -602,3 +602,27 @@ fn a_match_on_an_accepted_clone_says_so() {
     assert!(text.contains("accepted"), "{text}");
     assert!(text.contains("src/a.ts:2-10"), "{text}");
 }
+
+// Catches the listing truncating at the brief limit: the tool promises every
+// copy, and offers no other way to reach the ones it cut.
+#[test]
+fn find_near_duplicates_lists_every_copy() {
+    let (engine, root) = (Engine::default(), fixture("near-all"));
+    for copy in 0..7 {
+        let edited = CLONE.replace(
+            "            total += order.amount * config.rate;\n",
+            &format!(
+                "            total += order.amount * config.rate;\n{}",
+                "            fees += order.fee;\n".repeat(copy + 1)
+            ),
+        );
+        std::fs::write(root.join(format!("src/copy{copy}.ts")), edited).unwrap();
+    }
+    let args = json!({ "path": "src", "min_tokens": 20, "similarity": 0.5 });
+    let reply = tool(&engine, &root, "find_near_duplicates", args);
+    let text = tool_text(&reply);
+    assert!(!text.contains("more"), "{text}");
+    for copy in 0..7 {
+        assert!(text.contains(&format!("src/copy{copy}.ts:")), "{text}");
+    }
+}
