@@ -770,6 +770,8 @@ fn check_skips_a_generated_file_under_crlf_too() {
         ("b.ts", generated.replace("sumTotals", "sumAll")),
     ];
     let (code, out) = commit_lf_then_check_crlf("generated", &files);
+    assert_eq!(code, 0, "{out}");
+}
 
 // Catches `--exclude` being judged on the revision side with the scan root's
 // name stripped from a path that never carried it: a directory named like
