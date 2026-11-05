@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use ignore::{WalkBuilder, WalkState};
+use ignore::{DirEntry, WalkBuilder, WalkState};
 
 use crate::filter::PathFilter;
 use crate::lang::{LANGS, lang_index_for_path};
@@ -114,7 +114,8 @@ pub fn discover(
     let found = Mutex::new(Vec::new());
     walker.run(|| {
         Box::new(|entry| {
-            let hit = entry.ok().and_then(|e| found_at(e.path(), root, filter, languages));
+            let regular = entry.ok().filter(is_regular_file);
+            let hit = regular.and_then(|e| found_at(e.path(), root, filter, languages));
             if let Some(hit) = hit {
                 found.lock().unwrap().push(hit);
             }
@@ -127,6 +128,16 @@ pub fn discover(
     let mut files = found.into_inner().unwrap();
     files.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(files)
+}
+
+/// Symlinks stay out as they do on the revision side, or a tracked link
+/// would read as new on every check. The path typed on the command line is
+/// the exception: naming a link asks for what it points at.
+fn is_regular_file(entry: &DirEntry) -> bool {
+    match entry.depth() {
+        0 => entry.path().is_file(),
+        _ => entry.file_type().is_some_and(|t| t.is_file()),
+    }
 }
 
 fn found_at(

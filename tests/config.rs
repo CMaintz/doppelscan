@@ -556,3 +556,82 @@ fn a_long_lived_engine_sees_a_new_include() {
     let second = handle_line(&engine, &dir, &msg).unwrap();
     assert!(second.contains("1 clone groups"), "{second}");
 }
+
+// Catches a directory named like a source file counting as one: `init`
+// reports files the scan cannot read.
+#[test]
+fn init_counts_files_not_directories_named_like_them() {
+    let dir = repo_with_config("init-dir", "");
+    std::fs::remove_file(dir.join(".doppelscan.toml")).unwrap();
+    std::fs::create_dir_all(dir.join("foo.ts")).unwrap();
+    assert_eq!(run(&dir, &["init"]).0, 0);
+    let written = std::fs::read_to_string(dir.join(".doppelscan.toml")).unwrap();
+    assert!(written.contains("(2 files)"), "{written}");
+}
+
+// Catches init counting a file every scan then drops as generated, which
+// would suggest a language the repository has no code in.
+#[test]
+fn init_does_not_count_generated_files() {
+    let dir = repo_with_config("init-generated", "");
+    std::fs::remove_file(dir.join(".doppelscan.toml")).unwrap();
+    write(&dir, "src/c.ts", &format!("{MARKED}{CLONE}"));
+    assert_eq!(run(&dir, &["init"]).0, 0);
+    let written = std::fs::read_to_string(dir.join(".doppelscan.toml")).unwrap();
+    assert!(written.contains("(2 files)"), "{written}");
+}
+
+// Catches init reading configs below it: it describes the whole tree, and
+// a broken package config should not stop it writing the root one.
+#[test]
+fn init_does_not_read_nested_configs() {
+    let dir = repo_with_config("init-nested", "");
+    std::fs::remove_file(dir.join(".doppelscan.toml")).unwrap();
+    write(&dir, "src/.doppelscan.toml", "bogus = 1\n");
+    let (code, _, err) = run(&dir, &["init"]);
+    assert_eq!(code, 0, "{err}");
+}
+
+#[cfg(unix)]
+fn symlink(target: &str, link: &Path) -> bool {
+    std::os::unix::fs::symlink(target, link).is_ok()
+}
+
+// Creating a link can need a privilege on Windows; without it the test has
+// nothing to show there, and CI on Unix still runs it.
+#[cfg(windows)]
+fn symlink(target: &str, link: &Path) -> bool {
+    std::os::windows::fs::symlink_file(target, link).is_ok()
+}
+
+// Catches the walk following a tracked symlink the revision side drops
+// (mode 120000): the same text would read as new on every check.
+#[test]
+fn a_tracked_symlink_is_left_out_of_both_sides() {
+    let dir = repo_with_config("symlink", "");
+    std::fs::remove_file(dir.join("src/b.ts")).unwrap();
+    if !symlink("a.ts", &dir.join("src/b.ts")) {
+        eprintln!("no symlink privilege here; skipping");
+        return;
+    }
+    git(&dir, &["-c", "core.symlinks=true", "add", "."]);
+    git(&dir, &["commit", "-qm", "linked copy"]);
+    assert_eq!(group_count(&dir, &["."]), 0);
+    let (code, out, err) = run(&dir, &["check", "--base", "HEAD"]);
+    assert_eq!(code, 0, "{out}{err}");
+}
+
+// Catches dropping symlinks from what was typed: a link named directly is
+// a request to scan what it points at, as `.` through a linked checkout is.
+#[test]
+fn a_symlink_named_directly_is_still_scanned() {
+    let dir = repo_with_config("symlink-root", "");
+    if !symlink("a.ts", &dir.join("src/link.ts")) {
+        eprintln!("no symlink privilege here; skipping");
+        return;
+    }
+    let (code, out, err) = run(&dir, &["src/link.ts", "--format", "json"]);
+    assert_eq!(code, 0, "{err}");
+    let report: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(report["summary"]["files"], 1, "{out}");
+}

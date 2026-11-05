@@ -12,7 +12,7 @@ use crate::config::{Config, Requested, Set};
 use crate::engine::ScanOptions;
 use crate::filter::{PathFilter, PathRules};
 use crate::lang::LANGS;
-use crate::walk::{BUILT_IN_SKIPS, discover};
+use crate::walk::{BUILT_IN_SKIPS, Found, discover, looks_generated};
 
 #[derive(Debug, Serialize, PartialEq)]
 pub struct Effective {
@@ -221,8 +221,15 @@ const TEST_GLOBS: &[&str] = &[
 /// default, the languages found, and the test patterns present as near's
 /// excludes.
 pub fn init_template(root: &Path) -> anyhow::Result<String> {
-    let filter = PathFilter::new(root, &ScanOptions::default())?;
-    let files = discover(root, &filter, &[])?;
+    // The tree's configs are not what `init` is describing, and one that
+    // fails to load must not stop it.
+    let opts = ScanOptions {
+        skip_nested: true,
+        ..ScanOptions::default()
+    };
+    let filter = PathFilter::new(root, &opts)?;
+    let mut files = discover(root, &filter, &[])?;
+    files.retain(is_scanned_text);
     let mut counts: FxHashMap<usize, usize> = FxHashMap::default();
     for file in &files {
         *counts.entry(file.lang).or_default() += 1;
@@ -231,6 +238,10 @@ pub fn init_template(root: &Path) -> anyhow::Result<String> {
     langs.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     let tests = present_tests(root, files.iter().map(|f| f.path.as_path()))?;
     Ok(template(&langs, &tests))
+}
+
+fn is_scanned_text(file: &Found) -> bool {
+    std::fs::read_to_string(&file.path).is_ok_and(|text| !looks_generated(&text, false))
 }
 
 fn present_tests<'a>(
