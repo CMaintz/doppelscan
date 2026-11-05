@@ -534,11 +534,7 @@ fn near(
     common: &Common,
 ) -> anyhow::Result<()> {
     let config = config(common)?;
-    let similarity = config.similarity(similarity);
-    anyhow::ensure!(
-        (0.0..=1.0).contains(&similarity),
-        "--similarity is a fraction between 0 and 1"
-    );
+    let similarity = config.similarity(similarity)?;
     let opts = config.near_options(requested(common))?;
     let analysis = engine.near(&common.path, &opts, similarity)?;
     let ids = first_ids(limit, analysis.groups.len());

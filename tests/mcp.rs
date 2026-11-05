@@ -397,3 +397,57 @@ fn a_start_line_alone_asks_about_one_line() {
     let reply = tool(&engine, &root, "duplicates_at", args);
     assert!(tool_text(&reply).starts_with("No clones"), "{reply}");
 }
+
+// Catches a config's threshold skipping the range check arguments get: past
+// 1 nothing can match, so a typo reads as a clean "0 near-miss groups".
+#[test]
+fn a_similarity_from_config_outside_the_range_is_a_tool_error() {
+    let (engine, root) = (Engine::default(), fixture("config-similarity"));
+    std::fs::write(root.join(".doppelscan.toml"), "[near]\nsimilarity = 5.0\n").unwrap();
+    let reply = tool(
+        &engine,
+        &root,
+        "find_near_duplicates",
+        json!({ "path": "src" }),
+    );
+    assert_eq!(reply["result"]["isError"], true, "{reply}");
+    assert!(tool_text(&reply).contains("similarity"), "{reply}");
+}
+
+// Catches `base` silently winning over `baseline`, so the caller believes
+// the check ran against the file it named.
+#[test]
+fn check_with_both_base_and_baseline_is_a_tool_error() {
+    let (engine, root) = (Engine::default(), fixture("both"));
+    let args = json!({ "base": "HEAD", "baseline": "b.json" });
+    let reply = tool(&engine, &root, "check_new_duplicates", args);
+    assert_eq!(reply["result"]["isError"], true, "{reply}");
+    assert!(tool_text(&reply).contains("baseline"), "{reply}");
+}
+
+// Catches a path outside the server root showing absolute working-tree paths
+// beside relative revision paths, so a clone that only shrank reads as new,
+// and the `//?/` prefix of canonical Windows paths reaching the results.
+#[test]
+fn a_path_outside_the_server_root_reads_like_any_other() {
+    let (engine, repo) = (Engine::default(), fixture("outside"));
+    let server = fixture("outside-root");
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-qm", "init"]);
+    let shrunk = std::fs::read_to_string(repo.join("src/b.ts"))
+        .unwrap()
+        .replace("return Math.round(total * 100) / 100;", "return total;");
+    std::fs::write(repo.join("src/b.ts"), shrunk).unwrap();
+    let dir = repo.file_name().unwrap().to_str().unwrap();
+    for path in [repo.to_str().unwrap(), &format!("../{dir}")] {
+        let args = json!({ "path": path, "min_tokens": 20 });
+        let found = tool(&engine, &server, "find_duplicates", args.clone());
+        assert!(tool_text(&found).contains("\n  src/a.ts:"), "{found}");
+        let check = tool(&engine, &server, "check_new_duplicates", args);
+        assert!(
+            tool_text(&check).starts_with("No new duplication"),
+            "{check}"
+        );
+    }
+}

@@ -229,8 +229,15 @@ impl Config {
     }
 
     /// `near`'s threshold: the one asked for, else the config's, else 0.8.
-    pub fn similarity(&self, asked: Option<f32>) -> f32 {
-        asked.or(value(&self.similarity)).unwrap_or(0.8)
+    /// Past 1 nothing can match, so an out-of-range value is an error rather
+    /// than a report of no near-misses.
+    pub fn similarity(&self, asked: Option<f32>) -> anyhow::Result<f32> {
+        let similarity = asked.or(value(&self.similarity)).unwrap_or(0.8);
+        anyhow::ensure!(
+            (0.0..=1.0).contains(&similarity),
+            "similarity is a fraction between 0 and 1, not {similarity}"
+        );
+        Ok(similarity)
     }
 }
 

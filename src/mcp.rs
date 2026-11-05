@@ -226,7 +226,7 @@ fn scan_root(root: &Path, args: &Value) -> anyhow::Result<PathBuf> {
 }
 
 fn options(root: &Path, args: &Value) -> anyhow::Result<ScanOptions> {
-    with_root(root, config(root, args)?.options(requested(args)?)?)
+    with_root(root, args, config(root, args)?.options(requested(args)?)?)
 }
 
 /// Snippets are small, so a snippet search keeps its own lower minimum
@@ -237,16 +237,29 @@ fn snippet_options(root: &Path, args: &Value) -> anyhow::Result<ScanOptions> {
         min_tokens: asked.min_tokens.or(Some(SNIPPET_MIN_TOKENS)),
         ..asked
     };
-    with_root(root, config(root, args)?.options(asked)?)
+    with_root(root, args, config(root, args)?.options(asked)?)
 }
 
 const SNIPPET_MIN_TOKENS: u32 = 20;
 
-fn with_root(root: &Path, opts: ScanOptions) -> anyhow::Result<ScanOptions> {
+fn with_root(root: &Path, args: &Value, opts: ScanOptions) -> anyhow::Result<ScanOptions> {
     Ok(ScanOptions {
-        display_base: Some(root.to_path_buf()),
+        display_base: Some(display_base(root, &scan_root(root, args)?)?),
         ..opts
     })
+}
+
+/// Results read relative to the server root. A scan outside it shares no
+/// base with the root, so it reads relative to itself; the working tree and
+/// a git revision then show the same paths, and neither shows the verbatim
+/// prefix of a canonical Windows path.
+fn display_base(root: &Path, scan: &Path) -> anyhow::Result<PathBuf> {
+    let (root, scan) = (root.canonicalize()?, scan.canonicalize()?);
+    if scan.starts_with(&root) {
+        return Ok(root);
+    }
+    let dir = scan.parent().filter(|_| scan.is_file());
+    Ok(dir.unwrap_or(&scan).to_path_buf())
 }
 
 fn similarity_arg(args: &Value) -> anyhow::Result<Option<f32>> {
@@ -427,10 +440,10 @@ fn get_settings(root: &Path, args: &Value) -> anyhow::Result<String> {
 fn find_near(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<String> {
     let page = Page::of(args)?;
     let config = config(root, args)?;
-    let similarity = config.similarity(similarity_arg(args)?);
+    let similarity = config.similarity(similarity_arg(args)?)?;
     let analysis = engine.near(
         &scan_root(root, args)?,
-        &with_root(root, config.near_options(requested(args)?)?)?,
+        &with_root(root, args, config.near_options(requested(args)?)?)?,
         similarity,
     )?;
     let ids = page.ids(analysis.groups.len());
@@ -447,23 +460,29 @@ fn find_near(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<Strin
 
 fn check_new(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<String> {
     let path = scan_root(root, args)?;
-    let file = str_arg(args, "baseline").map(|f| root.join(f));
-    let against = match (
-        str_arg(args, "base"),
-        file.or_else(|| Baseline::find(&path)),
-    ) {
-        (Some(rev), _) => Against::Rev(rev.to_string()),
-        (None, Some(file)) => Against::File(file),
-        (None, None) => Against::Rev("HEAD".into()),
-    };
+    let against = against(root, &path, args)?;
     let min_new = config(root, args)?.check_min_tokens(requested(args)?.check_min_tokens);
     let check = engine.check(&path, &against, &options(root, args)?, min_new)?;
     Ok(render_check(&check, &against))
 }
 
+fn against(root: &Path, path: &Path, args: &Value) -> anyhow::Result<Against> {
+    let base = str_arg(args, "base");
+    let file = str_arg(args, "baseline").map(|f| root.join(f));
+    anyhow::ensure!(
+        base.is_none() || file.is_none(),
+        "pass base or baseline, not both"
+    );
+    Ok(match (base, file.or_else(|| Baseline::find(path))) {
+        (Some(rev), _) => Against::Rev(rev.to_string()),
+        (None, Some(file)) => Against::File(file),
+        (None, None) => Against::Rev("HEAD".into()),
+    })
+}
+
 fn tool_definitions() -> Value {
     let common = json!({
-        "path": { "type": "string", "description": "Directory or file to scan, relative to the server root. Default: the root." },
+        "path": { "type": "string", "description": "Directory or file to scan, relative to the server root or absolute. Results show paths relative to the root, or to this path when it lies outside the root. Default: the root." },
         "min_tokens": { "type": "integer", "minimum": 8, "description": "Smallest clone reported, in syntax tokens. Default 50, or the repo's .doppelscan.toml." },
         "languages": { "type": "array", "items": { "type": "string" }, "description": format!("Restrict to these languages: {}. yaml is scanned only when listed here.", known_langs()) },
         "exclude": { "type": "array", "items": { "type": "string" }, "description": "Globs to skip, e.g. \"**/*.test.ts\"." },
