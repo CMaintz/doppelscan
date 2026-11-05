@@ -44,7 +44,8 @@ struct File {
     #[serde(default)]
     exclude: Vec<String>,
     /// .gitignore patterns, relative to this file, of directories the
-    /// built-in skip list leaves out that should be scanned.
+    /// built-in skip list leaves out that should be scanned. What they
+    /// name is scanned even when marked as generated.
     #[serde(default)]
     include: Vec<String>,
     /// Groups needing more parameters than this per 100 tokens are dropped
@@ -58,8 +59,9 @@ struct File {
     check: CheckFile,
     /// Clone groups the team has decided to keep, by fingerprint. They are
     /// left out of every report and never fail `check`, however many
-    /// copies there are. A change to the code changes the fingerprint, so
-    /// the clone comes back for another look.
+    /// copies there are. A change to the code's structure changes the
+    /// fingerprint, so the clone comes back for another look; renames and
+    /// changed literals do not, unless the scan is strict.
     #[serde(default)]
     accept: Vec<AcceptFile>,
 }
@@ -129,6 +131,9 @@ pub struct Config {
     pub near_rules: Vec<PathRules>,
     /// The files read, outermost first.
     pub files: Vec<PathBuf>,
+    /// Configs inside the scanned tree stay unread: the source named which
+    /// config counts.
+    pub skip_nested: bool,
 }
 
 /// Which config a command reads.
@@ -142,6 +147,7 @@ pub enum Source<'a> {
 
 impl Config {
     pub fn read(source: Source) -> anyhow::Result<Self> {
+        let skip_nested = !matches!(source, Source::Lookup(_));
         let paths = match source {
             Source::Lookup(start) => chain(start)?,
             Source::File(path) => vec![
@@ -150,7 +156,10 @@ impl Config {
             ],
             Source::None => Vec::new(),
         };
-        let mut config = Self::default();
+        let mut config = Self {
+            skip_nested,
+            ..Self::default()
+        };
         for path in paths {
             config.merge(load(&path)?, path);
         }
@@ -205,13 +214,23 @@ impl Config {
             languages: languages(&only)?,
             exclude: asked.exclude,
             rules: self.rules.clone(),
-            accept: self.accepts.iter().map(|a| a.fingerprint.clone()).collect(),
+            skip_nested: self.skip_nested,
+            accept: self.accepts.iter().map(normalized_fingerprint).collect(),
             max_param_density: asked
                 .max_param_density
                 .or(value(&self.max_param_density))
                 .unwrap_or(defaults.max_param_density),
             ..defaults
         })
+    }
+
+    /// Whether a config lists path patterns anchored at a directory that
+    /// does not contain `scanned` (canonical).
+    pub fn has_patterns_outside(&self, scanned: &Path) -> bool {
+        let rules = self.rules.iter().chain(&self.near_rules);
+        rules
+            .filter(|r| !r.exclude.is_empty() || !r.include.is_empty())
+            .any(|r| !scanned.starts_with(&r.dir))
     }
 
     /// As `options`, with `[near] exclude` added.
@@ -239,6 +258,11 @@ impl Config {
         );
         Ok(similarity)
     }
+}
+
+/// As the scan prints it; `show` takes either case, so a config may too.
+fn normalized_fingerprint(accept: &Accept) -> String {
+    accept.fingerprint.to_ascii_lowercase()
 }
 
 fn override_with<T>(slot: &mut Option<Set<T>>, nearer: Option<T>, from: &Path) {

@@ -1,5 +1,6 @@
 mod common;
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
@@ -769,5 +770,94 @@ fn check_skips_a_generated_file_under_crlf_too() {
         ("b.ts", generated.replace("sumTotals", "sumAll")),
     ];
     let (code, out) = commit_lf_then_check_crlf("generated", &files);
+
+// Catches `--exclude` being judged on the revision side with the scan root's
+// name stripped from a path that never carried it: a directory named like
+// the root loses its first component there, so an unchanged tree looks new.
+#[test]
+fn a_directory_named_like_the_relative_root_is_excluded_alike() {
+    let dir = repo("same-name");
+    std::fs::remove_dir_all(dir.join("src")).unwrap();
+    std::fs::create_dir_all(dir.join("a/a/x")).unwrap();
+    std::fs::create_dir_all(dir.join("a/y")).unwrap();
+    std::fs::write(dir.join("a/a/x/one.ts"), renamed(SUM_TOTALS, 1)).unwrap();
+    std::fs::write(dir.join("a/a/x/two.ts"), renamed(SUM_TOTALS, 2)).unwrap();
+    std::fs::write(dir.join("a/y/one.ts"), CLAMP).unwrap();
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-qm", "nested"]);
+    let (code, out) = doppelscan(&dir, &["check", "a", "--exclude", "x/*.ts"]);
+    assert_eq!(code, 0, "{out}");
+}
+
+// Catches git being run with a file as its working directory, which
+// surfaces as an unknown HEAD and hides the real reason.
+#[test]
+fn check_on_a_file_says_it_needs_a_directory() {
+    let dir = repo("file-root");
+    let (code, out) = doppelscan(&dir, &["check", "src/a.ts"]);
+    assert_eq!(code, 2, "{out}");
+    assert!(out.contains("needs a directory"), "{out}");
+}
+
+/// Commits a tree holding `tracked`'s blob again under a name that is not
+/// UTF-8, which git allows and which no platform's checkout has to show.
+fn commit_non_utf8_path(dir: &Path, tracked: &str) {
+    let oid = git_output(dir, &["rev-parse", &format!("HEAD:{tracked}")]);
+    let mut entry = format!("100644 {} 0\t", oid.trim()).into_bytes();
+    entry.extend_from_slice(b"bad\xff.ts\0");
+    let mut add = Command::new("git")
+        .args(["update-index", "-z", "--index-info"])
+        .current_dir(dir)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    add.stdin.take().unwrap().write_all(&entry).unwrap();
+    assert!(add.wait().unwrap().success());
+    git(dir, &["commit", "-qm", "odd name"]);
+}
+
+fn git_output(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    String::from_utf8(out.stdout).unwrap()
+}
+
+// Catches one odd path failing the whole listing, and with it every check
+// in the repository until someone renames a file they may not own.
+#[test]
+fn a_non_utf8_path_at_the_revision_is_skipped() {
+    let dir = repo("non-utf8");
+    commit_non_utf8_path(&dir, "src/a.ts");
+    let (code, out) = doppelscan(&dir, &["check", "--base", "HEAD"]);
+    assert_eq!(code, 0, "{out}");
+}
+
+// Catches the walk scanning a file inside a directory the revision side
+// must skip: an unchanged clone there would read as new on every check.
+#[cfg(unix)]
+#[test]
+fn a_non_utf8_directory_is_left_out_of_the_walk() {
+    use std::os::unix::ffi::OsStrExt as _;
+    let dir = repo("non-utf8-dir");
+    let odd = dir.join(std::ffi::OsStr::from_bytes(b"bad\xff"));
+    std::fs::create_dir_all(&odd).unwrap();
+    std::fs::write(odd.join("c.ts"), renamed(SUM_TOTALS, 3)).unwrap();
+    let (code, out) = doppelscan(&dir, &["--format", "json"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(!out.contains("c.ts"), "{out}");
+}
+
+// Catches a case-only rename reading as new where the filesystem folds
+// case: the old name still "exists", but no scanned path spells it that way,
+// so the revision side dropped it. Trivially green on a case-sensitive
+// filesystem, where the old name is simply gone.
+#[test]
+fn an_uncommitted_case_only_rename_is_not_new() {
+    let dir = repo("case-rename");
+    git(&dir, &["mv", "-f", "src/a.ts", "src/A.ts"]);
+    let (code, out) = doppelscan(&dir, &["check", "--base", "HEAD"]);
     assert_eq!(code, 0, "{out}");
 }

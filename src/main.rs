@@ -12,7 +12,7 @@ use doppelscan::near::{render_near, render_near_summary};
 use doppelscan::report::{
     Analysis, Detail, render_accepted, render_check, render_group, render_summary,
 };
-use doppelscan::settings::{explain, init_template, render as render_settings};
+use doppelscan::settings::{check_scannable, explain, init_template, render as render_settings};
 use serde::Serialize;
 use serde::ser::{Error as _, SerializeSeq as _, Serializer};
 
@@ -65,7 +65,8 @@ enum Command {
         /// Compare against this git revision instead of a baseline file.
         #[arg(long, conflicts_with = "baseline")]
         base: Option<String>,
-        /// Baseline file [default: PATH/.doppelscan-baseline.json].
+        /// Baseline file [default: the nearest .doppelscan-baseline.json in
+        /// PATH or above it, up to the repository root].
         #[arg(long)]
         baseline: Option<PathBuf>,
         /// Only new groups of at least this many tokens fail the check;
@@ -78,10 +79,12 @@ enum Command {
     /// Write a baseline accepting today's duplication, for `check`.
     Baseline {
         /// Only drop entries that no longer match; never accept new
-        /// duplication. Uses the settings stored in the baseline.
+        /// duplication. Refuses if the settings differ from those stored
+        /// in the baseline.
         #[arg(long)]
         prune: bool,
-        /// Baseline file [default: PATH/.doppelscan-baseline.json].
+        /// Baseline file [default: PATH/.doppelscan-baseline.json; with
+        /// --prune, the nearest one in PATH or above it].
         #[arg(long, short)]
         output: Option<PathBuf>,
         #[command(flatten)]
@@ -236,7 +239,9 @@ fn show_config(schema: bool, similarity: Option<f32>, c: &Common) -> anyhow::Res
     if schema {
         return emit(&doppelscan::config::schema());
     }
-    let effective = explain(&config(c)?, &requested(c), similarity);
+    let config = config(c)?;
+    check_scannable(&c.path, &config.options(requested(c))?)?;
+    let effective = explain(&config, &requested(c), similarity);
     match c.format {
         Format::Json => emit_json(&effective),
         Format::Text => emit(&render_settings(&effective)),
@@ -256,12 +261,33 @@ fn init(path: &Path, force: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Read once per command: reading warns about a `--config` file.
 fn config(c: &Common) -> anyhow::Result<Config> {
-    Config::read(match (&c.config, c.no_config) {
+    let config = Config::read(match (&c.config, c.no_config) {
         (Some(file), _) => Source::File(file),
         (None, true) => Source::None,
         (None, false) => Source::Lookup(&c.path),
-    })
+    })?;
+    if let Some(file) = &c.config {
+        warn_if_patterns_miss(&config, file, &c.path);
+    }
+    Ok(config)
+}
+
+/// Patterns stay anchored at their file's directory, so from a shared
+/// config kept elsewhere they match nothing while its other settings apply.
+fn warn_if_patterns_miss(config: &Config, file: &Path, scanned: &Path) {
+    let Ok(scanned) = scanned.canonicalize() else {
+        return;
+    };
+    if config.has_patterns_outside(&scanned) {
+        let _ = writeln!(
+            std::io::stderr(),
+            "warning: the path patterns in {} only match under its directory, which does not contain {}; here they match nothing.",
+            file.display(),
+            scanned.display()
+        );
+    }
 }
 
 fn requested(c: &Common) -> Requested {
@@ -447,8 +473,10 @@ fn check(
         (None, Some(file)) => Against::File(file),
         (None, None) => Against::Rev("HEAD".into()),
     };
-    let min_new = config(common)?.check_min_tokens(check_min_tokens);
-    let result = engine.check(&common.path, &against, &options(common)?, min_new)?;
+    let config = config(common)?;
+    let min_new = config.check_min_tokens(check_min_tokens);
+    let opts = config.options(requested(common))?;
+    let result = engine.check(&common.path, &against, &opts, min_new)?;
     print_check(&result, &against, common.format)?;
     Ok(if result.new.is_empty() {
         ExitCode::SUCCESS

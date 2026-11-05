@@ -9,9 +9,11 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::config::{Config, Requested, Set};
+use crate::engine::ScanOptions;
 use crate::filter::{PathFilter, PathRules};
+use crate::index::MIN_STORED_TOKENS;
 use crate::lang::LANGS;
-use crate::walk::{BUILT_IN_SKIPS, discover};
+use crate::walk::{BUILT_IN_SKIPS, Found, discover, looks_generated};
 
 #[derive(Debug, Serialize, PartialEq)]
 pub struct Effective {
@@ -23,6 +25,8 @@ pub struct Effective {
     pub near_exclude: Vec<Patterns>,
     pub accepted: Vec<Accepted>,
     pub built_in_skips: Skips,
+    /// What the rest does not say about the scan.
+    pub notes: Vec<String>,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -64,8 +68,8 @@ pub fn explain(config: &Config, asked: &Requested, near_similarity: Option<f32>)
         settings: vec![
             line(
                 "min-tokens",
-                asked.min_tokens,
-                &config.min_tokens,
+                asked.min_tokens.map(floored),
+                &floored_set(&config.min_tokens),
                 defaults.min_tokens,
             ),
             line("strict", asked.strict, &config.strict, false),
@@ -84,9 +88,9 @@ pub fn explain(config: &Config, asked: &Requested, near_similarity: Option<f32>)
             ),
             line("check.min-tokens", check_min, &config.check_min_tokens, 0),
         ],
-        exclude: patterns(&config.rules, |r| &r.exclude),
-        include: patterns(&config.rules, |r| &r.include),
-        near_exclude: patterns(&config.near_rules, |r| &r.exclude),
+        exclude: excludes(config, asked),
+        include: patterns(config, &config.rules, |r| &r.include),
+        near_exclude: patterns(config, &config.near_rules, |r| &r.exclude),
         accepted: config
             .accepts
             .iter()
@@ -101,7 +105,55 @@ pub fn explain(config: &Config, asked: &Requested, near_similarity: Option<f32>)
             names: BUILT_IN_SKIPS.names.to_vec(),
             generated_markers: BUILT_IN_SKIPS.generated_markers.to_vec(),
         },
+        notes: notes(config, asked),
     }
+}
+
+/// The minimum a scan really uses: nothing smaller is ever stored.
+fn floored(min_tokens: u32) -> u32 {
+    min_tokens.max(MIN_STORED_TOKENS)
+}
+
+fn floored_set(set: &Option<Set<u32>>) -> Option<Set<u32>> {
+    set.as_ref().map(|s| Set {
+        value: floored(s.value),
+        from: s.from.clone(),
+    })
+}
+
+fn excludes(config: &Config, asked: &Requested) -> Vec<Patterns> {
+    let mut lists = patterns(config, &config.rules, |r| &r.exclude);
+    if !asked.exclude.is_empty() {
+        lists.push(Patterns {
+            file: "flag".to_string(),
+            patterns: asked.exclude.clone(),
+        });
+    }
+    lists
+}
+
+fn notes(config: &Config, asked: &Requested) -> Vec<String> {
+    let min = asked
+        .min_tokens
+        .or(config.min_tokens.as_ref().map(|s| s.value));
+    let below_floor = min.is_some_and(|m| m < MIN_STORED_TOKENS);
+    let floor = format!("min-tokens is raised to {MIN_STORED_TOKENS}, the smallest clone stored.");
+    let nested = "Configs nested inside the scanned tree also apply, and are not listed.";
+    [
+        below_floor.then_some(floor),
+        (!config.skip_nested).then(|| nested.to_string()),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+/// Fails where a scan of `root` would fail before it reads any source: a
+/// missing path, a bad `--exclude`, a nested config that does not load.
+/// The last takes a walk of the tree, parsing nothing.
+pub fn check_scannable(root: &Path, opts: &ScanOptions) -> anyhow::Result<()> {
+    let filter = PathFilter::new(root, opts)?;
+    discover(root, &filter, &opts.languages).map(|_| ())
 }
 
 /// An f32 as the f64 its shortest decimal names, so 0.8 shows as 0.8 and
@@ -135,12 +187,20 @@ fn line<T: Serialize + Clone>(
     }
 }
 
-fn patterns(rules: &[PathRules], which: impl Fn(&PathRules) -> &Vec<String>) -> Vec<Patterns> {
+/// `rules` runs parallel to `config.files`: `merge` adds one of each. The
+/// file cannot be rebuilt from the rule's directory, since `--config` can
+/// read a file of any name.
+fn patterns(
+    config: &Config,
+    rules: &[PathRules],
+    which: impl Fn(&PathRules) -> &Vec<String>,
+) -> Vec<Patterns> {
     rules
         .iter()
-        .filter(|r| !which(r).is_empty())
-        .map(|r| Patterns {
-            file: shown(&r.dir.join(crate::config::FILE)),
+        .zip(&config.files)
+        .filter(|(r, _)| !which(r).is_empty())
+        .map(|(r, file)| Patterns {
+            file: shown(file),
             patterns: which(r).clone(),
         })
         .collect()
@@ -187,9 +247,12 @@ pub fn render(e: &Effective) -> String {
             a.fingerprint, a.file, a.reason
         ));
     }
+    for note in &e.notes {
+        out.push_str(&format!("note: {note}\n"));
+    }
     let skips = &e.built_in_skips;
     out.push_str(&format!(
-        "\nBuilt-in skips (`include` brings directories back):\n  dirs: {}\n  names: {}\n  generated markers: {}\n",
+        "\nBuilt-in skips (`include` brings back directories and marked files):\n  dirs: {}\n  names: {}\n  generated markers: {}\n",
         skips.dirs.join(", "),
         skips.names.join(", "),
         skips.generated_markers.join(", ")
@@ -220,16 +283,27 @@ const TEST_GLOBS: &[&str] = &[
 /// default, the languages found, and the test patterns present as near's
 /// excludes.
 pub fn init_template(root: &Path) -> anyhow::Result<String> {
-    let filter = PathFilter::new(root, &[], &[], false)?;
-    let files = discover(root, &filter, &[])?;
+    // The tree's configs are not what `init` is describing, and one that
+    // fails to load must not stop it.
+    let opts = ScanOptions {
+        skip_nested: true,
+        ..ScanOptions::default()
+    };
+    let filter = PathFilter::new(root, &opts)?;
+    let mut files = discover(root, &filter, &[])?;
+    files.retain(is_scanned_text);
     let mut counts: FxHashMap<usize, usize> = FxHashMap::default();
-    for (_, lang) in &files {
-        *counts.entry(*lang).or_default() += 1;
+    for file in &files {
+        *counts.entry(file.lang).or_default() += 1;
     }
     let mut langs: Vec<(usize, usize)> = counts.into_iter().collect();
     langs.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-    let tests = present_tests(root, files.iter().map(|(p, _)| p.as_path()))?;
+    let tests = present_tests(root, files.iter().map(|f| f.path.as_path()))?;
     Ok(template(&langs, &tests))
+}
+
+fn is_scanned_text(file: &Found) -> bool {
+    std::fs::read_to_string(&file.path).is_ok_and(|text| !looks_generated(&text, false))
 }
 
 fn present_tests<'a>(
@@ -310,8 +384,9 @@ fn template(langs: &[(usize, usize)], tests: &[&str]) -> String {
 # min-tokens = 0
 
 # A clone group kept on purpose, by the fingerprint doppelscan shows in
-# brackets: left out of every report and never failing `check`. Editing
-# the code changes the fingerprint, so it comes back for another look.
+# brackets: left out of every report and never failing `check`. Changing
+# the code's structure changes the fingerprint, so it comes back for another
+# look; renames and changed literals do not, unless the scan is strict.
 # [[accept]]
 # fingerprint = \"b4a94232d76e\"
 # reason = \"Generated from the OpenAPI spec; regenerated, never edited.\"
