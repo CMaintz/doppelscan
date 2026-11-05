@@ -569,7 +569,10 @@ fn a_prefixed_string_is_one_literal() {
     ];
     for (ext, one, two) in cases {
         let (a, b) = (format!("a.{ext}"), format!("b.{ext}"));
-        let found = scan(&[(&a, &format!("{one}{CALLS}")), (&b, &format!("{two}{CALLS}"))]);
+        let found = scan(&[
+            (&a, &format!("{one}{CALLS}")),
+            (&b, &format!("{two}{CALLS}")),
+        ]);
         assert_eq!(start_lines(&found), [1, 1], "{one}");
     }
 }
@@ -611,7 +614,12 @@ const CASED_QUERY: &str = "SELECT Id, Total, Status\nFROM Orders\nWHERE Total > 
 #[test]
 fn sql_keywords_match_in_any_case() {
     let lower = CASED_QUERY.to_lowercase();
-    assert_eq!(scan(&[("a.sql", CASED_QUERY), ("b.sql", &lower)]).groups.len(), 1);
+    assert_eq!(
+        scan(&[("a.sql", CASED_QUERY), ("b.sql", &lower)])
+            .groups
+            .len(),
+        1
+    );
 }
 
 // Catches names differing only in case being hashed apart under --strict:
@@ -622,7 +630,10 @@ fn strict_folds_names_where_the_language_does() {
     let lower = CASED_QUERY.to_lowercase();
     let found = scan_with(&[("a.sql", CASED_QUERY), ("b.sql", &lower)], true);
     assert_eq!(found.groups.len(), 1);
-    let found = scan_with(&[("a.c", SUM_PAID), ("b.c", &SUM_PAID.to_lowercase())], true);
+    let found = scan_with(
+        &[("a.c", SUM_PAID), ("b.c", &SUM_PAID.to_lowercase())],
+        true,
+    );
     assert!(found.groups.is_empty(), "{:?}", found.groups);
 }
 
@@ -656,4 +667,36 @@ fn imports_match_in_any_case_where_keywords_do() {
         let found = scan(&[("a.sql", &imports), ("b.sql", &imports)]);
         assert!(found.groups.is_empty(), "{line}: {:?}", found.groups);
     }
+}
+
+// Catches a nested block comment closing at its first closer: what is
+// left of it reads as code, and the bracket in it folds the rest of the
+// file into one statement.
+#[test]
+fn nested_block_comments_close_at_their_own_closer() {
+    let cases = [
+        ("hs", "{- outer {- inner -} tail (\n-}\n"),
+        ("scala", "/* outer /* inner */ tail (\n*/\n"),
+        ("dart", "/* outer /* inner */ tail (\n*/\n"),
+    ];
+    for (ext, comment) in cases {
+        let (a, b) = (format!("a.{ext}"), format!("b.{ext}"));
+        let with = format!("{comment}{CALLS}");
+        assert_eq!(
+            start_lines(&scan(&[(&a, &with), (&b, CALLS)])),
+            [3, 1],
+            "{ext}"
+        );
+    }
+}
+
+// Catches nesting reaching a language without it: C's `/* /* */` is a
+// whole comment, and counting the inner opener would eat the file.
+#[test]
+fn block_comments_do_not_nest_in_c() {
+    let with = format!("/* one /* two */\n{CALLS}");
+    assert_eq!(
+        start_lines(&scan(&[("a.c", &with), ("b.c", CALLS)])),
+        [2, 1]
+    );
 }

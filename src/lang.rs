@@ -65,6 +65,8 @@ pub struct Lexicon {
     pub triple_quotes: &'static [u8],
     /// `'` may continue a name (`foldl'`) rather than end it.
     pub primes: bool,
+    /// Block comments nest, so only the matching closer ends one.
+    pub nested_comments: bool,
 }
 
 const PLAIN: Lexicon = Lexicon {
@@ -74,6 +76,7 @@ const PLAIN: Lexicon = Lexicon {
     ignore_case: false,
     triple_quotes: &[],
     primes: false,
+    nested_comments: false,
 };
 const C_LIKE: Lexicon = Lexicon {
     line_comments: &["//"],
@@ -224,12 +227,20 @@ pub static LANGS: LazyLock<Vec<Lang>> = LazyLock::new(|| {
             "scala",
             Lexicon {
                 triple_quotes: b"\"",
+                nested_comments: true,
                 ..C_LIKE
             },
             &["scala", "sc"],
         ),
         Lang::tokens("groovy", C_LIKE_TRIPLE, &["groovy", "gradle"]),
-        Lang::tokens("dart", C_LIKE_TRIPLE, &["dart"]),
+        Lang::tokens(
+            "dart",
+            Lexicon {
+                nested_comments: true,
+                ..C_LIKE_TRIPLE
+            },
+            &["dart"],
+        ),
         Lang::tokens("zig", C_LIKE, &["zig"]),
         Lang::tokens("solidity", C_LIKE, &["sol"]),
         Lang::tokens("protobuf", C_LIKE, &["proto"]),
@@ -274,6 +285,7 @@ pub static LANGS: LazyLock<Vec<Lang>> = LazyLock::new(|| {
                 block_comments: &[("{-", "-}")],
                 triple_quotes: b"\"",
                 primes: true,
+                nested_comments: true,
                 ..PLAIN
             },
             &["hs", "elm"],

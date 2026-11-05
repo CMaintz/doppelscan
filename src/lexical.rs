@@ -299,16 +299,44 @@ fn comment_end(source: &str, i: usize, lexicon: &Lexicon) -> Option<usize> {
         .iter()
         .find(|(open, _)| rest.starts_with(open) && opens_comment(bytes, i, open));
     if let Some((open, close)) = block {
-        let end = rest[open.len()..]
-            .find(close)
-            .map_or(source.len(), |e| i + open.len() + e + close.len());
-        return Some(end);
+        return Some(block_comment_end(source, i, open, close, lexicon));
     }
     let marker = lexicon
         .line_comments
         .iter()
         .find(|m| rest.starts_with(**m))?;
     opens_comment(bytes, i, marker).then(|| rest.find('\n').map_or(source.len(), |e| i + e))
+}
+
+fn block_comment_end(source: &str, i: usize, open: &str, close: &str, lexicon: &Lexicon) -> usize {
+    let body = i + open.len();
+    if lexicon.nested_comments {
+        return nested_comment_end(source.as_bytes(), body, open, close);
+    }
+    source[body..]
+        .find(close)
+        .map_or(source.len(), |e| body + e + close.len())
+}
+
+/// One forward pass with a depth count, so nesting costs no more than the
+/// comment's length. An unclosed comment runs to the end of the file.
+fn nested_comment_end(bytes: &[u8], body: usize, open: &str, close: &str) -> usize {
+    let (mut at, mut depth) = (body, 1);
+    while at < bytes.len() {
+        if bytes[at..].starts_with(close.as_bytes()) {
+            at += close.len();
+            depth -= 1;
+            if depth == 0 {
+                return at;
+            }
+        } else if bytes[at..].starts_with(open.as_bytes()) {
+            at += open.len();
+            depth += 1;
+        } else {
+            at += 1;
+        }
+    }
+    bytes.len()
 }
 
 /// `#` mid-word is shell's `$#` or a YAML `a#b` value, `//` after a colon
