@@ -626,7 +626,7 @@ fn a_tracked_symlink_is_left_out_of_both_sides() {
 }
 
 // Catches dropping symlinks from what was typed: a link named directly is
-// a request to scan what it points at, as `.` through a linked checkout is.
+// a request to scan what it points at.
 #[test]
 fn a_symlink_named_directly_is_still_scanned() {
     let dir = repo_with_config("symlink-root", "");
