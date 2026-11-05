@@ -58,19 +58,30 @@ pub struct Lexicon {
     pub keywords: &'static [&'static str],
     /// Keywords match in any case (SQL's `SELECT`, PowerShell's `If`).
     pub ignore_case: bool,
+    /// Quote bytes that open a multi-line string when tripled. Everywhere
+    /// else `''''` is a quoted quote or adjacent empty strings.
+    pub triple_quotes: &'static [u8],
 }
 
-const C_LIKE: Lexicon = Lexicon {
-    line_comments: &["//"],
-    block_comments: &[("/*", "*/")],
-    keywords: &[],
-    ignore_case: false,
-};
-const HASH: Lexicon = Lexicon {
-    line_comments: &["#"],
+const PLAIN: Lexicon = Lexicon {
+    line_comments: &[],
     block_comments: &[],
     keywords: &[],
     ignore_case: false,
+    triple_quotes: &[],
+};
+const C_LIKE: Lexicon = Lexicon {
+    line_comments: &["//"],
+    block_comments: &[("/*", "*/")],
+    ..PLAIN
+};
+const HASH: Lexicon = Lexicon {
+    line_comments: &["#"],
+    ..PLAIN
+};
+const C_LIKE_TRIPLE: Lexicon = Lexicon {
+    triple_quotes: b"\"'",
+    ..C_LIKE
 };
 
 impl Lang {
@@ -199,9 +210,17 @@ pub static LANGS: LazyLock<Vec<Lang>> = LazyLock::new(|| {
                 "c", "h", "cpp", "cc", "cxx", "hpp", "hh", "hxx", "ino", "m", "mm",
             ],
         ),
-        Lang::tokens("scala", C_LIKE, &["scala", "sc"]),
-        Lang::tokens("groovy", C_LIKE, &["groovy", "gradle"]),
-        Lang::tokens("dart", C_LIKE, &["dart"]),
+        // Unlike Groovy and Dart, Scala has no `'''` string.
+        Lang::tokens(
+            "scala",
+            Lexicon {
+                triple_quotes: b"\"",
+                ..C_LIKE
+            },
+            &["scala", "sc"],
+        ),
+        Lang::tokens("groovy", C_LIKE_TRIPLE, &["groovy", "gradle"]),
+        Lang::tokens("dart", C_LIKE_TRIPLE, &["dart"]),
         Lang::tokens("zig", C_LIKE, &["zig"]),
         Lang::tokens("solidity", C_LIKE, &["sol"]),
         Lang::tokens("protobuf", C_LIKE, &["proto"]),
@@ -211,8 +230,7 @@ pub static LANGS: LazyLock<Vec<Lang>> = LazyLock::new(|| {
             Lexicon {
                 line_comments: &["//"],
                 block_comments: &[("/*", "*/"), ("<!--", "-->")],
-                keywords: &[],
-                ignore_case: false,
+                ..PLAIN
             },
             &["vue", "svelte"],
         ),
@@ -227,6 +245,7 @@ pub static LANGS: LazyLock<Vec<Lang>> = LazyLock::new(|| {
                     "left", "right", "inner", "outer", "exists", "between", "like",
                 ],
                 ignore_case: true,
+                ..PLAIN
             },
             &["sql"],
         ),
@@ -235,8 +254,7 @@ pub static LANGS: LazyLock<Vec<Lang>> = LazyLock::new(|| {
             Lexicon {
                 line_comments: &["--"],
                 block_comments: &[("--[[", "]]")],
-                keywords: &[],
-                ignore_case: false,
+                ..PLAIN
             },
             &["lua"],
         ),
@@ -245,8 +263,8 @@ pub static LANGS: LazyLock<Vec<Lang>> = LazyLock::new(|| {
             Lexicon {
                 line_comments: &["--"],
                 block_comments: &[("{-", "-}")],
-                keywords: &[],
-                ignore_case: false,
+                triple_quotes: b"\"",
+                ..PLAIN
             },
             &["hs", "elm"],
         ),
@@ -255,8 +273,7 @@ pub static LANGS: LazyLock<Vec<Lang>> = LazyLock::new(|| {
             Lexicon {
                 line_comments: &["#"],
                 block_comments: &[("=begin", "=end")],
-                keywords: &[],
-                ignore_case: false,
+                ..PLAIN
             },
             &["rb", "rake"],
         ),
@@ -266,14 +283,21 @@ pub static LANGS: LazyLock<Vec<Lang>> = LazyLock::new(|| {
             Lexicon {
                 line_comments: &["#"],
                 block_comments: &[("<#", "#>")],
-                keywords: &[],
                 ignore_case: true,
+                ..PLAIN
             },
             &["ps1", "psm1"],
         ),
         Lang::tokens("perl", HASH, &["pl", "pm"]),
         Lang::tokens("r", HASH, &["r"]),
-        Lang::tokens("elixir", HASH, &["ex", "exs"]),
+        Lang::tokens(
+            "elixir",
+            Lexicon {
+                triple_quotes: b"\"'",
+                ..HASH
+            },
+            &["ex", "exs"],
+        ),
         // Mostly data (fixtures, API specs, manifests), which would bury the
         // code results; scanned with `--only yaml`.
         Lang::tokens("yaml", HASH, &["yml", "yaml"]).opt_in(),
@@ -282,8 +306,7 @@ pub static LANGS: LazyLock<Vec<Lang>> = LazyLock::new(|| {
             Lexicon {
                 line_comments: &["#", "//"],
                 block_comments: &[("/*", "*/")],
-                keywords: &[],
-                ignore_case: false,
+                ..PLAIN
             },
             &["tf", "hcl"],
         ),

@@ -317,7 +317,13 @@ fn token_at(source: &str, i: usize, lexicon: &Lexicon) -> (usize, LeafClass, Sha
         b')' | b']' => Shape::Close,
         b';' => Shape::Semi,
         b',' => Shape::Comma,
-        b'"' | b'\'' | b'`' => return (string_end(bytes, i), LeafClass::Literal, Shape::Other),
+        b'"' | b'\'' | b'`' => {
+            return (
+                string_end(bytes, i, lexicon),
+                LeafClass::Literal,
+                Shape::Other,
+            );
+        }
         b'0'..=b'9' => return (word_end(bytes, i, true), LeafClass::Literal, Shape::Other),
         b if is_word_byte(b) => {
             let end = word_end(bytes, i, false);
@@ -328,14 +334,13 @@ fn token_at(source: &str, i: usize, lexicon: &Lexicon) -> (usize, LeafClass, Sha
     (i + 1, LeafClass::Other, shape)
 }
 
-/// Triple-quoted strings (Scala, Groovy, Dart) run to their closing
-/// triple across lines. Others end at the line end when unclosed, so a
-/// stray apostrophe (an unquoted "don't" in YAML) costs one line, not the
-/// rest of the file; the newline stays out so the next line still starts
-/// a statement.
-fn string_end(bytes: &[u8], i: usize) -> usize {
+/// Triple-quoted strings run to their closing triple across lines. Others
+/// end at the line end when unclosed, so a stray apostrophe (an unquoted
+/// "don't" in YAML) costs one line, not the rest of the file; the newline
+/// stays out so the next line still starts a statement.
+fn string_end(bytes: &[u8], i: usize, lexicon: &Lexicon) -> usize {
     let quote = bytes[i];
-    if bytes[i..].starts_with(&[quote; 3]) {
+    if lexicon.triple_quotes.contains(&quote) && bytes[i..].starts_with(&[quote; 3]) {
         let body = &bytes[i + 3..];
         let close = body.windows(3).position(|w| w == [quote; 3]);
         return close.map_or(bytes.len(), |c| i + 3 + c + 3);

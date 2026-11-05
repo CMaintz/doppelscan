@@ -394,3 +394,48 @@ fn data_files_are_not_scanned() {
     assert!(lang_index_for_path("package.json".as_ref()).is_none());
     assert!(lang_index_for_path("Cargo.lock".as_ref()).is_none());
 }
+
+const CALLS: &str = "call(alpha, beta, gamma, delta)\ncall(alpha, beta, gamma, delta, 1)\ncall(alpha, beta, gamma, delta, 2)\n";
+
+// Catches `''''` opening a triple-quoted string where the language has
+// none: a quoted quote would swallow the rest of the file as one literal.
+#[test]
+fn a_doubled_quote_does_not_open_a_triple_quoted_string() {
+    let cases = [
+        ("sql", "SELECT REPLACE(name, '''', '') FROM t;"),
+        ("sql", "SELECT 'a''''b' FROM t;"),
+        ("ps1", "$s = ''''"),
+        ("sh", "echo ''''"),
+    ];
+    for (ext, line) in cases {
+        let (a, b) = (format!("a.{ext}"), format!("b.{ext}"));
+        let with = format!("{line}\n{CALLS}");
+        let found = scan(&[(&a, &with), (&b, CALLS)]);
+        assert_eq!(start_lines(&found), [2, 1], "{line}");
+    }
+}
+
+// Catches a language with triple quotes reading them as three strings:
+// the text of a heredoc would count as code, so copies with different
+// text would not match.
+#[test]
+fn triple_quotes_span_lines_where_the_language_has_them() {
+    let cases = [
+        ("scala", "\"\"\""),
+        ("groovy", "\"\"\""),
+        ("groovy", "'''"),
+        ("dart", "\"\"\""),
+        ("dart", "'''"),
+        ("ex", "\"\"\""),
+        ("ex", "'''"),
+        ("hs", "\"\"\""),
+    ];
+    for (ext, quotes) in cases {
+        let wrap = |text: &str| format!("doc({quotes}\n{text}\n{quotes})\n{CALLS}");
+        let (a, b) = (format!("a.{ext}"), format!("b.{ext}"));
+        let one = wrap("select * from rows where id = ? and live");
+        let two = wrap("update rows set seen = now() where id = ?");
+        let found = scan(&[(&a, &one), (&b, &two)]);
+        assert_eq!(start_lines(&found), [1, 1], "{ext}: {quotes}");
+    }
+}
