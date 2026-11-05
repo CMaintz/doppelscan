@@ -131,12 +131,14 @@ fn list_tree(dir: &Path, rev: &str) -> anyhow::Result<Vec<Listed>> {
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
-    let listing = String::from_utf8(out.stdout).context("git ls-tree output")?;
-    Ok(listing.split('\0').filter_map(parse_entry).collect())
+    let entries = out.stdout.split(|&b| b == 0);
+    Ok(entries.filter_map(parse_entry).collect())
 }
 
-fn parse_entry(line: &str) -> Option<Listed> {
-    let (meta, path) = line.split_once('\t')?;
+/// `None` also for a path that is not UTF-8: one such name must not fail
+/// the listing, and the walk leaves these out too.
+fn parse_entry(entry: &[u8]) -> Option<Listed> {
+    let (meta, path) = std::str::from_utf8(entry).ok()?.split_once('\t')?;
     let mut parts = meta.split(' ');
     let (mode, kind, oid) = (parts.next()?, parts.next()?, parts.next()?);
     // Symlinks (120000) point at text that is not code.

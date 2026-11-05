@@ -1,5 +1,6 @@
 mod common;
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
@@ -498,4 +499,65 @@ fn a_directory_named_like_the_relative_root_is_excluded_alike() {
     git(&dir, &["commit", "-qm", "nested"]);
     let (code, out) = doppelscan(&dir, &["check", "a", "--exclude", "x/*.ts"]);
     assert_eq!(code, 0, "{out}");
+}
+
+// Catches git being run with a file as its working directory, which
+// surfaces as an unknown HEAD and hides the real reason.
+#[test]
+fn check_on_a_file_says_it_needs_a_directory() {
+    let dir = repo("file-root");
+    let (code, out) = doppelscan(&dir, &["check", "src/a.ts"]);
+    assert_eq!(code, 2, "{out}");
+    assert!(out.contains("needs a directory"), "{out}");
+}
+
+/// Commits a tree holding `tracked`'s blob again under a name that is not
+/// UTF-8, which git allows and which no platform's checkout has to show.
+fn commit_non_utf8_path(dir: &Path, tracked: &str) {
+    let oid = git_output(dir, &["rev-parse", &format!("HEAD:{tracked}")]);
+    let mut entry = format!("100644 {} 0\t", oid.trim()).into_bytes();
+    entry.extend_from_slice(b"bad\xff.ts\0");
+    let mut add = Command::new("git")
+        .args(["update-index", "-z", "--index-info"])
+        .current_dir(dir)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    add.stdin.take().unwrap().write_all(&entry).unwrap();
+    assert!(add.wait().unwrap().success());
+    git(dir, &["commit", "-qm", "odd name"]);
+}
+
+fn git_output(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    String::from_utf8(out.stdout).unwrap()
+}
+
+// Catches one odd path failing the whole listing, and with it every check
+// in the repository until someone renames a file they may not own.
+#[test]
+fn a_non_utf8_path_at_the_revision_is_skipped() {
+    let dir = repo("non-utf8");
+    commit_non_utf8_path(&dir, "src/a.ts");
+    let (code, out) = doppelscan(&dir, &["check", "--base", "HEAD"]);
+    assert_eq!(code, 0, "{out}");
+}
+
+// Catches the walk scanning a file inside a directory the revision side
+// must skip: an unchanged clone there would read as new on every check.
+#[cfg(unix)]
+#[test]
+fn a_non_utf8_directory_is_left_out_of_the_walk() {
+    use std::os::unix::ffi::OsStrExt as _;
+    let dir = repo("non-utf8-dir");
+    let odd = dir.join(std::ffi::OsStr::from_bytes(b"bad\xff"));
+    std::fs::create_dir_all(&odd).unwrap();
+    std::fs::write(odd.join("c.ts"), renamed(SUM_TOTALS, 3)).unwrap();
+    let (code, out) = doppelscan(&dir, &["--format", "json"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(!out.contains("c.ts"), "{out}");
 }

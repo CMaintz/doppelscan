@@ -142,7 +142,11 @@ fn is_regular_file(entry: &DirEntry) -> bool {
 
 fn found_at(path: &Path, root: &Path, filter: &PathFilter, languages: &[usize]) -> Option<Found> {
     let (path, lang) = accept(path, languages)?;
-    let included = filter.includes(path.strip_prefix(root).unwrap_or(&path));
+    let rel = path.strip_prefix(root).unwrap_or(&path);
+    // The revision side has no name for such a path, so a clone in one
+    // would read as new on every check.
+    rel.to_str()?;
+    let included = filter.includes(rel);
     Some(Found {
         path,
         lang,

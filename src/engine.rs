@@ -379,7 +379,7 @@ impl Engine {
             }
             None => String::new(),
         };
-        let commit = crate::git::fork_point(root, rev)?;
+        let commit = crate::git::fork_point(repo_dir(root), rev)?;
         let revision = crate::git::read_revision(root, &commit, opts, &prefix)?;
         let mut opts = opts.clone();
         let submodules = revision.submodules.iter().map(|s| format!("{s}/**"));
@@ -387,6 +387,16 @@ impl Engine {
         let files = index_sources(revision.sources, opts.strict);
         Ok((analyze(files, &opts, started), opts))
     }
+}
+
+/// A directory git can run in for `root`. Named file or not, the fork point
+/// resolves, so `read_revision` can give the error that fits.
+fn repo_dir(root: &Path) -> &Path {
+    if !root.is_file() {
+        return root;
+    }
+    let parent = root.parent().filter(|p| !p.as_os_str().is_empty());
+    parent.unwrap_or(Path::new("."))
 }
 
 /// The scanned root and `display_base` in the same canonical form, or
