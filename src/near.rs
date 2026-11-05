@@ -100,7 +100,7 @@ pub fn near_analysis(
     let classes = exact_classes(&files, units);
     let edges = similar_classes(&files, &classes, threshold);
     let mut groups = without_nested(clusters(&classes, &edges));
-    groups.sort_by_key(|g| std::cmp::Reverse(near_score(g)));
+    rank(&mut groups);
     NearAnalysis {
         files,
         groups,
@@ -208,37 +208,107 @@ fn size(prints: &Prints) -> u32 {
 }
 
 /// Pairs of unit ids at or above `threshold`, with their similarity.
+/// Each unit is scored against its candidates as they are found: on a large
+/// repo the candidate pairs run to hundreds of millions, too many to hold.
 fn similar_pairs(
     files: &[Arc<FileIndex>],
     units: &[Unit],
     prints: &[Prints],
     threshold: f32,
 ) -> Vec<(u32, u32, f32)> {
-    let mut index: FxHashMap<u64, Vec<(u32, u32)>> = FxHashMap::default();
+    let index = postings(units, prints);
+    (0..units.len() as u32)
+        .into_par_iter()
+        .map_init(
+            || vec![u32::MAX; units.len()],
+            |seen, a| {
+                let mut found = Vec::new();
+                for b in candidates_of(a, &prints[a as usize], &index, seen) {
+                    if !comparable(files, &units[a as usize], &units[b as usize]) {
+                        continue;
+                    }
+                    if let Some(similarity) =
+                        similarity(&prints[a as usize], &prints[b as usize], threshold)
+                    {
+                        found.push((a, b, similarity));
+                    }
+                }
+                found
+            },
+        )
+        .flatten()
+        .collect()
+}
+
+/// Unit ids by fingerprint, ascending, for fingerprints that are not idiom.
+/// Idiom is skipped only here, where a fingerprint in thousands of
+/// functions would pair them all; scoring still counts it, so a pair alike
+/// in their idiom gets credit for it and a pair differing in it (4 field
+/// assignments against 12) does not look identical.
+fn postings(units: &[Unit], prints: &[Prints]) -> FxHashMap<u64, Vec<u32>> {
+    let mut index: FxHashMap<u64, Vec<u32>> = FxHashMap::default();
     for (id, fps) in prints.iter().enumerate() {
-        for &(fp, count) in fps {
-            index.entry(fp).or_default().push((id as u32, count));
+        for &(fp, _) in fps {
+            index.entry(fp).or_default().push(id as u32);
         }
     }
     let cull = MIN_CULL.max(units.len() / 200);
-    let mut shared: FxHashMap<(u32, u32), u32> = FxHashMap::default();
-    for list in index.values().filter(|l| l.len() <= cull) {
-        for (i, &(a, ca)) in list.iter().enumerate() {
-            for &(b, cb) in &list[i + 1..] {
-                if comparable(files, &units[a as usize], &units[b as usize]) {
-                    *shared.entry((a, b)).or_default() += ca.min(cb);
-                }
+    index.retain(|_, ids| ids.len() <= cull);
+    index
+}
+
+/// Units after `a` sharing a fingerprint with it, each once. `index` lists
+/// must be ascending, which lets the search start just past `a`. `seen`
+/// holds, per unit, the last `a` that listed it, so it needs no clearing
+/// between units.
+fn candidates_of(
+    a: u32,
+    prints: &Prints,
+    index: &FxHashMap<u64, Vec<u32>>,
+    seen: &mut [u32],
+) -> Vec<u32> {
+    let mut out = Vec::new();
+    for (fp, _) in prints {
+        let Some(ids) = index.get(fp) else { continue };
+        let after = ids.partition_point(|&b| b <= a);
+        for &b in &ids[after..] {
+            if seen[b as usize] != a {
+                seen[b as usize] = a;
+                out.push(b);
             }
         }
     }
-    shared
-        .into_iter()
-        .filter_map(|((a, b), common)| {
-            let union = size(&prints[a as usize]) + size(&prints[b as usize]) - common;
-            let similarity = common as f32 / union as f32;
-            (similarity >= threshold).then_some((a, b, similarity))
-        })
-        .collect()
+    out
+}
+
+fn similarity(a: &Prints, b: &Prints, threshold: f32) -> Option<f32> {
+    // Jaccard is at most the smaller size over the larger, which skips the
+    // merge for most pairs of unequal size.
+    let (sa, sb) = (size(a) as f32, size(b) as f32);
+    if sa.min(sb) < threshold * sa.max(sb) {
+        return None;
+    }
+    let similarity = jaccard(a, b);
+    (similarity >= threshold).then_some(similarity)
+}
+
+/// Multiset Jaccard of two fingerprint lists sorted by hash, each hash at
+/// most once (as `winnow` builds them). Two empty lists give NaN, which no
+/// threshold accepts.
+fn jaccard(a: &Prints, b: &Prints) -> f32 {
+    let (mut i, mut j, mut common) = (0, 0, 0);
+    while i < a.len() && j < b.len() {
+        match a[i].0.cmp(&b[j].0) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                common += a[i].1.min(b[j].1);
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    common as f32 / (size(a) + size(b) - common) as f32
 }
 
 fn comparable(files: &[Arc<FileIndex>], a: &Unit, b: &Unit) -> bool {
@@ -338,6 +408,17 @@ fn carried_by(inner: &RawNear, outer: &RawNear) -> bool {
             (0..outer.members.len()).find(|&i| !used[i] && strictly_inside(m, &outer.members[i]));
         slot.map(|i| used[i] = true).is_some()
     })
+}
+
+/// Best first; ties by where their first copy sits, so the order depends
+/// on the code and not on how the pairs were found.
+fn rank(groups: &mut [RawNear]) {
+    groups.sort_by_cached_key(|g| (std::cmp::Reverse(near_score(g)), first_copy(g)));
+}
+
+fn first_copy(g: &RawNear) -> (u32, u32) {
+    let at = g.members.iter().map(|m| (m.file, m.frag.start)).min();
+    at.unwrap_or_default()
 }
 
 fn near_score(g: &RawNear) -> u64 {
@@ -515,7 +596,10 @@ pub fn render_near_summary(a: &NearAnalysis, shown: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{K, W, winnow};
+    use rustc_hash::FxHashMap;
+
+    use super::{K, RawNear, Unit, W, candidates_of, rank, winnow};
+    use crate::index::Frag;
 
     // Catches a winnowing window or k-gram size that breaks the guarantee
     // the threshold rests on: any shared run of W + K - 1 tokens is seen.
@@ -532,5 +616,49 @@ mod tests {
             let shared = fa.iter().any(|(f, _)| fb.iter().any(|(g, _)| f == g));
             assert!(shared, "offset {offset}");
         }
+    }
+
+    // Catches the candidate search stopping at the first idiom fingerprint
+    // (culled from the index) instead of skipping it, which would leave
+    // every pair sharing only later fingerprints unreported, and a unit
+    // listed once per shared fingerprint, which would score it again each
+    // time.
+    #[test]
+    fn candidates_skip_idiom_and_come_once() {
+        let index = FxHashMap::from_iter([(2, vec![0, 3]), (7, vec![0, 3, 5])]);
+        let prints = vec![(1, 4), (2, 1), (5, 2), (7, 1)];
+        let mut seen = vec![u32::MAX; 6];
+        assert_eq!(candidates_of(0, &prints, &index, &mut seen), vec![3, 5]);
+        assert_eq!(candidates_of(3, &prints, &index, &mut seen), vec![5]);
+    }
+
+    fn group_at(file: u32, start: u32) -> RawNear {
+        let frag = Frag {
+            hash: 0,
+            start,
+            end: start + 100,
+            leaf_start: 0,
+            leaf_end: 40,
+            scope: 0,
+        };
+        let unit = |class| Unit { file, frag, class };
+        RawNear {
+            members: vec![unit(0), unit(1)],
+            similarity: 0.9,
+        }
+    }
+
+    // Catches ties left in the order union-find happened to produce them:
+    // that order shifts with any change to how pairs are found, so the
+    // same code would list differently from one release to the next.
+    #[test]
+    fn groups_with_equal_scores_list_in_source_order() {
+        let mut groups = vec![group_at(1, 0), group_at(0, 500), group_at(0, 20)];
+        rank(&mut groups);
+        let firsts: Vec<(u32, u32)> = groups
+            .iter()
+            .map(|g| (g.members[0].file, g.members[0].frag.start))
+            .collect();
+        assert_eq!(firsts, [(0, 20), (0, 500), (1, 0)]);
     }
 }

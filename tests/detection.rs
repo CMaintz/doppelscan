@@ -697,3 +697,80 @@ fn ignore_markers_work_in_token_level_languages() {
     let a = scan(&[("a.c", code), ("b.c", &ignored(code))]);
     assert_eq!(groups(&a).len(), 0);
 }
+
+const STATS: &str = "    protected void masterOperation(Task task, Request request, ActionListener<Response> listener) {
+        StatsRequest statsRequest = new StatsRequest();
+        statsRequest.setParentTask(clusterService.localNode().getId(), task.getId());
+        if (request.getTimeout() != null) {
+            statsRequest.setTimeout(request.getTimeout());
+        }
+        client.execute(StatsAction.INSTANCE, statsRequest, listener);
+    }
+";
+
+/// A class around `member` whose other code differs per class, so the
+/// member and not the class is the clone.
+fn java_class(name: &str, member: &str) -> String {
+    let field = match name {
+        "A" => "private int padding;",
+        _ => "private final Map<String, Integer> counts = new HashMap<>();",
+    };
+    format!("class {name} {{\n    {field}\n\n{member}}}\n")
+}
+
+/// Where each occurrence of the best group starts, by file.
+fn best_group_starts(a: &Analysis) -> Vec<(String, u32)> {
+    let g = a.group(1, false);
+    g.occurrences
+        .iter()
+        .map(|o| (o.file.clone(), o.start_line))
+        .collect()
+}
+
+// Catches a marker annotation splitting a method from its copy: a copy
+// moved to a class where nothing is overridden loses `@Override`, and only
+// the body matched, so the signature was left out of the extraction.
+#[test]
+fn a_marker_annotation_does_not_split_a_method_from_its_copy() {
+    let annotated = format!("    @Override\n{STATS}");
+    let a = scan(&[
+        ("A.java", &java_class("A", &annotated)),
+        ("B.java", &java_class("B", STATS)),
+    ]);
+    assert_eq!(
+        best_group_starts(&a),
+        [("A.java".to_string(), 4), ("B.java".to_string(), 4)]
+    );
+}
+
+// Catches skipping the annotation but keeping the modifier list it leaves
+// empty: `@Override void x()` has a modifiers node that `void x()` lacks.
+#[test]
+fn a_method_whose_only_modifier_is_a_marker_matches_its_copy() {
+    let bare = STATS.replace("protected ", "");
+    let annotated = format!("    @Override\n{bare}");
+    let a = scan(&[
+        ("A.java", &java_class("A", &annotated)),
+        ("B.java", &java_class("B", &bare)),
+    ]);
+    assert_eq!(
+        best_group_starts(&a),
+        [("A.java".to_string(), 4), ("B.java".to_string(), 4)]
+    );
+}
+
+// Catches ignoring every annotation: one with arguments configures the
+// method (`@Cacheable("stats")`, `@Transactional(readOnly = true)`), so a
+// copy without it is not the same method.
+#[test]
+fn an_annotation_with_arguments_still_tells_methods_apart() {
+    let annotated = format!("    @Cacheable(\"stats\")\n{STATS}");
+    let a = scan(&[
+        ("A.java", &java_class("A", &annotated)),
+        ("B.java", &java_class("B", STATS)),
+    ]);
+    assert_eq!(
+        best_group_starts(&a),
+        [("A.java".to_string(), 5), ("B.java".to_string(), 4)]
+    );
+}
