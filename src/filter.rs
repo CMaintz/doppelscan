@@ -12,6 +12,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 
+use anyhow::Context;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use ignore::overrides::{Override, OverrideBuilder};
 use rustc_hash::FxHashMap;
@@ -63,7 +64,9 @@ impl PathFilter {
     pub fn new(root: &Path, opts: &ScanOptions) -> anyhow::Result<Self> {
         let rules = opts.rules.iter().map(compile);
         Ok(Self {
-            root: root.canonicalize()?,
+            root: root
+                .canonicalize()
+                .with_context(|| format!("scanning {}", root.display()))?,
             given_root: root.to_path_buf(),
             overrides: exclude_overrides(root, &opts.exclude)?,
             rules: Arc::new(rules.collect::<anyhow::Result<_>>()?),

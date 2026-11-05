@@ -139,7 +139,12 @@ impl Engine {
             return None;
         }
         let stamp = (meta.modified().ok()?, meta.len());
-        let key = (root.to_path_buf(), path.to_path_buf(), strict, file.included);
+        let key = (
+            root.to_path_buf(),
+            path.to_path_buf(),
+            strict,
+            file.included,
+        );
         if let Some(hit) = self
             .cache
             .lock()

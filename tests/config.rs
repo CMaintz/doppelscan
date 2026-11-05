@@ -500,7 +500,11 @@ fn repo_with_marked_pair(name: &str, config: &str) -> PathBuf {
     std::fs::remove_dir_all(dir.join("src")).unwrap();
     let marked = format!("{MARKED}{CLONE}");
     write(&dir, "generated/a.ts", &marked);
-    write(&dir, "generated/b.ts", &marked.replace("sumTotals", "sumFees"));
+    write(
+        &dir,
+        "generated/b.ts",
+        &marked.replace("sumTotals", "sumFees"),
+    );
     dir
 }
 
@@ -652,4 +656,81 @@ fn a_config_in_an_included_directory_still_applies() {
     let dir = repo_with_config("reach-included", "include = [\"vendor/ours/\"]\n");
     write(&dir, "vendor/ours/.doppelscan.toml", "bogus = 1\n");
     assert_eq!(run(&dir, &["."]).0, 2);
+}
+
+// Catches `config` accepting what a scan refuses: it would show a language
+// list as working that stops every scan.
+#[test]
+fn config_refuses_an_unknown_language_like_a_scan() {
+    let dir = repo_with_config("show-only", "");
+    assert_eq!(run(&dir, &["config", "--only", "bogus"]).0, 2);
+    let dir = repo_with_config("show-only-file", "only = [\"bogus\"]\n");
+    assert_eq!(run(&dir, &["."]).0, 2);
+    assert_eq!(run(&dir, &["config"]).0, 2);
+}
+
+// Catches `config` showing a minimum no scan uses: clones below the stored
+// floor are never found, whatever is asked for.
+#[test]
+fn config_shows_the_token_floor_a_scan_applies() {
+    let dir = repo_with_config("show-floor", "");
+    let shown = settings_json(&dir, &["--min-tokens", "3"]);
+    assert_eq!(setting(&shown, "min-tokens")["value"], 8);
+    assert_eq!(setting(&shown, "min-tokens")["from"], "flag");
+    let dir = repo_with_config("show-floor-file", "min-tokens = 3\n");
+    let shown = settings_json(&dir, &[]);
+    assert_eq!(setting(&shown, "min-tokens")["value"], 8);
+}
+
+// Catches `config` describing settings for a path no scan could read.
+#[test]
+fn config_fails_on_a_missing_path_like_a_scan() {
+    let dir = repo_with_config("show-missing", "");
+    assert_eq!(run(&dir, &["nothing-here"]).0, 2);
+    let (code, _, err) = run(&dir, &["config", "nothing-here"]);
+    assert_eq!(code, 2);
+    assert!(err.contains("nothing-here"), "{err}");
+}
+
+// Catches `config` passing a tree whose nested config stops every scan,
+// and failing on one the flags say not to read.
+#[test]
+fn config_fails_on_a_broken_nested_config_like_a_scan() {
+    let dir = repo_with_config("show-nested", "");
+    write(&dir, "src/.doppelscan.toml", "bogus = 1\n");
+    assert_eq!(run(&dir, &["config"]).0, 2);
+    assert_eq!(run(&dir, &["config", "--no-config"]).0, 0);
+}
+
+// Catches flag excludes going unshown, so the list of what a scan leaves
+// out would be short by exactly what was just typed.
+#[test]
+fn config_shows_exclude_flags() {
+    let dir = repo_with_config("show-exclude", "exclude = [\"legacy/\"]\n");
+    let shown = settings_json(&dir, &["--exclude", "x/*.ts"]);
+    let lists = shown["exclude"].as_array().unwrap();
+    let flags = lists.iter().find(|l| l["file"] == "flag").unwrap();
+    assert_eq!(flags["patterns"], json!(["x/*.ts"]));
+    assert_eq!(lists.len(), 2, "{shown}");
+}
+
+// Catches the output implying the listed files are all a scan reads, and
+// the note showing when nested configs really are not read.
+#[test]
+fn config_says_nested_configs_are_not_listed_only_when_they_apply() {
+    let dir = repo_with_config("show-note", "");
+    let says_so = |shown: &Value| shown["notes"].to_string().contains("nested");
+    assert!(says_so(&settings_json(&dir, &[])));
+    assert!(!says_so(&settings_json(&dir, &["--no-config"])));
+}
+
+// Catches patterns from --config being labelled with a file that does not
+// exist, derived from the directory instead of the file read.
+#[test]
+fn config_labels_patterns_with_the_file_that_lists_them() {
+    let dir = repo_with_config("show-label", "");
+    write(&dir, "ci/gate.toml", "exclude = [\"legacy/\"]\n");
+    let shown = settings_json(&dir, &[".", "--config", "ci/gate.toml"]);
+    let label = shown["exclude"][0]["file"].as_str().unwrap();
+    assert!(label.ends_with("gate.toml"), "{label}");
 }

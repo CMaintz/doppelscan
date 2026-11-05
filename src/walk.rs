@@ -140,12 +140,7 @@ fn is_regular_file(entry: &DirEntry) -> bool {
     }
 }
 
-fn found_at(
-    path: &Path,
-    root: &Path,
-    filter: &PathFilter,
-    languages: &[usize],
-) -> Option<Found> {
+fn found_at(path: &Path, root: &Path, filter: &PathFilter, languages: &[usize]) -> Option<Found> {
     let (path, lang) = accept(path, languages)?;
     let included = filter.includes(path.strip_prefix(root).unwrap_or(&path));
     Some(Found {

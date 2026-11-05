@@ -10,7 +10,7 @@ use doppelscan::engine::{Against, Check, Engine, ScanOptions, anchor};
 use doppelscan::lang::{lang_index_by_name, lang_index_for_path};
 use doppelscan::near::{render_near, render_near_summary};
 use doppelscan::report::{Analysis, Detail, render_check, render_group, render_summary};
-use doppelscan::settings::{explain, init_template, render as render_settings};
+use doppelscan::settings::{check_scannable, explain, init_template, render as render_settings};
 use serde::Serialize;
 use serde::ser::{Error as _, SerializeSeq as _, Serializer};
 
@@ -233,7 +233,9 @@ fn show_config(schema: bool, similarity: Option<f32>, c: &Common) -> anyhow::Res
     if schema {
         return emit(&doppelscan::config::schema());
     }
-    let effective = explain(&config(c)?, &requested(c), similarity);
+    let config = config(c)?;
+    check_scannable(&c.path, &config.options(requested(c))?)?;
+    let effective = explain(&config, &requested(c), similarity);
     match c.format {
         Format::Json => emit_json(&effective),
         Format::Text => emit(&render_settings(&effective)),
