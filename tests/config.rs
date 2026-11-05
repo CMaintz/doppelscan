@@ -461,3 +461,15 @@ fn at_refuses_a_location_it_cannot_answer_for() {
         assert!(err.starts_with("error:"), "{err}");
     }
 }
+
+// Catches the CLI and the MCP server drifting to different snippet minimums:
+// the same snippet is then found by one and missed by the other.
+#[test]
+fn similar_finds_a_snippet_smaller_than_the_scan_minimum() {
+    let dir = repo_with_config("similar-min", "min-tokens = 50\n");
+    let snippet = "let acc = 0;\nfor (const x of xs) {\n    if (x.status === \"open\") {\n        acc += x.amount * opts.rate;\n    }\n}\n";
+    std::fs::write(dir.join("snippet.ts"), snippet).unwrap();
+    let (code, out, err) = run(&dir, &["similar", "--file", "snippet.ts", "src"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("<snippet>"), "{out}");
+}

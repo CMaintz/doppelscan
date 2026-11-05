@@ -11,7 +11,7 @@ use rustc_hash::FxHashMap;
 use tree_sitter::Parser;
 
 use crate::baseline::Baseline;
-use crate::detect::{RawGroup, detect};
+use crate::detect::{Occ, RawGroup, detect};
 use crate::filter::{PathFilter, PathRules};
 use crate::index::{FileIndex, MIN_STORED_TOKENS, index_source};
 use crate::report::{Analysis, fingerprint};
@@ -229,46 +229,83 @@ pub fn score(g: &RawGroup) -> u64 {
 
 pub const SNIPPET_PATH: &str = "<snippet>";
 
+/// What a snippet search found.
+pub struct Similar {
+    pub analysis: Analysis,
+    /// Ids of groups holding both the snippet and existing code.
+    pub hits: Vec<usize>,
+    /// Ids of such groups the config accepts as duplication kept on purpose.
+    pub accepted: Vec<usize>,
+}
+
 impl Engine {
     /// Clone groups that include `code`: answers "does this already exist
-    /// somewhere?" before an agent writes or extracts it.
+    /// somewhere?" before an agent writes or extracts it. The parameter
+    /// density limit does not apply: it ranks helpers worth extracting, and
+    /// here a match with every name and literal changed is still a match.
     pub fn similar(
         &self,
         root: &Path,
         code: &str,
         lang: usize,
         opts: &ScanOptions,
-    ) -> anyhow::Result<(Analysis, Vec<usize>)> {
+    ) -> anyhow::Result<Similar> {
         let started = Instant::now();
-        let opts = &opts.narrowed_to(Some(lang));
+        let scan = ScanOptions {
+            max_param_density: f32::INFINITY,
+            accept: Vec::new(),
+            ..opts.narrowed_to(Some(lang))
+        };
+        let files = self.index_with_snippet(root, code, lang, &scan)?;
+        let analysis = analyze(files, &scan, started);
+        let (accepted, hits) = snippet_matches(&analysis, &opts.accept);
+        Ok(Similar {
+            analysis,
+            hits,
+            accepted,
+        })
+    }
+
+    /// The scanned files with the snippet last.
+    fn index_with_snippet(
+        &self,
+        root: &Path,
+        code: &str,
+        lang: usize,
+        opts: &ScanOptions,
+    ) -> anyhow::Result<Vec<Arc<FileIndex>>> {
         let mut files = self.index_tree(root, opts)?;
-        let text = snippet_text(code, lang);
-        files.extend(index_sources(
-            vec![Source {
-                path: SNIPPET_PATH.into(),
-                lang,
-                text,
-            }],
-            opts.strict,
-        ));
-        let analysis = analyze(files, opts, started);
-        let snippet = analysis.files.len() as u32 - 1;
-        let hits = (1..=analysis.groups.len())
-            .filter(|&id| {
-                analysis.groups[id - 1]
-                    .occs
-                    .iter()
-                    .any(|o| o.file == snippet)
-            })
-            .collect();
-        Ok((analysis, hits))
+        let snippet = Source {
+            path: SNIPPET_PATH.into(),
+            lang,
+            text: snippet_text(code, lang),
+        };
+        files.extend(index_sources(vec![snippet], opts.strict));
+        Ok(files)
     }
 }
 
-/// PHP is only parsed as code after an opening tag.
+/// Ids of the groups matching existing code, as (accepted, the others). The
+/// snippet is the last file.
+fn snippet_matches(analysis: &Analysis, accept: &[String]) -> (Vec<usize>, Vec<usize>) {
+    let snippet = analysis.files.len() as u32 - 1;
+    let groups = &analysis.groups;
+    (1..=groups.len())
+        .filter(|&id| matches_existing(&groups[id - 1], snippet))
+        .partition(|&id| accept.contains(&fingerprint(&groups[id - 1])))
+}
+
+/// A group of the snippet's own repeats says nothing about the code base.
+fn matches_existing(group: &RawGroup, snippet: u32) -> bool {
+    let in_snippet = |o: &Occ| o.file == snippet;
+    group.occs.iter().any(in_snippet) && !group.occs.iter().all(in_snippet)
+}
+
+/// PHP is only parsed as code after an opening tag. The tag shares the first
+/// line so the snippet's line numbers stay the caller's.
 fn snippet_text(code: &str, lang: usize) -> String {
     if crate::lang::LANGS[lang].name == "php" && !code.trim_start().starts_with("<?") {
-        format!("<?php\n{code}")
+        format!("<?php {code}")
     } else {
         code.to_string()
     }

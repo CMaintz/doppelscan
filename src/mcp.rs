@@ -18,7 +18,9 @@ use crate::config::{Config, Requested, known_langs};
 use crate::engine::{Against, Engine, ScanOptions};
 use crate::lang::{lang_index_by_name, lang_index_for_path};
 use crate::near::{render_near, render_near_summary};
-use crate::report::{Analysis, Detail, render_check, render_group, render_summary};
+use crate::report::{
+    Analysis, Detail, render_accepted, render_check, render_group, render_summary,
+};
 use crate::settings::explain;
 
 const MODERN: &str = "2026-07-28";
@@ -229,18 +231,10 @@ fn options(root: &Path, args: &Value) -> anyhow::Result<ScanOptions> {
     with_root(root, args, config(root, args)?.options(requested(args)?)?)
 }
 
-/// Snippets are small, so a snippet search keeps its own lower minimum
-/// unless the call sets one; the repository's is meant for whole files.
 fn snippet_options(root: &Path, args: &Value) -> anyhow::Result<ScanOptions> {
-    let asked = requested(args)?;
-    let asked = Requested {
-        min_tokens: asked.min_tokens.or(Some(SNIPPET_MIN_TOKENS)),
-        ..asked
-    };
+    let asked = requested(args)?.for_snippet();
     with_root(root, args, config(root, args)?.options(asked)?)
 }
-
-const SNIPPET_MIN_TOKENS: u32 = 20;
 
 fn with_root(root: &Path, args: &Value, opts: ScanOptions) -> anyhow::Result<ScanOptions> {
     Ok(ScanOptions {
@@ -418,16 +412,17 @@ fn find_similar(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<St
     let lang = lang_index_by_name(lang_name).ok_or_else(|| {
         anyhow::anyhow!("unknown language {lang_name:?}; known: {}", known_langs())
     })?;
-    let (analysis, ids) = engine.similar(
+    let found = engine.similar(
         &scan_root(root, args)?,
         code,
         lang,
         &snippet_options(root, args)?,
     )?;
-    if ids.is_empty() {
+    if found.hits.is_empty() && found.accepted.is_empty() {
         return Ok("No existing code matches this snippet's structure.\n".into());
     }
-    Ok(render(&analysis, &ids, false))
+    let out = render(&found.analysis, &found.hits, false);
+    Ok(out + &render_accepted(&found.analysis, &found.accepted))
 }
 
 /// The same as `doppelscan config --format json`, so an agent sees what a
@@ -537,7 +532,7 @@ fn tool_definitions() -> Value {
         {
             "name": "find_similar_code",
             "title": "Find code like a snippet",
-            "description": "Search the codebase for code structurally equivalent to a snippet (names and literals may differ). Use before writing a helper to find one that already exists. Only fragments of at least min_tokens (default 20 here) are matched, so pass whole statements or functions.",
+            "description": "Search the codebase for code structurally equivalent to a snippet (names and literals may differ). Use before writing a helper to find one that already exists. Only fragments of at least min_tokens (default 20 here) are matched, so pass whole statements or functions. max_param_density does not apply, and a match the repo has accepted is listed as such.",
             "inputSchema": { "type": "object", "properties": with(json!({
                 "code": { "type": "string", "description": "The snippet: whole functions or statements." },
                 "language": { "type": "string", "description": "Language name or file extension of the snippet." },

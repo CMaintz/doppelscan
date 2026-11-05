@@ -363,8 +363,8 @@ fn similar_code_is_found_in_an_opt_in_language() {
         ..ScanOptions::default()
     };
     let yaml = lang_index_by_name("yaml").unwrap();
-    let (_, hits) = Engine::default().similar(&dir, STEPS, yaml, &opts).unwrap();
-    assert_eq!(hits.len(), 1);
+    let found = Engine::default().similar(&dir, STEPS, yaml, &opts).unwrap();
+    assert_eq!(found.hits.len(), 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -524,3 +524,81 @@ fn duplicates_at_an_inverted_range_is_a_tool_error() {
     assert_eq!(reply["result"]["isError"], true, "{reply}");
     assert!(tool_text(&reply).contains("8-3"), "{reply}");
 }
+
+fn similar(engine: &Engine, root: &Path, code: &str, language: &str) -> String {
+    let args = json!({ "code": code, "language": language });
+    let reply = tool(engine, root, "find_similar_code", args);
+    tool_text(&reply).to_string()
+}
+
+// Catches a snippet that repeats itself counting as a match: the only
+// copies are its own, so the agent is told code exists that does not.
+#[test]
+fn a_snippet_repeating_itself_is_not_a_match() {
+    let (engine, root) = (Engine::default(), fixture("self-match"));
+    let line = "registry.publish(order.customer.id, order.total * config.rate, \"paid\", { retry: true, delay: 100 });\n";
+    let text = similar(&engine, &root, &format!("{line}\n{line}"), "ts");
+    assert!(text.starts_with("No existing code"), "{text}");
+}
+
+// Catches snippet search applying the density limit meant for ranking
+// helpers: with every name and literal changed a match is all parameters,
+// which is what the tool promises to find.
+#[test]
+fn a_snippet_differing_in_every_name_and_literal_still_matches() {
+    let (engine, root) = (Engine::default(), fixture("density"));
+    let existing = "export function loadUser(cache: Store): Result {
+    audit.record(\"loading\", 1);
+    metrics.bump(\"users\", 2);
+    tracer.start(\"span\", 3);
+    queue.push(\"job\", 4);
+    return registry.fetch(\"key\", 5);
+}
+";
+    std::fs::write(root.join("src/c.ts"), existing).unwrap();
+    let snippet = "function dropOrder(ledger: Vault): Outcome {
+    journal.write(\"closing\", 10);
+    gauges.raise(\"orders\", 20);
+    probes.begin(\"trace\", 30);
+    inbox.send(\"task\", 40);
+    return catalog.lookup(\"slot\", 50);
+}
+";
+    let text = similar(&engine, &root, snippet, "ts");
+    assert!(text.contains("src/c.ts:1-7"), "{text}");
+}
+
+// Catches the opening tag a tagless PHP snippet is given shifting every
+// line, so results point past the code the caller sent.
+#[test]
+fn a_php_snippet_without_a_tag_keeps_its_line_numbers() {
+    let (engine, root) = (Engine::default(), fixture("php"));
+    let function = "function sumTotals(array $orders, float $rate): float {
+    $total = 0;
+    foreach ($orders as $order) {
+        $total += $order->amount * $rate;
+    }
+    return round($total, 2);
+}
+";
+    std::fs::write(root.join("src/c.php"), format!("<?php\n{function}")).unwrap();
+    let text = similar(&engine, &root, function, "php");
+    assert!(text.contains("<snippet>:1-7"), "{text}");
+}
+
+// Catches an accepted clone reading as "nothing like this exists", which
+// sends the agent off to write a further copy of it.
+#[test]
+fn a_match_on_an_accepted_clone_says_so() {
+    let (engine, root) = (Engine::default(), fixture("accepted"));
+    let args = json!({ "path": "src", "min_tokens": 20 });
+    let found = tool(&engine, &root, "find_duplicates", args);
+    let text = tool_text(&found);
+    let fingerprint = text.split('[').nth(1).unwrap().split(']').next().unwrap();
+    let config = format!("[[accept]]\nfingerprint = \"{fingerprint}\"\nreason = \"on purpose\"\n");
+    std::fs::write(root.join(".doppelscan.toml"), config).unwrap();
+    let text = similar(&engine, &root, CLONE, "ts");
+    assert!(!text.starts_with("No existing code"), "{text}");
+    assert!(text.contains("accepted"), "{text}");
+    assert!(text.contains("src/a.ts:2-10"), "{text}");
+}

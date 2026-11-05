@@ -309,6 +309,19 @@ pub struct Requested {
     pub check_min_tokens: Option<u32>,
 }
 
+impl Requested {
+    /// Snippets are small, so a snippet search keeps its own lower minimum
+    /// unless the call sets one; the repository's is meant for whole files.
+    pub fn for_snippet(self) -> Self {
+        Self {
+            min_tokens: self.min_tokens.or(Some(SNIPPET_MIN_TOKENS)),
+            ..self
+        }
+    }
+}
+
+const SNIPPET_MIN_TOKENS: u32 = 20;
+
 fn languages(names: &[String]) -> anyhow::Result<Vec<usize>> {
     names
         .iter()

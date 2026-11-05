@@ -332,6 +332,23 @@ fn indent(text: &str) -> String {
         .join("\n")
 }
 
+/// Snippet matches left out of the hits because the config accepts them;
+/// empty when there are none. Saying nothing would read as "no such code".
+pub fn render_accepted(analysis: &Analysis, ids: &[usize]) -> String {
+    if ids.is_empty() {
+        return String::new();
+    }
+    let mut out =
+        String::from("\nMatches accepted in the config as duplication kept on purpose:\n");
+    for &id in ids {
+        out.push_str(&format!(
+            "\n{}",
+            render_group(&analysis.group(id, false), Detail::Brief)
+        ));
+    }
+    out
+}
+
 /// New groups in full (an agent has to see every copy to decide which one
 /// to keep), then a hint when the baseline file can shrink.
 pub fn render_check(check: &Check, against: &Against) -> String {

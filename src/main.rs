@@ -9,7 +9,9 @@ use doppelscan::config::{Config, Requested, Source, known_langs};
 use doppelscan::engine::{Against, Check, Engine, ScanOptions, anchor};
 use doppelscan::lang::{lang_index_by_name, lang_index_for_path};
 use doppelscan::near::{render_near, render_near_summary};
-use doppelscan::report::{Analysis, Detail, render_check, render_group, render_summary};
+use doppelscan::report::{
+    Analysis, Detail, render_accepted, render_check, render_group, render_summary,
+};
 use doppelscan::settings::{explain, init_template, render as render_settings};
 use serde::Serialize;
 use serde::ser::{Error as _, SerializeSeq as _, Serializer};
@@ -46,7 +48,8 @@ enum Command {
         #[command(flatten)]
         common: Common,
     },
-    /// Clone groups containing a snippet read from --file or stdin.
+    /// Clone groups containing a snippet read from --file or stdin. Snippets
+    /// are small, so --min-tokens defaults to 20 here.
     Similar {
         #[arg(long)]
         file: Option<PathBuf>,
@@ -408,22 +411,28 @@ fn similar(
     lang: Option<String>,
     common: &Common,
 ) -> anyhow::Result<()> {
-    let code = match &file {
-        Some(f) => std::fs::read_to_string(f)?,
-        None => {
-            let mut s = String::new();
-            std::io::stdin().read_to_string(&mut s)?;
-            s
-        }
-    };
+    let code = read_snippet(file.as_deref())?;
     let lang = match (&lang, &file) {
         (Some(l), _) => lang_index_by_name(l),
         (None, Some(f)) => lang_index_for_path(f),
         (None, None) => None,
     }
     .with_context(|| format!("pass --lang (one of: {})", known_langs()))?;
-    let (analysis, hits) = engine.similar(&common.path, &code, lang, &options(common)?)?;
-    print_groups(&analysis, &hits, false, common.format)
+    let opts = config(common)?.options(requested(common).for_snippet())?;
+    let found = engine.similar(&common.path, &code, lang, &opts)?;
+    print_groups(&found.analysis, &found.hits, false, common.format)?;
+    let accepted = render_accepted(&found.analysis, &found.accepted);
+    let _ = write!(std::io::stderr(), "{accepted}");
+    Ok(())
+}
+
+fn read_snippet(file: Option<&Path>) -> anyhow::Result<String> {
+    if let Some(f) = file {
+        return Ok(std::fs::read_to_string(f)?);
+    }
+    let mut s = String::new();
+    std::io::stdin().read_to_string(&mut s)?;
+    Ok(s)
 }
 
 fn check(
