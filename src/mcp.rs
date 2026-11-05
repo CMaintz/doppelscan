@@ -393,7 +393,7 @@ fn duplicates_at(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<S
     let (from, to) = line_range(args)?;
     let opts = options(root, args)?.narrowed_to(lang_index_for_path(file.as_ref()));
     let analysis = engine.scan(&scan_root(root, args)?, &opts)?;
-    let ids = analysis.overlapping(file, from, to);
+    let ids = analysis.overlapping(file, from, to)?;
     if ids.is_empty() {
         return Ok(format!(
             "No clones overlap {file}:{from}-{to} (min_tokens {}).\n",

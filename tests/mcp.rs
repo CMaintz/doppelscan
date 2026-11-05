@@ -472,3 +472,55 @@ fn an_unknown_group_says_what_would_find_it() {
         assert!(text.contains(wanted), "{wanted}: {text}");
     }
 }
+
+fn at(engine: &Engine, root: &Path, file: &str) -> Value {
+    let args = json!({ "file": file, "start_line": 5, "min_tokens": 20 });
+    tool(engine, root, "duplicates_at", args)
+}
+
+// Catches suffix matching: `a.ts` answering for `src/a.ts`, or the reverse,
+// reports another file's clones for the file being edited.
+#[test]
+fn duplicates_at_means_exactly_the_file_named() {
+    let (engine, root) = (Engine::default(), fixture("exact-file"));
+    std::fs::write(root.join("a.ts"), "export const only = 1;\n").unwrap();
+    let root_file = at(&engine, &root, "a.ts");
+    assert_eq!(root_file["result"]["isError"], false, "{root_file}");
+    assert!(
+        tool_text(&root_file).starts_with("No clones"),
+        "{root_file}"
+    );
+    let longer = at(&engine, &root, "packages/src/a.ts");
+    assert_eq!(longer["result"]["isError"], true, "{longer}");
+}
+
+// Catches normalising too little once matching is exact: a shown path has
+// forward slashes and no `./`, but a caller's need not.
+#[test]
+fn duplicates_at_accepts_other_spellings_of_the_path() {
+    let (engine, root) = (Engine::default(), fixture("spelling"));
+    for file in ["src/a.ts", "./src/a.ts", "src\\a.ts", ".\\src\\a.ts"] {
+        let reply = at(&engine, &root, file);
+        assert!(tool_text(&reply).contains("src/b.ts:2-10"), "{reply}");
+    }
+}
+
+// Catches a typo in the path reading as "this code is not duplicated".
+#[test]
+fn duplicates_at_a_file_outside_the_scan_is_a_tool_error() {
+    let (engine, root) = (Engine::default(), fixture("no-file"));
+    let reply = at(&engine, &root, "src/missing.ts");
+    assert_eq!(reply["result"]["isError"], true, "{reply}");
+    assert!(tool_text(&reply).contains("src/missing.ts"), "{reply}");
+}
+
+// Catches the overlap test accepting a range that ends before it starts,
+// which reads as a match when both ends fall inside an occurrence.
+#[test]
+fn duplicates_at_an_inverted_range_is_a_tool_error() {
+    let (engine, root) = (Engine::default(), fixture("inverted"));
+    let args = json!({ "file": "src/a.ts", "start_line": 8, "end_line": 3, "min_tokens": 20 });
+    let reply = tool(&engine, &root, "duplicates_at", args);
+    assert_eq!(reply["result"]["isError"], true, "{reply}");
+    assert!(tool_text(&reply).contains("8-3"), "{reply}");
+}

@@ -383,7 +383,7 @@ fn at(engine: &Engine, location: &str, common: &Common) -> anyhow::Result<()> {
     let analysis = engine.scan(&common.path, &opts)?;
     print_groups(
         &analysis,
-        &analysis.overlapping(&file, from, to),
+        &analysis.overlapping(&file, from, to)?,
         true,
         common.format,
     )

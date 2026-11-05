@@ -445,3 +445,19 @@ fn only_the_exact_fingerprint_is_accepted() {
     std::fs::write(dir.join(".doppelscan.toml"), config).unwrap();
     assert_eq!(group_count(&dir, &["."]), 1);
 }
+
+// Catches `at` keeping its own lenient lookup: an inverted range or a
+// mistyped file would exit 0 with an empty report, so a script reads the
+// code as unduplicated.
+#[test]
+fn at_refuses_a_location_it_cannot_answer_for() {
+    let dir = repo_with_config("at-errors", "min-tokens = 20\n");
+    let (code, out, err) = run(&dir, &["at", "./src/b.ts:4"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("src/a.ts"), "{out}");
+    for location in ["src/b.ts:9-2", "b.ts:4", "src/missing.ts"] {
+        let (code, out, err) = run(&dir, &["at", location]);
+        assert_eq!(code, 2, "{location}: {out}");
+        assert!(err.starts_with("error:"), "{err}");
+    }
+}

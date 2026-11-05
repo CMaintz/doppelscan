@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 
-use crate::detect::RawGroup;
+use crate::detect::{Occ, RawGroup};
 use crate::engine::{Against, Check, score};
 use crate::index::FileIndex;
 use crate::variation::{Kind, Variation, analyze, template};
@@ -88,7 +88,7 @@ impl Analysis {
         }
     }
 
-    fn location(&self, o: &crate::detect::Occ) -> Location {
+    fn location(&self, o: &Occ) -> Location {
         let file = &self.files[o.file as usize];
         Location {
             file: file.path.clone(),
@@ -130,20 +130,25 @@ impl Analysis {
     }
 
     /// Groups with an occurrence overlapping `file` lines `[from, to]`.
-    pub fn overlapping(&self, file: &str, from: u32, to: u32) -> Vec<usize> {
+    /// `file` is a path as results show it, with either separator and an
+    /// optional leading `./`. Fails on an inverted range and on a file this
+    /// scan did not read, which "no clones here" would misreport.
+    pub fn overlapping(&self, file: &str, from: u32, to: u32) -> anyhow::Result<Vec<usize>> {
+        anyhow::ensure!(from <= to, "line range {from}-{to} ends before it starts");
         let file = file.replace('\\', "/");
-        (1..=self.groups.len())
-            .filter(|&id| {
-                self.groups[id - 1].occs.iter().any(|o| {
-                    let path = &self.files[o.file as usize].path;
-                    (path == &file
-                        || path.ends_with(&format!("/{file}"))
-                        || file.ends_with(&format!("/{path}")))
-                        && o.start_line <= to
-                        && from <= o.end_line
-                })
-            })
-            .collect()
+        let file = file.trim_start_matches("./");
+        anyhow::ensure!(
+            self.files.iter().any(|f| f.path == file),
+            "{file} is not among the {} files scanned: it is missing, excluded, generated or \
+             in another language; pass the path as results show it",
+            self.files.len()
+        );
+        let covers = |o: &Occ| {
+            self.files[o.file as usize].path == file && o.start_line <= to && from <= o.end_line
+        };
+        Ok((1..=self.groups.len())
+            .filter(|&id| self.groups[id - 1].occs.iter().any(covers))
+            .collect())
     }
 
     pub fn summary(&self) -> Summary {

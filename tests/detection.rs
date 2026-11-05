@@ -347,9 +347,8 @@ fn a_whole_fingerprint_resolves_even_if_it_is_all_digits() {
 #[test]
 fn overlapping_finds_the_group_covering_a_line() {
     let a = scan(&[("src/a.ts", SUM_TOTALS), ("src/b.ts", SUM_REFUNDS)]);
-    assert_eq!(a.overlapping("src/b.ts", 5, 5), vec![1]);
-    assert_eq!(a.overlapping("b.ts", 5, 5), vec![1]);
-    assert!(a.overlapping("src/b.ts", 40, 50).is_empty());
+    assert_eq!(a.overlapping("src/b.ts", 5, 5).unwrap(), vec![1]);
+    assert!(a.overlapping("src/b.ts", 40, 50).unwrap().is_empty());
 }
 
 // Catches a grammar whose identifier or literal kinds are misclassified,
