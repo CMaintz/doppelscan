@@ -447,3 +447,57 @@ fn a_pair_scoring_exactly_the_threshold_is_reported() {
     assert_eq!(gs.len(), 1, "{gs:?}");
     assert_eq!(gs[0].similarity, 0.6);
 }
+
+const KOTLIN_BODY: &str = "    val first = it.items.filter { item -> item.active }
+    val total = first.sumOf { item -> item.amount * rate }
+    val label = \"${it.name}: ${total}\"
+    report.write(label, first.size, it.currency)
+";
+
+/// The body as a block passed to `with`, where the grammar wraps the lambda
+/// in an `annotated_lambda` covering exactly the same text.
+fn kotlin_with(extra: &str) -> String {
+    format!("val q = with(x) {{\n{KOTLIN_BODY}{extra}    label\n}}\n")
+}
+
+/// The body as a plain function, with no wrapper around it.
+fn kotlin_fun(name: &str, extra: &str) -> String {
+    format!("fun {name}(it: Order) {{\n{KOTLIN_BODY}{extra}    return label\n}}\n")
+}
+
+// Catches a grammar wrapper with the same span as its lambda counting as a
+// second unit: one function listed twice, with x and score inflated.
+#[test]
+fn a_function_is_listed_once_whatever_wraps_it() {
+    let files = [
+        ("a.kt", kotlin_fun("one", "    log(total)\n")),
+        ("b.kt", kotlin_fun("two", "    trace(label)\n")),
+        ("c.kt", kotlin_with("")),
+    ];
+    let gs = groups(&scan_near(&files, 0.5));
+    assert_eq!(gs.len(), 1, "{gs:?}");
+    let g = &gs[0];
+    let at: Vec<_> = g
+        .occurrences
+        .iter()
+        .map(|o| (&o.file, o.start_line))
+        .collect();
+    assert_eq!(g.occurrences.len(), 3, "{at:?}");
+    assert_eq!(g.score, g.tokens as u64 * 2);
+}
+
+// Catches a wrapper being told apart from the lambda it wraps: a block
+// passed to `with` and its exact copy passed as a plain argument are the
+// same code, so which file sorts first must not turn them into a 100%
+// near pair.
+#[test]
+fn a_wrapped_lambda_and_its_bare_copy_are_left_to_the_exact_scan() {
+    let block = format!("{{\n{KOTLIN_BODY}    label\n}}\n");
+    let wrapped = format!("val q = with(x) {block}");
+    let bare = format!("val r = with(x, {block})");
+    for (first, second) in [(&wrapped, &bare), (&bare, &wrapped)] {
+        let files = [("a.kt", first.clone()), ("b.kt", second.clone())];
+        let gs = groups(&scan_near(&files, 0.8));
+        assert!(gs.is_empty(), "{gs:?}");
+    }
+}

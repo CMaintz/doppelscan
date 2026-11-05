@@ -147,7 +147,7 @@ pub struct FileIndex {
     /// Child sequences of block-like nodes, split at noise such as imports.
     pub seqs: Seqs,
     /// Functions, methods and lambdas: the units near-miss detection
-    /// compares.
+    /// compares. At most one per span.
     pub units: Vec<Frag>,
     /// Byte offset where each line starts, for mapping leaves to lines.
     pub(crate) line_starts: Vec<u32>,
@@ -426,9 +426,7 @@ impl<'a> Builder<'a> {
         let frag = self.frag(node, frame.hash, frame.leaf_start);
         if is_function_like(self.lang.kind_name(frame.kind)) {
             self.claim_locals(frame.leaf_start);
-            if frag.tokens() >= MIN_STORED_TOKENS {
-                self.units.push(frag);
-            }
+            self.push_unit(frag);
         }
         if frame.scope_pushed {
             self.scope_stack.pop();
@@ -438,6 +436,18 @@ impl<'a> Builder<'a> {
             class,
             named: node.is_named(),
         })
+    }
+
+    /// A wrapper with its lambda's exact span (Kotlin's `annotated_lambda`)
+    /// closes straight after it. The lambda stays and the wrapper goes, so
+    /// a lambda hashes alike however it is passed; deciding later, per
+    /// group, would let file order pick which of the two survives.
+    fn push_unit(&mut self, frag: Frag) {
+        let span = (frag.start, frag.end);
+        let wraps_last = self.units.last().is_some_and(|u| (u.start, u.end) == span);
+        if frag.tokens() >= MIN_STORED_TOKENS && !wraps_last {
+            self.units.push(frag);
+        }
     }
 
     fn leaf(&mut self, node: Node, class: KindClass, field: Option<NonZeroU16>) -> Option<Done> {
