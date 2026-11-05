@@ -155,6 +155,11 @@ config's excludes, `--no-strict` turns off a configured `strict`,
 both cases including configs inside the scanned tree. An unknown key is an
 error.
 
+Patterns in a `--config` file stay relative to that file, so they only
+match under its directory. Kept elsewhere, such as a config shared between
+repositories, its other settings still apply but its patterns match nothing,
+and doppelscan prints a warning to stderr saying so.
+
 ## Ignoring code
 
 Duplication you have decided to keep can be marked in a comment, in any

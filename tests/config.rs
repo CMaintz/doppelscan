@@ -734,3 +734,37 @@ fn config_labels_patterns_with_the_file_that_lists_them() {
     let label = shown["exclude"][0]["file"].as_str().unwrap();
     assert!(label.ends_with("gate.toml"), "{label}");
 }
+
+// Catches a shared config's patterns going silently unused: its min-tokens
+// applies, so nothing hints that its excludes match nothing here.
+#[test]
+fn a_config_elsewhere_warns_that_its_patterns_do_not_reach() {
+    let repo = repo_with_config("outside", "");
+    let shared = repo.with_extension("shared");
+    write(&shared, "shared.toml", "exclude = [\"*.ts\"]\n");
+    let file = shared.join("shared.toml");
+    let (code, _, err) = run(&repo, &[".", "--config", file.to_str().unwrap()]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(err.matches("warning:").count(), 1, "{err}");
+    assert!(err.contains("shared.toml"), "{err}");
+    let args = ["check", ".", "--base", "HEAD", "--config"];
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-qm", "pair"]);
+    let (_, _, err) = run(&repo, &[&args[..], &[file.to_str().unwrap()]].concat());
+    assert_eq!(err.matches("warning:").count(), 1, "{err}");
+}
+
+// Catches warning about what cannot go wrong: settings need no anchor, and
+// patterns under the scan work.
+#[test]
+fn a_config_that_reaches_or_has_no_patterns_does_not_warn() {
+    let repo = repo_with_config("outside-quiet", "");
+    let shared = repo.with_extension("quiet");
+    write(&shared, "shared.toml", "min-tokens = 20\n");
+    let file = shared.join("shared.toml");
+    let (_, _, err) = run(&repo, &[".", "--config", file.to_str().unwrap()]);
+    assert!(!err.contains("warning:"), "{err}");
+    write(&repo, "gate.toml", "exclude = [\"*.ts\"]\n");
+    let (_, _, err) = run(&repo, &["src", "--config", "gate.toml"]);
+    assert!(!err.contains("warning:"), "{err}");
+}

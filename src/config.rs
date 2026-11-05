@@ -223,6 +223,15 @@ impl Config {
         })
     }
 
+    /// Whether a config lists path patterns anchored at a directory that
+    /// does not contain `scanned` (canonical).
+    pub fn has_patterns_outside(&self, scanned: &Path) -> bool {
+        let rules = self.rules.iter().chain(&self.near_rules);
+        rules
+            .filter(|r| !r.exclude.is_empty() || !r.include.is_empty())
+            .any(|r| !scanned.starts_with(&r.dir))
+    }
+
     /// As `options`, with `[near] exclude` added.
     pub fn near_options(&self, asked: Requested) -> anyhow::Result<ScanOptions> {
         let mut opts = self.options(asked)?;

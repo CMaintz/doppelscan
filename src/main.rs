@@ -255,12 +255,33 @@ fn init(path: &Path, force: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Read once per command: reading warns about a `--config` file.
 fn config(c: &Common) -> anyhow::Result<Config> {
-    Config::read(match (&c.config, c.no_config) {
+    let config = Config::read(match (&c.config, c.no_config) {
         (Some(file), _) => Source::File(file),
         (None, true) => Source::None,
         (None, false) => Source::Lookup(&c.path),
-    })
+    })?;
+    if let Some(file) = &c.config {
+        warn_if_patterns_miss(&config, file, &c.path);
+    }
+    Ok(config)
+}
+
+/// Patterns stay anchored at their file's directory, so from a shared
+/// config kept elsewhere they match nothing while its other settings apply.
+fn warn_if_patterns_miss(config: &Config, file: &Path, scanned: &Path) {
+    let Ok(scanned) = scanned.canonicalize() else {
+        return;
+    };
+    if config.has_patterns_outside(&scanned) {
+        let _ = writeln!(
+            std::io::stderr(),
+            "warning: the path patterns in {} only match under its directory, which does not contain {}; here they match nothing.",
+            file.display(),
+            scanned.display()
+        );
+    }
 }
 
 fn requested(c: &Common) -> Requested {
@@ -443,8 +464,10 @@ fn check(
         (None, Some(file)) => Against::File(file),
         (None, None) => Against::Rev("HEAD".into()),
     };
-    let min_new = config(common)?.check_min_tokens(check_min_tokens);
-    let result = engine.check(&common.path, &against, &options(common)?, min_new)?;
+    let config = config(common)?;
+    let min_new = config.check_min_tokens(check_min_tokens);
+    let opts = config.options(requested(common))?;
+    let result = engine.check(&common.path, &against, &opts, min_new)?;
     print_check(&result, &against, common.format)?;
     Ok(if result.new.is_empty() {
         ExitCode::SUCCESS
