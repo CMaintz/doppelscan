@@ -150,7 +150,18 @@ fn similar_classes(
 ) -> Vec<(u32, u32, f32)> {
     let reps: Vec<Unit> = classes.iter().map(|c| c[0]).collect();
     let prints: Vec<Prints> = reps.par_iter().map(|u| winnow(&tokens(files, u))).collect();
-    similar_pairs(files, &reps, &prints, threshold)
+    let mut pairs = similar_pairs(files, &reps, &prints, threshold);
+    pairs.retain(|&(a, b, _)| apart(&classes[a as usize], &classes[b as usize]));
+    pairs
+}
+
+/// Whether some copy of one class sits clear of some copy of the other.
+/// Checked after scoring, because it walks copies. First copies alone would
+/// not do: they depend on which file sorts first, and the two classes can
+/// be nested there and still be a real pair elsewhere.
+fn apart(a: &[Unit], b: &[Unit]) -> bool {
+    let clear = |x: &Unit, y: &Unit| !nested(x, y) && !nested(y, x);
+    a.iter().any(|x| b.iter().any(|y| clear(x, y)))
 }
 
 fn tokens(files: &[Arc<FileIndex>], unit: &Unit) -> Vec<u32> {
@@ -224,7 +235,7 @@ fn similar_pairs(
             |seen, a| {
                 let mut found = Vec::new();
                 for b in candidates_of(a, &prints[a as usize], &index, seen) {
-                    if !comparable(files, &units[a as usize], &units[b as usize]) {
+                    if !same_lang(files, &units[a as usize], &units[b as usize]) {
                         continue;
                     }
                     if let Some(similarity) =
@@ -314,9 +325,8 @@ fn jaccard(a: &Prints, b: &Prints) -> f32 {
     common as f32 / (size(a) + size(b) - common) as f32
 }
 
-fn comparable(files: &[Arc<FileIndex>], a: &Unit, b: &Unit) -> bool {
-    let same_lang = files[a.file as usize].lang == files[b.file as usize].lang;
-    same_lang && !nested(a, b) && !nested(b, a)
+fn same_lang(files: &[Arc<FileIndex>], a: &Unit, b: &Unit) -> bool {
+    files[a.file as usize].lang == files[b.file as usize].lang
 }
 
 fn nested(inner: &Unit, outer: &Unit) -> bool {
@@ -357,8 +367,8 @@ fn clusters(classes: &[Vec<Unit>], edges: &[(u32, u32, f32)]) -> Vec<RawNear> {
         .collect()
 }
 
-/// Only representatives were checked for nesting, so a copy expanded from
-/// a class can sit inside another member; it is the same code twice.
+/// Two classes need only one pair of copies clear of each other to match,
+/// so another copy can sit inside a member; it is the same code twice.
 fn expand(classes: &[Vec<Unit>], ids: &[u32], similarity: f32) -> RawNear {
     let all: Vec<Unit> = ids
         .iter()

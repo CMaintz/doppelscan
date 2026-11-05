@@ -501,3 +501,49 @@ fn a_wrapped_lambda_and_its_bare_copy_are_left_to_the_exact_scan() {
         assert!(gs.is_empty(), "{gs:?}");
     }
 }
+
+// Catches nesting judged on each class's first copy: a wrapper around an
+// arrow and that arrow standing alone are a real pair, but only if the
+// standalone copy happened to sort first.
+#[test]
+fn a_near_pair_does_not_depend_on_which_file_sorts_first() {
+    let arrow = "(orders: Order[], config: Config): number => {
+    let total = 0;
+    for (const order of orders) {
+        if (order.status === \"paid\") { total += order.amount * config.rate; }
+    }
+    return Math.round(total * 100) / 100;
+}";
+    let wrapper = format!("export function make() {{\n    return {arrow};\n}}\n");
+    let alone = format!("export const solo = {arrow};\n");
+    let found = |paths: [&str; 2]| {
+        let files = [(paths[0], wrapper.clone()), (paths[1], alone.clone())];
+        groups(&scan_near(&files, 0.8))
+    };
+    let (wrapper_first, wrapper_last) = (
+        found(["a_wrapper.ts", "b_alone.ts"]),
+        found(["b_wrapper.ts", "a_alone.ts"]),
+    );
+    assert_eq!(wrapper_first.len(), 1, "{wrapper_first:?}");
+    assert_eq!(wrapper_last.len(), 1, "{wrapper_last:?}");
+    assert_eq!(wrapper_first[0].similarity, wrapper_last[0].similarity);
+    assert_eq!(wrapper_first[0].occurrences.len(), 2);
+}
+
+// Catches dropping nesting altogether: a function and the lambda that
+// makes up most of it are the same code, not a pair.
+#[test]
+fn a_function_is_not_a_near_copy_of_its_own_lambda() {
+    let code = "export function make() {
+    return (orders: Order[], config: Config): number => {
+        let total = 0;
+        for (const order of orders) {
+            if (order.status === \"paid\") { total += order.amount * config.rate; }
+        }
+        return Math.round(total * 100) / 100;
+    };
+}
+";
+    let gs = groups(&scan_near(&[("a.ts", code.to_string())], 0.8));
+    assert!(gs.is_empty(), "{gs:?}");
+}
