@@ -17,14 +17,16 @@ pub struct Repeat {
 pub fn suffix_array(text: &[u32]) -> Vec<u32> {
     let n = text.len();
     let mut sa: Vec<u32> = (0..n as u32).collect();
-    let mut rank: Vec<u64> = text.iter().map(|&s| s as u64).collect();
-    let mut next = vec![0u64; n];
+    // Ranks are below n, which fits u32 like the positions do; the sort
+    // key widens them.
+    let mut rank: Vec<u32> = text.to_vec();
+    let mut next = vec![0u32; n];
     let mut k = 1;
     loop {
         let key = |i: u32| {
             let i = i as usize;
-            let second = if i + k < n { rank[i + k] + 1 } else { 0 };
-            (rank[i] << 32) | second
+            let second = if i + k < n { rank[i + k] as u64 + 1 } else { 0 };
+            ((rank[i] as u64) << 32) | second
         };
         sa.par_sort_unstable_by_key(|&i| key(i));
         let distinct = rerank(&sa, &key, &mut next);
@@ -36,8 +38,8 @@ pub fn suffix_array(text: &[u32]) -> Vec<u32> {
     }
 }
 
-fn rerank(sa: &[u32], key: &impl Fn(u32) -> u64, out: &mut [u64]) -> usize {
-    let mut r = 0u64;
+fn rerank(sa: &[u32], key: &impl Fn(u32) -> u64, out: &mut [u32]) -> usize {
+    let mut r = 0u32;
     for w in 0..sa.len() {
         if w > 0 && key(sa[w]) != key(sa[w - 1]) {
             r += 1;

@@ -6,16 +6,20 @@
 //! helper without re-deriving the parameters itself.
 
 pub mod baseline;
+pub mod config;
 pub mod detect;
 pub mod engine;
+pub mod filter;
 mod git;
 mod hash;
+mod ignore;
 pub mod index;
 pub mod lang;
 mod lexical;
 pub mod mcp;
 pub mod near;
 pub mod report;
+pub mod settings;
 mod suffix;
 pub mod variation;
 pub mod walk;

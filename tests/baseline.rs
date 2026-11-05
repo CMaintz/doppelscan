@@ -330,16 +330,61 @@ export function clamp(v: number): number {
 }
 "#;
 
-// Catches `check` scanning with its own defaults instead of the settings
-// the baseline was written with: this clone is below the default minimum.
+// Catches `check` quietly comparing scans made with different settings
+// (or quietly switching to the baseline's): a token minimum changed in a
+// flag or config since the baseline was written must stop the check and
+// say what differs.
 #[test]
-fn check_uses_the_settings_stored_in_the_baseline() {
+fn check_refuses_a_baseline_written_with_other_settings() {
     let dir = repo("settings");
     assert_eq!(doppelscan(&dir, &["baseline"]).0, 0);
+    let (code, out) = run(&dir, &["check", "--min-tokens", "30"]);
+    assert_eq!(code, 2, "{out}");
+    assert!(
+        out.contains("min-tokens") && out.contains("20") && out.contains("30"),
+        "{out}"
+    );
+    std::fs::write(dir.join(".doppelscan.toml"), "min-tokens = 30\n").unwrap();
+    assert_eq!(run(&dir, &["check"]).0, 2);
+    std::fs::write(dir.join(".doppelscan.toml"), "min-tokens = 20\n").unwrap();
+    assert_eq!(run(&dir, &["check"]).0, 0);
+}
+
+// Catches lists compared in the order they were given: the same languages
+// named in another order are the same scan.
+#[test]
+fn check_compares_language_lists_as_sets() {
+    let dir = repo("set-settings");
+    assert_eq!(doppelscan(&dir, &["baseline", "--only", "ts,js"]).0, 0);
+    let (code, out) = doppelscan(&dir, &["check", "--only", "js,ts,ts"]);
+    assert_eq!(code, 0, "{out}");
+}
+
+// Catches prune accepting a scan under other settings: it would drop
+// entries that only stopped matching because the settings changed.
+#[test]
+fn prune_refuses_other_settings() {
+    let dir = repo("prune-settings");
+    assert_eq!(doppelscan(&dir, &["baseline"]).0, 0);
+    let (code, out) = run(&dir, &["baseline", "--prune", "--min-tokens", "30"]);
+    assert_eq!(code, 2, "{out}");
+}
+
+// Catches the check threshold being ignored, or applied to the report so
+// small clones vanish from view instead of only not failing the check.
+#[test]
+fn small_new_clones_under_the_check_threshold_do_not_fail_it() {
+    let dir = repo("threshold");
     std::fs::write(dir.join("src/c.ts"), CLAMP.replace("clamp", "clampA")).unwrap();
     std::fs::write(dir.join("src/d.ts"), CLAMP.replace("clamp", "clampB")).unwrap();
-    let (code, out) = run(&dir, &["check"]);
-    assert_eq!(code, 1, "{out}");
+    assert_eq!(doppelscan(&dir, &["check", "--base", "HEAD"]).0, 1);
+    let args = ["check", "--base", "HEAD", "--check-min-tokens", "500"];
+    let (code, out) = doppelscan(&dir, &args);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("1 smaller new"), "{out}");
+    assert!(out.contains("src/c.ts"), "{out}");
+    std::fs::write(dir.join(".doppelscan.toml"), "[check]\nmin-tokens = 500\n").unwrap();
+    assert_eq!(doppelscan(&dir, &["check", "--base", "HEAD"]).0, 0);
 }
 
 // Catches a scoped check missing the repository's baseline (falling back
@@ -359,6 +404,24 @@ fn checking_a_subdirectory_uses_the_baseline_above_it() {
     git(&dir, &["add", "."]);
     git(&dir, &["commit", "-qm", "copy"]);
     assert_eq!(doppelscan(&dir, &["check", "src"]).0, 1);
+}
+
+// Catches a streamed JSON report drifting from what a serde_json Value
+// writes (keys sorted at every level, pretty-printed, one trailing
+// newline), which scripts reading it have always seen.
+#[test]
+fn json_reports_are_written_as_a_sorted_value() {
+    let dir = repo("json");
+    std::fs::write(dir.join("src/c.ts"), renamed(SUM_TOTALS, 3)).unwrap();
+    for (args, list) in [
+        (&["--format", "json"][..], "groups"),
+        (&["check", "--format", "json"][..], "new"),
+    ] {
+        let (_, out) = doppelscan(&dir, args);
+        let report: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(!report[list].as_array().unwrap().is_empty(), "{out}");
+        assert_eq!(serde_json::to_string_pretty(&report).unwrap() + "\n", out);
+    }
 }
 
 fn repo_with_copy_at(name: &str, path: &str) -> PathBuf {

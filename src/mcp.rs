@@ -14,10 +14,12 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 
 use crate::baseline::Baseline;
+use crate::config::{Config, Requested, known_langs};
 use crate::engine::{Against, Engine, ScanOptions};
-use crate::lang::{LANGS, lang_index_by_name, lang_index_for_path};
+use crate::lang::{lang_index_by_name, lang_index_for_path};
 use crate::near::{render_near, render_near_summary};
 use crate::report::{Analysis, Detail, render_check, render_group, render_summary};
+use crate::settings::explain;
 
 const MODERN: &str = "2026-07-28";
 const LEGACY: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
@@ -149,6 +151,7 @@ fn call_tool(engine: &Engine, root: &Path, params: &Value) -> ToolResult {
         "find_similar_code" => find_similar(engine, root, &args),
         "check_new_duplicates" => check_new(engine, root, &args),
         "find_near_duplicates" => find_near(engine, root, &args),
+        "get_settings" => get_settings(root, &args),
         _ => return Err((-32602, format!("Unknown tool: {name}"))),
     };
     Ok(match outcome {
@@ -188,26 +191,67 @@ fn scan_root(root: &Path, args: &Value) -> anyhow::Result<PathBuf> {
     Ok(path)
 }
 
-fn options(root: &Path, args: &Value, default_min: u64) -> anyhow::Result<ScanOptions> {
-    let languages = str_list(args, "languages")
-        .iter()
-        .map(|l| {
-            lang_index_by_name(l)
-                .ok_or_else(|| anyhow::anyhow!("unknown language {l:?}; known: {}", known_langs()))
-        })
-        .collect::<anyhow::Result<_>>()?;
+fn options(root: &Path, args: &Value) -> anyhow::Result<ScanOptions> {
+    with_root(root, config(root, args)?.options(requested(args))?)
+}
+
+/// Snippets are small, so a snippet search keeps its own lower minimum
+/// unless the call sets one; the repository's is meant for whole files.
+fn snippet_options(root: &Path, args: &Value) -> anyhow::Result<ScanOptions> {
+    let asked = Requested {
+        min_tokens: requested(args).min_tokens.or(Some(SNIPPET_MIN_TOKENS)),
+        ..requested(args)
+    };
+    with_root(root, config(root, args)?.options(asked)?)
+}
+
+const SNIPPET_MIN_TOKENS: u32 = 20;
+
+fn with_root(root: &Path, opts: ScanOptions) -> anyhow::Result<ScanOptions> {
     Ok(ScanOptions {
-        min_tokens: uint_arg(args, "min_tokens", default_min) as u32,
-        strict: args.get("strict").and_then(Value::as_bool).unwrap_or(false),
-        languages,
-        exclude: str_list(args, "exclude"),
         display_base: Some(root.to_path_buf()),
-        ..ScanOptions::default()
+        ..opts
     })
 }
 
-fn known_langs() -> String {
-    LANGS.iter().map(|l| l.name).collect::<Vec<_>>().join(", ")
+fn similarity_arg(args: &Value) -> anyhow::Result<Option<f32>> {
+    let Some(v) = args.get("similarity") else {
+        return Ok(None);
+    };
+    let similarity = v
+        .as_f64()
+        .ok_or_else(|| anyhow::anyhow!("similarity must be a number"))? as f32;
+    anyhow::ensure!(
+        (0.0..=1.0).contains(&similarity),
+        "similarity is a fraction between 0 and 1"
+    );
+    Ok(Some(similarity))
+}
+
+fn requested(args: &Value) -> Requested {
+    Requested {
+        min_tokens: args
+            .get("min_tokens")
+            .and_then(Value::as_u64)
+            .map(|n| n as u32),
+        strict: args.get("strict").and_then(Value::as_bool),
+        only: str_list(args, "languages"),
+        exclude: str_list(args, "exclude"),
+        max_param_density: args
+            .get("max_param_density")
+            .and_then(Value::as_f64)
+            .map(|d| d as f32),
+        check_min_tokens: args
+            .get("check_min_tokens")
+            .and_then(Value::as_u64)
+            .map(|n| n as u32),
+    }
+}
+
+/// The config for the scanned path; a path that does not exist is
+/// reported by the scan itself.
+fn config(root: &Path, args: &Value) -> anyhow::Result<Config> {
+    Config::for_scan(&scan_root(root, args).unwrap_or_else(|_| root.to_path_buf()))
 }
 
 fn render(analysis: &Analysis, ids: &[usize], template: bool) -> String {
@@ -225,7 +269,7 @@ fn render(analysis: &Analysis, ids: &[usize], template: bool) -> String {
 }
 
 fn find_duplicates(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<String> {
-    let analysis = engine.scan(&scan_root(root, args)?, &options(root, args, 50)?)?;
+    let analysis = engine.scan(&scan_root(root, args)?, &options(root, args)?)?;
     let ids = page(args, analysis.groups.len());
     let templates = args
         .get("include_templates")
@@ -255,7 +299,7 @@ fn more_hint(ids: &[usize], total: usize) -> String {
 fn get_group(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<String> {
     let key =
         str_arg(args, "id").ok_or_else(|| anyhow::anyhow!("missing required argument: id"))?;
-    let analysis = engine.scan(&scan_root(root, args)?, &options(root, args, 50)?)?;
+    let analysis = engine.scan(&scan_root(root, args)?, &options(root, args)?)?;
     let id = analysis
         .resolve(key)
         .ok_or_else(|| anyhow::anyhow!("no clone group {key:?}; run find_duplicates again"))?;
@@ -300,13 +344,13 @@ fn duplicates_at(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<S
             u32::MAX as u64
         },
     ) as u32;
-    let opts = options(root, args, 50)?.narrowed_to(lang_index_for_path(file.as_ref()));
+    let opts = options(root, args)?.narrowed_to(lang_index_for_path(file.as_ref()));
     let analysis = engine.scan(&scan_root(root, args)?, &opts)?;
     let ids = analysis.overlapping(file, from, to);
     if ids.is_empty() {
         return Ok(format!(
             "No clones overlap {file}:{from}-{to} (min_tokens {}).\n",
-            uint_arg(args, "min_tokens", 50)
+            opts.min_tokens
         ));
     }
     Ok(render(&analysis, &ids, true))
@@ -324,7 +368,7 @@ fn find_similar(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<St
         &scan_root(root, args)?,
         code,
         lang,
-        &options(root, args, 20)?,
+        &snippet_options(root, args)?,
     )?;
     if ids.is_empty() {
         return Ok("No existing code matches this snippet's structure.\n".into());
@@ -332,20 +376,23 @@ fn find_similar(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<St
     Ok(render(&analysis, &ids, false))
 }
 
-fn find_near(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<String> {
-    let similarity = match args.get("similarity") {
-        None => 0.8,
-        Some(v) => v
-            .as_f64()
-            .ok_or_else(|| anyhow::anyhow!("similarity must be a number"))?,
-    } as f32;
-    anyhow::ensure!(
-        (0.0..=1.0).contains(&similarity),
-        "similarity is a fraction between 0 and 1"
+/// The same as `doppelscan config --format json`, so an agent sees what a
+/// person does.
+fn get_settings(root: &Path, args: &Value) -> anyhow::Result<String> {
+    let effective = explain(
+        &config(root, args)?,
+        &requested(args),
+        similarity_arg(args)?,
     );
+    Ok(serde_json::to_string_pretty(&effective)?)
+}
+
+fn find_near(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<String> {
+    let config = config(root, args)?;
+    let similarity = config.similarity(similarity_arg(args)?);
     let analysis = engine.near(
         &scan_root(root, args)?,
-        &options(root, args, 50)?,
+        &with_root(root, config.near_options(requested(args))?)?,
         similarity,
     )?;
     let ids = page(args, analysis.groups.len());
@@ -371,17 +418,19 @@ fn check_new(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<Strin
         (None, Some(file)) => Against::File(file),
         (None, None) => Against::Rev("HEAD".into()),
     };
-    let check = engine.check(&path, &against, &options(root, args, 50)?)?;
+    let min_new = config(root, args)?.check_min_tokens(requested(args).check_min_tokens);
+    let check = engine.check(&path, &against, &options(root, args)?, min_new)?;
     Ok(render_check(&check, &against))
 }
 
 fn tool_definitions() -> Value {
     let common = json!({
         "path": { "type": "string", "description": "Directory or file to scan, relative to the server root. Default: the root." },
-        "min_tokens": { "type": "integer", "minimum": 8, "description": "Smallest clone reported, in syntax tokens. Default 50." },
+        "min_tokens": { "type": "integer", "minimum": 8, "description": "Smallest clone reported, in syntax tokens. Default 50, or the repo's .doppelscan.toml." },
         "languages": { "type": "array", "items": { "type": "string" }, "description": format!("Restrict to these languages: {}. yaml is scanned only when listed here.", known_langs()) },
         "exclude": { "type": "array", "items": { "type": "string" }, "description": "Globs to skip, e.g. \"**/*.test.ts\"." },
         "strict": { "type": "boolean", "description": "Require identical names and literals (copy-paste clones only)." },
+        "max_param_density": { "type": "number", "description": "Drop groups needing more parameters than this per 100 tokens. Default 8, or the repo's .doppelscan.toml." },
     });
     let with = |extra: Value| {
         let mut props = common.clone();
@@ -441,6 +490,7 @@ fn tool_definitions() -> Value {
             "inputSchema": { "type": "object", "properties": with(json!({
                 "base": { "type": "string", "description": "Git revision to compare against, e.g. \"main\" for a whole branch." },
                 "baseline": { "type": "string", "description": "Baseline file relative to the root. Default: the nearest .doppelscan-baseline.json in path or a parent, up to the repository root." },
+                "check_min_tokens": { "type": "integer", "description": "Only new groups of at least this many tokens fail the check; smaller ones are listed after them. Default: the repo's [check] min-tokens, else min_tokens." },
             })) },
             "annotations": { "readOnlyHint": true },
         },
@@ -449,9 +499,18 @@ fn tool_definitions() -> Value {
             "title": "Find near-duplicate functions",
             "description": "Functions that are mostly the same but not exact clones: a copy with statements added, removed or changed. Each group lists every copy and the line ranges where it differs from the others; read those lines before merging the copies into one function with an option or callback for the difference. Languages read without a grammar (C, shell, SQL, ...) are skipped.",
             "inputSchema": { "type": "object", "properties": with(json!({
-                "similarity": { "type": "number", "minimum": 0, "maximum": 1, "description": "Smallest similarity reported. Default 0.8." },
+                "similarity": { "type": "number", "minimum": 0, "maximum": 1, "description": "Smallest similarity reported. Default 0.8, or the repo's .doppelscan.toml." },
                 "limit": { "type": "integer", "description": "Groups to return; 0 for all. Default 15." },
                 "offset": { "type": "integer", "description": "Skip this many groups (pagination)." },
+            })) },
+            "annotations": { "readOnlyHint": true },
+        },
+        {
+            "name": "get_settings",
+            "title": "Show the scan settings",
+            "description": "The settings a scan of a path uses (from tool arguments, the repository's .doppelscan.toml files or the defaults) and where each comes from, as JSON, plus the excludes, includes and built-in skip list. Use when results look wrong, before suggesting a config change.",
+            "inputSchema": { "type": "object", "properties": with(json!({
+                "similarity": { "type": "number", "minimum": 0, "maximum": 1, "description": "A threshold for near, to see it resolved like the others." },
             })) },
             "annotations": { "readOnlyHint": true },
         },

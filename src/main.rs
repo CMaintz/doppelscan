@@ -1,14 +1,18 @@
-use std::io::{Read as _, Write as _};
+use std::io::{BufWriter, ErrorKind, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Context, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use doppelscan::baseline::{Baseline, DEFAULT_FILE};
+use doppelscan::config::{Config, Requested, Source, known_langs};
 use doppelscan::engine::{Against, Check, Engine, ScanOptions, anchor};
-use doppelscan::lang::{LANGS, lang_index_by_name, lang_index_for_path};
+use doppelscan::lang::{lang_index_by_name, lang_index_for_path};
 use doppelscan::near::{render_near, render_near_summary};
 use doppelscan::report::{Analysis, Detail, render_check, render_group, render_summary};
+use doppelscan::settings::{explain, init_template, render as render_settings};
+use serde::Serialize;
+use serde::ser::{Error as _, SerializeSeq as _, Serializer};
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -61,6 +65,10 @@ enum Command {
         /// Baseline file [default: PATH/.doppelscan-baseline.json].
         #[arg(long)]
         baseline: Option<PathBuf>,
+        /// Only new groups of at least this many tokens fail the check;
+        /// smaller ones are still reported [default: --min-tokens].
+        #[arg(long)]
+        check_min_tokens: Option<u32>,
         #[command(flatten)]
         common: Common,
     },
@@ -80,14 +88,35 @@ enum Command {
     /// changed statements, which the exact scan cannot align. Languages
     /// read without a grammar are skipped.
     Near {
-        /// Smallest similarity reported, 0 to 1.
-        #[arg(long, default_value_t = 0.8)]
-        similarity: f32,
+        /// Smallest similarity reported, 0 to 1 [default: 0.8].
+        #[arg(long)]
+        similarity: Option<f32>,
         /// Groups to show; 0 for all.
         #[arg(long, default_value_t = 20)]
         limit: usize,
         #[command(flatten)]
         common: Common,
+    },
+    /// The settings a scan of PATH uses and where each comes from: a flag,
+    /// a config file or the default.
+    Config {
+        /// Print the config file's JSON schema instead.
+        #[arg(long)]
+        schema: bool,
+        /// Threshold for `near`, to see it resolved like the others.
+        #[arg(long)]
+        similarity: Option<f32>,
+        #[command(flatten)]
+        common: Common,
+    },
+    /// Write a commented .doppelscan.toml for PATH: every setting with its
+    /// default, the languages found and the test files `near` should skip.
+    Init {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Replace an existing config.
+        #[arg(long)]
+        force: bool,
     },
     /// Run the MCP server on stdio.
     Mcp {
@@ -102,12 +131,21 @@ struct Common {
     /// Directory or file to scan.
     #[arg(default_value = ".")]
     path: PathBuf,
-    /// Smallest clone reported, in syntax tokens.
-    #[arg(long, default_value_t = 50)]
-    min_tokens: u32,
+    /// Smallest clone reported, in syntax tokens [default: 50].
+    #[arg(long)]
+    min_tokens: Option<u32>,
     /// Match identifiers and literals exactly (copy-paste clones only).
     #[arg(long)]
     strict: bool,
+    /// Match names and literals loosely even where a config sets strict.
+    #[arg(long, conflicts_with = "strict")]
+    no_strict: bool,
+    /// Read settings from this file instead of looking for .doppelscan.toml.
+    #[arg(long, conflicts_with = "no_config")]
+    config: Option<PathBuf>,
+    /// Ignore any .doppelscan.toml.
+    #[arg(long)]
+    no_config: bool,
     /// Only these languages (comma-separated names or extensions); yaml is
     /// scanned only when named here.
     #[arg(long = "only", value_delimiter = ',')]
@@ -117,9 +155,9 @@ struct Common {
     exclude: Vec<String>,
     /// Drop groups needing more parameters than this per 100 tokens (in
     /// token-level languages, names differing in several places are not
-    /// counted).
-    #[arg(long, default_value_t = 8.0)]
-    max_param_density: f32,
+    /// counted) [default: 8].
+    #[arg(long)]
+    max_param_density: Option<f32>,
     #[arg(long, value_enum, default_value_t = Format::Text)]
     format: Format,
 }
@@ -163,8 +201,9 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Command::Check {
             base,
             baseline,
+            check_min_tokens,
             common,
-        } => return check(&engine, base, baseline, &common),
+        } => return check(&engine, base, baseline, check_min_tokens, &common),
         Command::Baseline {
             prune,
             output,
@@ -175,32 +214,62 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             limit,
             common,
         } => near(&engine, similarity, limit, &common),
+        Command::Config {
+            schema,
+            similarity,
+            common,
+        } => show_config(schema, similarity, &common),
+        Command::Init { path, force } => init(&path, force),
         Command::Mcp { root } => doppelscan::mcp::serve(&engine, &root),
     };
     done.map(|()| ExitCode::SUCCESS)
 }
 
 fn options(c: &Common) -> anyhow::Result<ScanOptions> {
-    let languages = c
-        .only
-        .iter()
-        .map(|l| {
-            lang_index_by_name(l)
-                .with_context(|| format!("unknown language {l:?}; known: {}", known_langs()))
-        })
-        .collect::<anyhow::Result<_>>()?;
-    Ok(ScanOptions {
-        min_tokens: c.min_tokens,
-        strict: c.strict,
-        languages,
-        exclude: c.exclude.clone(),
-        max_param_density: c.max_param_density,
-        display_base: None,
+    config(c)?.options(requested(c))
+}
+
+fn show_config(schema: bool, similarity: Option<f32>, c: &Common) -> anyhow::Result<()> {
+    if schema {
+        return emit(&doppelscan::config::schema());
+    }
+    let effective = explain(&config(c)?, &requested(c), similarity);
+    match c.format {
+        Format::Json => emit_json(&effective),
+        Format::Text => emit(&render_settings(&effective)),
+    }
+}
+
+fn init(path: &Path, force: bool) -> anyhow::Result<()> {
+    let file = path.join(doppelscan::config::FILE);
+    anyhow::ensure!(
+        force || !file.exists(),
+        "{} exists; pass --force to replace it",
+        file.display()
+    );
+    std::fs::write(&file, init_template(path)?)
+        .with_context(|| format!("writing {}", file.display()))?;
+    let _ = writeln!(std::io::stderr(), "Wrote {}.", file.display());
+    Ok(())
+}
+
+fn config(c: &Common) -> anyhow::Result<Config> {
+    Config::read(match (&c.config, c.no_config) {
+        (Some(file), _) => Source::File(file),
+        (None, true) => Source::None,
+        (None, false) => Source::Lookup(&c.path),
     })
 }
 
-fn known_langs() -> String {
-    LANGS.iter().map(|l| l.name).collect::<Vec<_>>().join(", ")
+fn requested(c: &Common) -> Requested {
+    Requested {
+        min_tokens: c.min_tokens,
+        strict: (c.strict || c.no_strict).then_some(c.strict),
+        only: c.only.clone(),
+        exclude: c.exclude.clone(),
+        max_param_density: c.max_param_density,
+        check_min_tokens: None,
+    }
 }
 
 fn scan(engine: &Engine, args: &ScanArgs) -> anyhow::Result<()> {
@@ -221,6 +290,12 @@ fn print_groups(
     template: bool,
     format: Format,
 ) -> anyhow::Result<()> {
+    if format == Format::Json {
+        return emit_json(&Report {
+            groups: Each(|| ids.iter().map(|&id| analysis.group(id, template))),
+            summary: Sorted(analysis.summary()),
+        });
+    }
     let groups: Vec<_> = ids.iter().map(|&id| analysis.group(id, template)).collect();
     // Asking for templates means drilling in, so show every occurrence too.
     let detail = if template {
@@ -228,24 +303,68 @@ fn print_groups(
     } else {
         Detail::Brief
     };
-    let out = if format == Format::Json {
-        let body = serde_json::json!({ "summary": analysis.summary(), "groups": groups });
-        serde_json::to_string_pretty(&body)? + "\n"
-    } else {
-        let mut out = render_summary(&analysis.summary(), groups.len());
-        groups
-            .iter()
-            .for_each(|g| out.push_str(&format!("\n{}", render_group(g, detail))));
-        out
-    };
+    let mut out = render_summary(&analysis.summary(), groups.len());
+    groups
+        .iter()
+        .for_each(|g| out.push_str(&format!("\n{}", render_group(g, detail))));
     emit(&out)
+}
+
+/// A report with sorted keys, built one group at a time: a `Value` tree of
+/// every group would take several times the size of the output on a large
+/// repo.
+#[derive(Serialize)]
+struct Report<G, S> {
+    groups: G,
+    summary: Sorted<S>,
+}
+
+/// Serialized through a `Value`, whose maps sort their keys.
+struct Sorted<T>(T);
+
+impl<T: Serialize> Serialize for Sorted<T> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        serde_json::to_value(&self.0)
+            .map_err(S::Error::custom)?
+            .serialize(s)
+    }
+}
+
+/// The items a closure yields, each made only when it is written.
+struct Each<F>(F);
+
+impl<F, I> Serialize for Each<F>
+where
+    F: Fn() -> I,
+    I: Iterator<Item: Serialize>,
+{
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let mut seq = s.serialize_seq(None)?;
+        for item in (self.0)() {
+            seq.serialize_element(&Sorted(item))?;
+        }
+        seq.end()
+    }
+}
+
+fn emit_json(body: &impl Serialize) -> anyhow::Result<()> {
+    let mut out = BufWriter::new(std::io::stdout().lock());
+    let written = serde_json::to_writer_pretty(&mut out, body)
+        .map_err(std::io::Error::from)
+        .and_then(|()| out.write_all(b"\n"))
+        .and_then(|()| out.flush());
+    ignore_closed_pipe(written)
+}
+
+fn emit(text: &str) -> anyhow::Result<()> {
+    ignore_closed_pipe(std::io::stdout().lock().write_all(text.as_bytes()))
 }
 
 /// A closed pipe (`doppelscan | head`) is a normal way to stop reading, not
 /// an error worth a panic.
-fn emit(text: &str) -> anyhow::Result<()> {
-    match std::io::stdout().lock().write_all(text.as_bytes()) {
-        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+fn ignore_closed_pipe(written: std::io::Result<()>) -> anyhow::Result<()> {
+    match written {
+        Err(e) if e.kind() == ErrorKind::BrokenPipe => Ok(()),
         other => Ok(other?),
     }
 }
@@ -314,6 +433,7 @@ fn check(
     engine: &Engine,
     base: Option<String>,
     baseline: Option<PathBuf>,
+    check_min_tokens: Option<u32>,
     common: &Common,
 ) -> anyhow::Result<ExitCode> {
     let against = match (base, baseline.or_else(|| Baseline::find(&common.path))) {
@@ -321,7 +441,8 @@ fn check(
         (None, Some(file)) => Against::File(file),
         (None, None) => Against::Rev("HEAD".into()),
     };
-    let result = engine.check(&common.path, &against, &options(common)?)?;
+    let min_new = config(common)?.check_min_tokens(check_min_tokens);
+    let result = engine.check(&common.path, &against, &options(common)?, min_new)?;
     print_check(&result, &against, common.format)?;
     Ok(if result.new.is_empty() {
         ExitCode::SUCCESS
@@ -331,22 +452,40 @@ fn check(
 }
 
 fn print_check(result: &Check, against: &Against, format: Format) -> anyhow::Result<()> {
-    let groups: Vec<_> = result
-        .new
-        .iter()
-        .map(|&id| result.analysis.group(id, false))
-        .collect();
     if format == Format::Json {
-        let body = serde_json::json!({
-            "against": against.label(),
-            "new": groups,
-            "resolved": result.resolved,
-            "note": result.note,
-            "summary": result.analysis.summary(),
+        return emit_json(&CheckReport {
+            against: against.label(),
+            new: Each(|| {
+                result
+                    .new
+                    .iter()
+                    .map(|&id| result.analysis.group(id, false))
+            }),
+            note: &result.note,
+            resolved: result.resolved,
+            smaller: Each(|| {
+                result
+                    .smaller
+                    .iter()
+                    .map(|&id| result.analysis.group(id, false))
+            }),
+            summary: Sorted(result.analysis.summary()),
         });
-        return emit(&(serde_json::to_string_pretty(&body)? + "\n"));
     }
     emit(&render_check(result, against))
+}
+
+/// `check`'s report, keys in sorted order like `Report`: against a large
+/// diff, its new groups can be as many as a full scan's.
+#[derive(Serialize)]
+struct CheckReport<'a, G, S> {
+    against: String,
+    new: G,
+    note: &'a Option<String>,
+    resolved: usize,
+    /// New groups under the check's own minimum, which do not fail it.
+    smaller: S,
+    summary: Sorted<doppelscan::report::Summary>,
 }
 
 fn write_baseline(
@@ -363,7 +502,8 @@ fn write_baseline(
     let requested = options(common)?;
     let baseline = if prune {
         let old = Baseline::load(&path)?;
-        let opts = anchored(old.settings.apply(&requested)?, common, &path)?;
+        old.settings.require_same(&requested, &path)?;
+        let opts = anchored(requested, common, &path)?;
         old.pruned(&engine.scan(&common.path, &opts)?)
     } else {
         let opts = anchored(requested, common, &path)?;
@@ -387,20 +527,28 @@ fn anchored(opts: ScanOptions, common: &Common, file: &Path) -> anyhow::Result<S
     })
 }
 
-fn near(engine: &Engine, similarity: f32, limit: usize, common: &Common) -> anyhow::Result<()> {
+fn near(
+    engine: &Engine,
+    similarity: Option<f32>,
+    limit: usize,
+    common: &Common,
+) -> anyhow::Result<()> {
+    let config = config(common)?;
+    let similarity = config.similarity(similarity);
     anyhow::ensure!(
         (0.0..=1.0).contains(&similarity),
         "--similarity is a fraction between 0 and 1"
     );
-    let analysis = engine.near(&common.path, &options(common)?, similarity)?;
-    let groups: Vec<_> = first_ids(limit, analysis.groups.len())
-        .into_iter()
-        .map(|id| analysis.group(id))
-        .collect();
+    let opts = config.near_options(requested(common))?;
+    let analysis = engine.near(&common.path, &opts, similarity)?;
+    let ids = first_ids(limit, analysis.groups.len());
     if common.format == Format::Json {
-        let body = serde_json::json!({ "summary": analysis.summary(), "groups": groups });
-        return emit(&(serde_json::to_string_pretty(&body)? + "\n"));
+        return emit_json(&Report {
+            groups: Each(|| ids.iter().map(|&id| analysis.group(id))),
+            summary: Sorted(analysis.summary()),
+        });
     }
+    let groups: Vec<_> = ids.into_iter().map(|id| analysis.group(id)).collect();
     let mut out = render_near_summary(&analysis, groups.len());
     for g in &groups {
         out.push_str(&format!("\n{}", render_near(g, Detail::Brief)));

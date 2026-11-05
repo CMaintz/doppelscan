@@ -10,6 +10,7 @@ use std::num::NonZeroU16;
 use tree_sitter::{Node, Parser, TreeCursor};
 
 use crate::hash::{combine, hash_bytes, seed};
+use crate::ignore::{ignored_spans, overlaps};
 use crate::lang::{
     KindClass, LANGS, Lang, Syntax, is_binding_site, is_class_like, is_function_like,
     is_member_position,
@@ -34,9 +35,6 @@ pub struct Leaf {
     /// The normalized token (names and literals anonymised unless strict),
     /// for comparing token streams that do not align 1:1.
     pub token: u32,
-    /// For a binding, the leaf index range where its name refers to it: the
-    /// enclosing function for a local, the whole file for a declaration.
-    pub scope: (u32, u32),
 }
 
 const WHOLE_FILE: (u32, u32) = (0, u32::MAX);
@@ -50,7 +48,6 @@ const FIELD_MODIFIERS: &[&str] = &[
     "val",
     "var",
 ];
-const UNCLAIMED: (u32, u32) = (u32::MAX, u32::MAX);
 
 /// What an identifier does where it stands, which decides what an
 /// extracted helper has to do with a name that differs between copies.
@@ -84,8 +81,6 @@ pub struct Frag {
     pub hash: u64,
     pub start: u32,
     pub end: u32,
-    pub start_line: u32,
-    pub end_line: u32,
     pub leaf_start: u32,
     pub leaf_end: u32,
     pub scope: u32,
@@ -99,6 +94,48 @@ impl Frag {
 
 pub const NO_SCOPE: u32 = u32::MAX;
 
+/// Sequences stored end to end, one allocation per file: a Vec per block
+/// would cost a header and spare capacity for each of millions of short
+/// runs.
+#[derive(Default)]
+pub struct Seqs {
+    elems: Vec<Frag>,
+    ends: Vec<u32>,
+}
+
+impl Seqs {
+    pub fn push(&mut self, seq: &[Frag]) {
+        self.elems.extend_from_slice(seq);
+        self.ends.push(self.elems.len() as u32);
+    }
+
+    pub fn get(&self, i: usize) -> &[Frag] {
+        let start = if i == 0 { 0 } else { self.ends[i - 1] };
+        &self.elems[start as usize..self.ends[i] as usize]
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &[Frag]> {
+        (0..self.ends.len()).map(|i| self.get(i))
+    }
+
+    /// Only the elements `keep` accepts, each sequence split where one is
+    /// dropped so no run bridges the gap.
+    fn retain(&mut self, keep: impl Fn(&Frag) -> bool) {
+        let mut kept = Seqs::default();
+        for seq in self.iter() {
+            for run in seq.split(|e| !keep(e)).filter(|r| r.len() >= 2) {
+                kept.push(run);
+            }
+        }
+        *self = kept;
+    }
+
+    fn shrink_to_fit(&mut self) {
+        self.elems.shrink_to_fit();
+        self.ends.shrink_to_fit();
+    }
+}
+
 pub struct FileIndex {
     pub path: String,
     pub lang: usize,
@@ -108,7 +145,7 @@ pub struct FileIndex {
     /// (a statement around a call) are all kept; detection picks one.
     pub nodes: Vec<Frag>,
     /// Child sequences of block-like nodes, split at noise such as imports.
-    pub seqs: Vec<Vec<Frag>>,
+    pub seqs: Seqs,
     /// Functions, methods and lambdas: the units near-miss detection
     /// compares.
     pub units: Vec<Frag>,
@@ -118,9 +155,39 @@ pub struct FileIndex {
     pub scopes: Vec<String>,
     /// Byte range of each scope's definition, parallel to `scopes`.
     pub scope_spans: Vec<(u32, u32)>,
+    /// (leaf, scope start, scope end) for each local, sorted by leaf. Kept
+    /// apart from `Leaf` because few leaves bind a local, and a range in
+    /// every leaf would make the largest table in the index half as big
+    /// again.
+    pub(crate) local_scopes: Vec<(u32, u32, u32)>,
 }
 
 impl FileIndex {
+    /// Fragments touching code marked with ignore comments are dropped, so
+    /// that code matches nothing, exactly or near.
+    pub(crate) fn drop_ignored(&mut self) {
+        let spans = ignored_spans(&self.source, &self.line_starts);
+        if spans.is_empty() {
+            return;
+        }
+        let keep = |f: &Frag| !overlaps(&spans, f.start, f.end);
+        self.nodes.retain(keep);
+        self.units.retain(keep);
+        self.seqs.retain(keep);
+    }
+
+    /// Indexing grows these by doubling, which leaves about a third of the
+    /// index as spare capacity, held for the rest of the scan.
+    pub(crate) fn shrink_to_fit(&mut self) {
+        self.leaves.shrink_to_fit();
+        self.nodes.shrink_to_fit();
+        self.seqs.shrink_to_fit();
+        self.units.shrink_to_fit();
+        self.scopes.shrink_to_fit();
+        self.scope_spans.shrink_to_fit();
+        self.local_scopes.shrink_to_fit();
+    }
+
     pub fn text(&self, start: u32, end: u32) -> &str {
         &self.source[start as usize..end as usize]
     }
@@ -130,8 +197,32 @@ impl FileIndex {
         self.line_starts.partition_point(|&s| s <= byte) as u32
     }
 
+    /// First and last line of `[start, end)`, looked up rather than stored
+    /// in every `Frag`: only reported fragments need them. A grammar's node
+    /// ends on the line of its end offset (tree-sitter's end row), a token
+    /// run on the line of its last byte.
+    pub fn lines(&self, start: u32, end: u32) -> (u32, u32) {
+        let last = match LANGS[self.lang].syntax {
+            Syntax::Tree(_) => end,
+            Syntax::Tokens(_) => end.saturating_sub(1),
+        };
+        (self.line_of(start), self.line_of(last))
+    }
+
     pub fn leaf_text(&self, leaf: &Leaf) -> &str {
         self.text(leaf.start, leaf.end)
+    }
+
+    /// For a binding, the leaf index range where its name refers to it: the
+    /// enclosing function for a local, the whole file for a declaration.
+    /// Meaningless for other leaves.
+    pub fn scope_of(&self, leaf: u32) -> (u32, u32) {
+        if self.leaves[leaf as usize].role != Role::Local {
+            return WHOLE_FILE;
+        }
+        let at = self.local_scopes.partition_point(|s| s.0 < leaf);
+        let (_, start, end) = self.local_scopes[at];
+        (start, end)
     }
 
     pub fn scope_name(&self, scope: u32) -> Option<&str> {
@@ -202,7 +293,8 @@ pub fn index_source(
     let mut builder = Builder::new(&LANGS[lang], &source, strict);
     builder.walk(&mut tree.walk());
     builder.claim_top_level();
-    Some(FileIndex {
+    builder.sort_local_scopes();
+    let mut index = FileIndex {
         path,
         lang,
         leaves: builder.leaves,
@@ -212,8 +304,12 @@ pub fn index_source(
         line_starts: line_starts(&source),
         scopes: builder.scopes,
         scope_spans: builder.scope_spans,
+        local_scopes: builder.local_scopes,
         source,
-    })
+    };
+    index.drop_ignored();
+    index.shrink_to_fit();
+    Some(index)
 }
 
 struct Frame {
@@ -244,8 +340,9 @@ struct Builder<'a> {
     leaves: Vec<Leaf>,
     /// Locals whose function has not closed yet, in leaf order.
     pending_locals: Vec<u32>,
+    local_scopes: Vec<(u32, u32, u32)>,
     nodes: Vec<Frag>,
-    seqs: Vec<Vec<Frag>>,
+    seqs: Seqs,
     units: Vec<Frag>,
     scopes: Vec<String>,
     scope_spans: Vec<(u32, u32)>,
@@ -262,8 +359,9 @@ impl<'a> Builder<'a> {
             lang_seed: hash_bytes(lang.name.as_bytes()),
             leaves: Vec::new(),
             pending_locals: Vec::new(),
+            local_scopes: Vec::new(),
             nodes: Vec::new(),
-            seqs: Vec::new(),
+            seqs: Seqs::default(),
             units: Vec::new(),
             scopes: Vec::new(),
             scope_spans: Vec::new(),
@@ -374,7 +472,10 @@ impl<'a> Builder<'a> {
             LeafClass::Identifier => self.role(node, field),
             _ => Role::Value,
         };
-        let scope = self.scope_for(role);
+        if role == Role::Local {
+            // Its scope is only known when its function closes.
+            self.pending_locals.push(self.leaves.len() as u32);
+        }
         let range = node.byte_range();
         self.leaves.push(Leaf {
             start: range.start as u32,
@@ -382,28 +483,21 @@ impl<'a> Builder<'a> {
             class: leaf_class,
             role,
             token: (hash ^ (hash >> 32)) as u32,
-            scope,
         });
         hash
-    }
-
-    /// A local's scope is only known when its function closes.
-    fn scope_for(&mut self, role: Role) -> (u32, u32) {
-        match role {
-            Role::Declared => WHOLE_FILE,
-            Role::Local => {
-                self.pending_locals.push(self.leaves.len() as u32);
-                UNCLAIMED
-            }
-            _ => (0, 0),
-        }
     }
 
     /// Locals outside any function (script code) live for the whole file.
     fn claim_top_level(&mut self) {
         for i in self.pending_locals.drain(..) {
-            self.leaves[i as usize].scope = WHOLE_FILE;
+            self.local_scopes.push((i, WHOLE_FILE.0, WHOLE_FILE.1));
         }
+    }
+
+    /// Functions claim their locals as they close, innermost first, so the
+    /// table is out of leaf order until sorted; `scope_of` searches it.
+    fn sort_local_scopes(&mut self) {
+        self.local_scopes.sort_unstable();
     }
 
     fn role(&self, node: Node, field: Option<NonZeroU16>) -> Role {
@@ -438,7 +532,7 @@ impl<'a> Builder<'a> {
             && i >= leaf_start
         {
             self.pending_locals.pop();
-            self.leaves[i as usize].scope = (leaf_start, end);
+            self.local_scopes.push((i, leaf_start, end));
         }
     }
 
@@ -539,7 +633,7 @@ impl<'a> Builder<'a> {
 
     fn flush_run(&mut self, elems: Vec<Frag>) {
         if elems.len() >= 2 {
-            self.seqs.push(elems);
+            self.seqs.push(&elems);
         }
     }
 
@@ -549,8 +643,6 @@ impl<'a> Builder<'a> {
             hash,
             start: range.start as u32,
             end: range.end as u32,
-            start_line: node.start_position().row as u32 + 1,
-            end_line: node.end_position().row as u32 + 1,
             leaf_start,
             leaf_end: self.leaves.len() as u32,
             scope: self.scope_stack.last().copied().unwrap_or(NO_SCOPE),

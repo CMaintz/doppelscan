@@ -12,7 +12,8 @@
 
 use crate::hash::{combine, hash_bytes, seed};
 use crate::index::{
-    FileIndex, Frag, Leaf, LeafClass, MIN_STORED_TOKENS, NO_SCOPE, Role, line_starts, placeholder,
+    FileIndex, Frag, Leaf, LeafClass, MIN_STORED_TOKENS, NO_SCOPE, Role, Seqs, line_starts,
+    placeholder,
 };
 use crate::lang::{LANGS, Lexicon};
 
@@ -189,9 +190,9 @@ pub fn index_tokens(
     strict: bool,
     lexicon: &Lexicon,
 ) -> FileIndex {
-    let lines = line_starts(&source);
     let lang_seed = hash_bytes(LANGS[lang].name.as_bytes());
-    let mut builder = Builder::new(&source, &lines, strict, lang_seed);
+    let lines = line_starts(&source);
+    let mut builder = Builder::new(&source, strict, lang_seed);
     for tok in tokenize(&source, lexicon) {
         builder.push(&tok);
     }
@@ -204,7 +205,7 @@ pub fn index_tokens(
         scope_spans,
         ..
     } = builder;
-    FileIndex {
+    let mut index = FileIndex {
         path,
         lang,
         source,
@@ -215,7 +216,11 @@ pub fn index_tokens(
         line_starts: lines,
         scopes,
         scope_spans,
-    }
+        local_scopes: Vec::new(),
+    };
+    index.drop_ignored();
+    index.shrink_to_fit();
+    index
 }
 
 struct Lexer<'a> {
@@ -405,27 +410,25 @@ struct Block {
 
 struct Builder<'a> {
     source: &'a str,
-    line_starts: &'a [u32],
     strict: bool,
     lang_seed: u64,
     leaves: Vec<Leaf>,
     nodes: Vec<Frag>,
-    seqs: Vec<Vec<Frag>>,
+    seqs: Seqs,
     scopes: Vec<String>,
     scope_spans: Vec<(u32, u32)>,
     blocks: Vec<Block>,
 }
 
 impl<'a> Builder<'a> {
-    fn new(source: &'a str, line_starts: &'a [u32], strict: bool, lang_seed: u64) -> Self {
+    fn new(source: &'a str, strict: bool, lang_seed: u64) -> Self {
         Self {
             source,
-            line_starts,
             strict,
             lang_seed,
             leaves: Vec::new(),
             nodes: Vec::new(),
-            seqs: Vec::new(),
+            seqs: Seqs::default(),
             scopes: Vec::new(),
             scope_spans: Vec::new(),
             blocks: vec![Block::new(false, None, lang_seed)],
@@ -495,7 +498,6 @@ impl<'a> Builder<'a> {
                 _ => Role::Value,
             },
             token: (hash ^ (hash >> 32)) as u32,
-            scope: (0, 0),
         });
         self.fold_into_stmt(tok.start, index, hash);
     }
@@ -617,8 +619,6 @@ impl<'a> Builder<'a> {
             hash: stmt.hash,
             start: stmt.start,
             end,
-            start_line: self.line_of(stmt.start),
-            end_line: self.line_of(end.saturating_sub(1)),
             leaf_start: stmt.leaf_start,
             leaf_end: self.leaves.len() as u32,
             scope: self
@@ -630,13 +630,9 @@ impl<'a> Builder<'a> {
         }
     }
 
-    fn line_of(&self, byte: u32) -> u32 {
-        self.line_starts.partition_point(|&s| s <= byte) as u32
-    }
-
     fn flush_run(&mut self, elems: Vec<Frag>) {
         if elems.len() >= 2 {
-            self.seqs.push(elems);
+            self.seqs.push(&elems);
         }
     }
 

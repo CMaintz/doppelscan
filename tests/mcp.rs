@@ -71,7 +71,7 @@ fn both_protocol_eras_are_served() {
     let (engine, root) = (Engine::default(), fixture("eras"));
     let listed = call(&engine, &root, modern("tools/list", json!({}))).unwrap();
     assert_eq!(listed["result"]["resultType"], "complete");
-    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 6);
+    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 7);
     let init = json!({ "jsonrpc": "2.0", "id": 2, "method": "initialize", "params": { "protocolVersion": "2025-06-18" } });
     let reply = call(&engine, &root, init).unwrap();
     assert_eq!(reply["result"]["protocolVersion"], "2025-06-18");

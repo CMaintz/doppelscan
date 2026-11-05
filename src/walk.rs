@@ -6,9 +6,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use ignore::overrides::{Override, OverrideBuilder};
 use ignore::{WalkBuilder, WalkState};
 
+use crate::filter::PathFilter;
 use crate::lang::{LANGS, lang_index_for_path};
 
 const EXCLUDED_DIRS: &[&str] = &[
@@ -83,19 +83,24 @@ pub const MAX_FILE_BYTES: u64 = 1 << 20;
 
 pub fn discover(
     root: &Path,
-    exclude: &[String],
+    filter: &PathFilter,
     languages: &[usize],
 ) -> anyhow::Result<Vec<(PathBuf, usize)>> {
     // A file named directly is scanned even in an opt-in language.
     let named = root.is_file() && languages.is_empty();
     let own: Vec<usize> = lang_index_for_path(root).into_iter().collect();
     let languages = if named { &own[..] } else { languages };
+    let (start, entry_filter) = (root.to_path_buf(), filter.clone());
     let walker = WalkBuilder::new(root)
         .require_git(false)
         .hidden(false)
-        .overrides(exclude_overrides(root, exclude)?)
-        .filter_entry(|e| {
-            !e.file_type().is_some_and(|t| t.is_dir()) || !is_excluded_dir(e.file_name())
+        .overrides(filter.overrides.clone())
+        .filter_entry(move |e| {
+            let rel = e.path().strip_prefix(&start).unwrap_or(e.path());
+            match e.file_type().is_some_and(|t| t.is_dir()) {
+                true => !entry_filter.skips_dir(rel),
+                false => !entry_filter.skips_file(rel),
+            }
         })
         .build_parallel();
     let found = Mutex::new(Vec::new());
@@ -107,47 +112,76 @@ pub fn discover(
             WalkState::Continue
         })
     });
+    if let Some(e) = filter.take_error() {
+        return Err(e);
+    }
     let mut files = found.into_inner().unwrap();
     files.sort();
     Ok(files)
 }
 
-pub fn exclude_overrides(root: &Path, exclude: &[String]) -> anyhow::Result<Override> {
-    let mut overrides = OverrideBuilder::new(root);
-    for glob in exclude {
-        overrides.add(&format!("!{glob}"))?;
-    }
-    Ok(overrides.build()?)
-}
-
 /// The language of a file known from a listing rather than a walk (a git
-/// revision), or `None` when a walk would have skipped it: an excluded or
-/// directory, or an `--exclude` matching it or any parent. `rel` is
+/// revision), or `None` when a walk would have skipped it: a built-in
+/// skipped directory, or an exclude matching it or any parent. `rel` is
 /// relative to the scanned root.
-pub fn accept_listed(rel: &Path, overrides: &Override, languages: &[usize]) -> Option<usize> {
-    let skipped_name = rel.components().any(|c| is_excluded_dir(c.as_os_str()));
+pub fn accept_listed(rel: &Path, filter: &PathFilter, languages: &[usize]) -> Option<usize> {
     let excluded = rel
         .ancestors()
         .filter(|a| !a.as_os_str().is_empty())
-        .any(|a| overrides.matched(a, a != rel).is_ignore());
-    if skipped_name || excluded {
+        .any(|a| filter.overrides.matched(a, a != rel).is_ignore());
+    // Every directory on the way, as the walk would prune it: a file under
+    // an excluded directory stays out even where a pattern re-includes it.
+    let pruned = rel
+        .ancestors()
+        .skip(1)
+        .filter(|a| !a.as_os_str().is_empty())
+        .any(|a| filter.skips_dir(a));
+    if excluded || pruned || filter.skips_file(rel) {
         return None;
     }
     accept(rel, languages).map(|(_, lang)| lang)
 }
 
-fn is_excluded_dir(name: &std::ffi::OsStr) -> bool {
+/// File names never scanned: minified bundles, declaration files and
+/// designer or generator output. `*.x.*` matches anywhere in the name,
+/// `*.x` at its end.
+const SKIPPED_NAMES: &[&str] = &["*.min.*", "*.d.ts", "*.designer.*", "*.g.*"];
+
+fn is_skipped_name(name: &str) -> bool {
+    SKIPPED_NAMES.iter().any(|glob| {
+        let glob = &glob[1..];
+        match glob.strip_suffix('*') {
+            Some(inner) => name.contains(inner),
+            None => name.ends_with(glob),
+        }
+    })
+}
+
+/// The skip list a config cannot see, for `doppelscan config` to show.
+pub struct BuiltInSkips {
+    pub dirs: &'static [&'static str],
+    pub generated_dirs: &'static [&'static str],
+    /// File name globs.
+    pub names: &'static [&'static str],
+    /// A file with one of these in its first KB is taken for generated.
+    pub generated_markers: &'static [&'static str],
+}
+
+pub const BUILT_IN_SKIPS: BuiltInSkips = BuiltInSkips {
+    dirs: EXCLUDED_DIRS,
+    generated_dirs: GENERATED_DIRS,
+    names: SKIPPED_NAMES,
+    generated_markers: GENERATED_MARKERS,
+};
+
+pub(crate) fn is_excluded_dir(name: &std::ffi::OsStr) -> bool {
     name.to_str()
         .is_some_and(|n| EXCLUDED_DIRS.contains(&n) || GENERATED_DIRS.contains(&n))
 }
 
 fn accept(path: &Path, languages: &[usize]) -> Option<(PathBuf, usize)> {
     let name = path.file_name()?.to_str()?.to_ascii_lowercase();
-    if name.contains(".min.")
-        || name.ends_with(".d.ts")
-        || name.contains(".designer.")
-        || name.contains(".g.")
-    {
+    if is_skipped_name(&name) {
         return None;
     }
     let lang = lang_index_for_path(path)?;

@@ -77,6 +77,8 @@ doppelscan at src/user.ts:40-60    # clones touching these lines
 doppelscan similar --lang ts < snippet.ts   # does this code already exist?
 doppelscan near --similarity 0.8   # functions that are copies with edits
 doppelscan --format json           # machine-readable
+doppelscan init                    # write a commented .doppelscan.toml
+doppelscan config                  # the settings in use, and where each comes from
 ```
 
 `near` finds what the exact scan cannot: functions that match except for
@@ -107,6 +109,82 @@ directories (`generated`, `generated-src`, `__generated__` and the like) are
 skipped. Other
 dot-directories, such as `.github`, are scanned.
 
+## Configuration
+
+A `.doppelscan.toml` sets a project's defaults for the CLI and the MCP
+server alike. `doppelscan init` writes one with every setting commented
+out at its default, the languages it found, and the test files it found
+already listed for `near` to skip. `doppelscan config` (or the MCP
+`get_settings` tool) shows the settings a scan uses, where each comes
+from, and the built-in skip list. Editors that read `#:schema` (Taplo,
+Even Better TOML) complete and check the keys from
+`doppelscan.schema.json`.
+
+```toml
+min-tokens = 40
+only = ["ts", "java"]
+exclude = ["legacy/", "*.generated.ts"]
+include = ["vendor/our-fork/"]   # scanned despite the built-in skips
+max-param-density = 10
+strict = false
+
+[near]
+similarity = 0.85
+exclude = ["**/*.test.ts"]        # tests are near copies by design
+```
+
+Settings come from every `.doppelscan.toml` from the scanned directory up
+to the repository root, the nearest winning where two set the same key, so
+a package in a monorepo can refine the root's settings; `root = true`
+stops the search at that file.
+
+`exclude` and `include` use `.gitignore` syntax, relative to the file that
+lists them, and add up across files rather than override. They also apply
+from configs inside the scanned tree, so a package's excludes hold whether
+the scan starts at the package or at the root; that package's other
+settings only apply to a scan that starts inside it. `include` brings back
+directories the built-in list skips (dependencies, build output, generated
+code); inside one, anchor the path (`vendor/ours/`, not `ours/`). As in
+`.gitignore`, nothing inside an excluded directory can be re-included.
+
+A flag or tool argument overrides a setting, `--exclude` adds to the
+config's excludes, `--no-strict` turns off a configured `strict`,
+`--config FILE` reads that file instead and `--no-config` reads none. An
+unknown key is an error.
+
+## Ignoring code
+
+Duplication you have decided to keep can be marked in a comment, in any
+language:
+
+```ts
+// doppelscan-ignore-start
+...
+// doppelscan-ignore-end
+```
+
+The region runs from the line with the start marker to the line with the
+end marker, or to the end of the file when there is none.
+`doppelscan-ignore-file` anywhere in a file ignores all of it. Ignored code
+matches nothing, so a clone that touches it is not reported, while its
+other copies still are when two or more are left. This applies to `near`,
+`check` and the MCP tools too.
+
+Where a comment can't go (vendored or generated code you don't edit), a
+clone can be accepted by its fingerprint, the hex id shown in brackets, in
+`.doppelscan.toml`:
+
+```toml
+[[accept]]
+fingerprint = "b4a94232d76e"
+reason = "Generated from the OpenAPI spec; regenerated, never edited."
+```
+
+An accepted group is left out of every report and never fails `check`,
+however many copies it has. Editing the code changes its fingerprint, so
+the clone comes back for another look. `near` groups have no fingerprint
+and are not affected.
+
 ## Gating new duplication
 
 `doppelscan check` fails (exit 1) only on duplication a change adds, so it
@@ -128,10 +206,16 @@ branch does not exist, `origin/<rev>` is used, as on a CI checkout.
 
 Without `--base`, `check` uses the nearest `.doppelscan-baseline.json` in the
 scanned directory or above it (up to the repository root), and HEAD when
-there is none. A baseline keeps the settings it was written with
-(`--min-tokens`, `--strict`, `--only`, `--exclude`), and `check` uses those
-instead of its own flags so the comparison stays like for like; to change
-them, write the baseline again.
+there is none. Settings come from flags and `.doppelscan.toml` only; a
+baseline records the ones it was written with (`min-tokens`, `strict`,
+`only`, `max-param-density`, `--exclude`) just so `check` and `--prune` can
+refuse, listing the differences, when they have changed since, rather than
+compare unlike scans. To change them, write the baseline again.
+
+`check` fails on any new group the scan reports. To gate on bigger clones
+only while still seeing the small ones, set `[check] min-tokens` in the
+config (or `--check-min-tokens`): new groups under it are listed after
+the others (`smaller` in the JSON) and do not fail the check.
 
 A baseline stores each accepted group's fingerprint, copy count and the
 functions it sits in, not line numbers. Moving or renaming known duplication
@@ -165,6 +249,7 @@ the 2026-07-28 protocol and the older `initialize` handshake.
 | `find_similar_code` | Before writing a helper: does equivalent code already exist? |
 | `check_new_duplicates` | After writing code: did this change duplicate anything? |
 | `find_near_duplicates` | Functions that are copies with small edits, and where each copy differs. |
+| `get_settings` | The settings a scan uses and where each comes from, as `doppelscan config` shows them. |
 
 The server keeps parsed files in memory and re-parses only files whose size or
 mtime changed, so follow-up calls on a large repo take tens of milliseconds.
@@ -236,9 +321,9 @@ skips because they cannot be extracted as one unit.
 - Token-level languages split statements by layout, so the same code
   formatted differently (a statement broken over lines outside brackets)
   can fail to match.
-- Baselines record the languages they cover. One written by an older
-  release (version 1) keeps covering only the grammar languages until it is
-  written again with `doppelscan baseline`.
+- A baseline written by an older release (version 1) records only the
+  grammar languages, so `check` asks for it to be written again with
+  `doppelscan baseline` before comparing.
 
 ## Contributing
 

@@ -8,7 +8,7 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 use crate::engine::ScanOptions;
-use crate::lang::{LANGS, Syntax, lang_index_by_name};
+use crate::lang::{LANGS, Syntax};
 use crate::report::{Analysis, fingerprint};
 
 pub const DEFAULT_FILE: &str = ".doppelscan-baseline.json";
@@ -62,22 +62,47 @@ impl Settings {
         }
     }
 
-    /// `base` with these settings in place of its own.
-    pub fn apply(&self, base: &ScanOptions) -> anyhow::Result<ScanOptions> {
-        let languages = self
-            .languages
-            .iter()
-            .map(|l| lang_index_by_name(l).with_context(|| format!("unknown language {l:?}")))
-            .collect::<anyhow::Result<_>>()?;
-        Ok(ScanOptions {
-            min_tokens: self.min_tokens,
-            strict: self.strict,
-            max_param_density: self.max_param_density,
-            languages,
-            exclude: self.exclude.clone(),
-            ..base.clone()
-        })
+    /// Fails, naming each difference, unless `current` scans as these
+    /// settings did: comparing scans made with different settings would
+    /// report changes nobody made. The baseline records them only to
+    /// check this; the settings themselves come from flags and configs.
+    pub fn require_same(&self, current: &ScanOptions, file: &Path) -> anyhow::Result<()> {
+        let now = Self::from_options(current);
+        let differences: Vec<String> = [
+            (
+                "min-tokens",
+                self.min_tokens.to_string(),
+                now.min_tokens.to_string(),
+            ),
+            ("strict", self.strict.to_string(), now.strict.to_string()),
+            (
+                "max-param-density",
+                self.max_param_density.to_string(),
+                now.max_param_density.to_string(),
+            ),
+            ("languages", set_of(&self.languages), set_of(&now.languages)),
+            ("--exclude", set_of(&self.exclude), set_of(&now.exclude)),
+        ]
+        .into_iter()
+        .filter(|(_, then, now)| then != now)
+        .map(|(key, then, now)| format!("  {key}: baseline {then}, now {now}"))
+        .collect();
+        anyhow::ensure!(
+            differences.is_empty(),
+            "{} was written with other settings:\n{}\nRewrite it with `doppelscan baseline`, or set them back.",
+            crate::settings::shown(file),
+            differences.join("\n")
+        );
+        Ok(())
     }
+}
+
+/// A list whose order does not change the scan, as one comparable value.
+fn set_of(items: &[String]) -> String {
+    let mut items = items.to_vec();
+    items.sort();
+    items.dedup();
+    items.join(",")
 }
 
 /// The languages a scan with `languages` covers.
@@ -105,17 +130,7 @@ impl Baseline {
     /// The baseline file for a scan of `start`: in it or the nearest parent
     /// directory up to the repository root.
     pub fn find(start: &Path) -> Option<PathBuf> {
-        let start = start.canonicalize().ok()?;
-        for dir in start.ancestors() {
-            let file = dir.join(DEFAULT_FILE);
-            if file.exists() {
-                return Some(file);
-            }
-            if dir.join(".git").exists() {
-                break;
-            }
-        }
-        None
+        crate::config::nearest(start, DEFAULT_FILE)
     }
 
     pub fn load(path: &Path) -> anyhow::Result<Self> {
