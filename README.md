@@ -182,8 +182,9 @@ reason = "Generated from the OpenAPI spec; regenerated, never edited."
 
 An accepted group is left out of every report and never fails `check`,
 however many copies it has. Editing the code changes its fingerprint, so
-the clone comes back for another look. `near` groups have no fingerprint
-and are not affected.
+the clone comes back for another look. Its baseline entry, if it has one,
+stays until the code is gone. `near` groups have no fingerprint and are not
+affected.
 
 ## Gating new duplication
 
@@ -221,7 +222,10 @@ A baseline stores each accepted group's fingerprint, copy count and the
 functions it sits in, not line numbers. Moving or renaming known duplication
 passes, and so does shrinking it within the same functions; another copy, a
 clone that grew, or a new top-level clone does not. `--prune` only drops
-entries and lowers counts, so it cannot accept new duplication.
+entries and forgets copies that are gone, so it cannot accept new
+duplication. Checking or pruning a subdirectory only judges entries with
+every copy inside it; the others stay as they are until a scan of the whole
+directory the baseline describes.
 
 `check` reads the working tree, staged or not, so as a pre-commit hook it
 also sees unstaged edits. Commit the baseline with LF line endings

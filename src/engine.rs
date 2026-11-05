@@ -10,7 +10,7 @@ use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use tree_sitter::Parser;
 
-use crate::baseline::Baseline;
+use crate::baseline::{Baseline, Scope};
 use crate::detect::{RawGroup, detect};
 use crate::filter::{PathFilter, PathRules};
 use crate::index::{FileIndex, MIN_STORED_TOKENS, index_source, normalize_line_endings};
@@ -190,7 +190,7 @@ pub fn index_sources(sources: Vec<Source>, strict: bool) -> Vec<Arc<FileIndex>> 
 pub fn analyze(files: Vec<Arc<FileIndex>>, opts: &ScanOptions, started: Instant) -> Analysis {
     let min_tokens = opts.min_tokens.max(MIN_STORED_TOKENS);
     let density = opts.max_param_density;
-    let mut groups: Vec<RawGroup> = detect(&files, min_tokens, |g| {
+    let groups: Vec<RawGroup> = detect(&files, min_tokens, |g| {
         let allowed = (density * g.tokens as f32 / 100.0).max(FREE_PARAMS);
         let params = variation::analyze(g, &files)
             .parameters
@@ -201,11 +201,14 @@ pub fn analyze(files: Vec<Arc<FileIndex>>, opts: &ScanOptions, started: Instant)
     });
     // After suppression, so the pieces inside an accepted clone stay
     // hidden with it instead of surfacing as groups of their own.
-    groups.retain(|g| !opts.accept.contains(&fingerprint(g)));
+    let (accepted, mut groups): (Vec<_>, Vec<_>) = groups
+        .into_iter()
+        .partition(|g| opts.accept.contains(&fingerprint(g)));
     groups.sort_by(|a, b| score(b).cmp(&score(a)).then(a.hash.cmp(&b.hash)));
     Analysis {
         files,
         groups,
+        accepted,
         elapsed: started.elapsed(),
     }
 }
@@ -319,15 +322,17 @@ impl Engine {
         opts: &ScanOptions,
         min_new_tokens: u32,
     ) -> anyhow::Result<Check> {
-        let (baseline, opts) = match against {
+        let (baseline, opts, scope) = match against {
             Against::File(path) => against_file(root, path, opts)?,
+            // Both sides scan `root`, so all of this baseline is in view.
             Against::Rev(rev) => {
                 let (base, opts) = self.scan_rev(root, rev, opts)?;
-                (Baseline::from_analysis(&base, &opts), opts)
+                let baseline = Baseline::from_analysis(&base, &opts);
+                (baseline, opts, Scope::default())
             }
         };
         let analysis = self.scan(root, &opts)?;
-        let resolved = baseline.groups.len() - baseline.pruned(&analysis).groups.len();
+        let resolved = baseline.groups.len() - baseline.pruned(&analysis, &scope).groups.len();
         let (new, small): (Vec<usize>, Vec<usize>) = baseline
             .new_groups(&analysis)
             .into_iter()
@@ -346,6 +351,12 @@ impl Engine {
             smaller: small,
             note,
         })
+    }
+
+    /// The baseline in `file` without what a scan of `root` shows is gone.
+    pub fn prune(&self, root: &Path, file: &Path, opts: &ScanOptions) -> anyhow::Result<Baseline> {
+        let (baseline, opts, scope) = against_file(root, file, opts)?;
+        Ok(baseline.pruned(&self.scan(root, &opts)?, &scope))
     }
 
     /// `root` at the fork point of `rev`, with paths shown as a working-tree
@@ -391,19 +402,22 @@ fn prefix_of(root: &Path, base: &Path) -> String {
 }
 
 /// Places in a baseline are relative to the file's own directory, so the
-/// scan is shown from there whatever subdirectory is being checked.
+/// scan is shown from there whatever subdirectory is being checked, and
+/// covers only that subdirectory of what the baseline describes.
 fn against_file(
     root: &Path,
     path: &Path,
     opts: &ScanOptions,
-) -> anyhow::Result<(Baseline, ScanOptions)> {
+) -> anyhow::Result<(Baseline, ScanOptions, Scope)> {
     let baseline = Baseline::load(path)?;
     baseline.settings.require_same(opts, path)?;
+    let base = anchor(root, path)?;
+    let scope = Scope::of(&prefix_of(&root.canonicalize()?, &base));
     let opts = ScanOptions {
-        display_base: Some(anchor(root, path)?),
+        display_base: Some(base),
         ..opts.clone()
     };
-    Ok((baseline, opts))
+    Ok((baseline, opts, scope))
 }
 
 /// The directory a baseline file describes; `root` must lie inside it.
