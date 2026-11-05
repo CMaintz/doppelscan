@@ -291,30 +291,34 @@ impl Lexer<'_> {
 /// Where a comment starting at `i` ends, if one starts there.
 fn comment_end(source: &str, i: usize, lexicon: &Lexicon) -> Option<usize> {
     let rest = &source[i..];
-    for (open, close) in lexicon.block_comments {
-        if let Some(body) = rest.strip_prefix(open) {
-            let end = body
-                .find(close)
-                .map_or(source.len(), |e| i + open.len() + e + close.len());
-            return Some(end);
-        }
+    let bytes = source.as_bytes();
+    let block = lexicon
+        .block_comments
+        .iter()
+        .find(|(open, _)| rest.starts_with(open) && opens_comment(bytes, i, open));
+    if let Some((open, close)) = block {
+        let end = rest[open.len()..]
+            .find(close)
+            .map_or(source.len(), |e| i + open.len() + e + close.len());
+        return Some(end);
     }
     let marker = lexicon
         .line_comments
         .iter()
         .find(|m| rest.starts_with(**m))?;
-    opens_comment(source.as_bytes(), i, marker)
-        .then(|| rest.find('\n').map_or(source.len(), |e| i + e))
+    opens_comment(bytes, i, marker).then(|| rest.find('\n').map_or(source.len(), |e| i + e))
 }
 
-/// `#` mid-word is shell's `$#` or a YAML `a#b` value, and `//` after a
-/// colon is a URL scheme (an unquoted SCSS `url(http://...)`); neither
-/// starts a comment.
+/// `#` mid-word is shell's `$#` or a YAML `a#b` value, `//` after a colon
+/// is a URL scheme (an unquoted SCSS `url(http://...)`), and Ruby's
+/// `=begin` away from a line start is an assignment (`a =begin_at`); none
+/// of them starts a comment.
 fn opens_comment(bytes: &[u8], i: usize, marker: &str) -> bool {
     let before = i.checked_sub(1).map(|p| bytes[p]);
     match marker {
         "#" => before.is_none_or(|b| b.is_ascii_whitespace()),
         "//" => before != Some(b':'),
+        "=begin" => before.is_none_or(|b| b == b'\n'),
         _ => true,
     }
 }

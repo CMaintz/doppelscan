@@ -276,7 +276,9 @@ pub static LANGS: LazyLock<Vec<Lang>> = LazyLock::new(|| {
             "ruby",
             Lexicon {
                 line_comments: &["#"],
-                block_comments: &[("=begin", "=end")],
+                // `=end` only closes at a line start, hence its newline;
+                // `=begin` has the same rule, in `opens_comment`.
+                block_comments: &[("=begin", "\n=end")],
                 ..PLAIN
             },
             &["rb", "rake"],

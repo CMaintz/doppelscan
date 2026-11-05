@@ -582,3 +582,24 @@ fn a_digit_separator_stays_in_the_number() {
     let b = format!("long limit = 1000000;\n{CALLS}");
     assert_eq!(start_lines(&scan(&[("a.cpp", &a), ("b.cpp", &b)])), [1, 1]);
 }
+
+const RUBY_METHOD: &str = "def total(items)\n  sum = items.map(&:price).sum\n  tax = sum * rate(0.25)\n  sum + tax\nend\n";
+
+// Catches `=begin` matching mid-line: an assignment with no space after
+// `=` would turn the rest of the file into a comment.
+#[test]
+fn ruby_begin_mid_line_is_not_a_comment() {
+    let a = format!("start =begin_index\n{RUBY_METHOD}");
+    let b = format!("reset(1)\n{RUBY_METHOD}");
+    assert_eq!(start_lines(&scan(&[("a.rb", &a), ("b.rb", &b)])), [2, 2]);
+}
+
+// Catches the line-start rule breaking real block comments, and `=end`
+// closing one mid-line: the unclosed bracket on the line after it would
+// then be code and fold the rest of the file into one statement.
+#[test]
+fn ruby_block_comments_run_from_line_start_to_line_start() {
+    let a = format!("=begin\nsee x =end_value\nstill a comment (\n=end\n{RUBY_METHOD}");
+    let found = scan(&[("a.rb", &a), ("b.rb", RUBY_METHOD)]);
+    assert_eq!(start_lines(&found), [5, 1]);
+}
