@@ -385,6 +385,7 @@ fn is_block(kind: &str) -> bool {
         "default_case",
         "communication_case",
         "chunk",
+        "statement_list",
         // Markup: an element's children are a sequence like statements.
         "document",
         "element",
