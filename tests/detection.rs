@@ -838,3 +838,47 @@ fn line_endings_do_not_change_fingerprints() {
         }
     }
 }
+
+fn line_spans(a: &Analysis) -> Vec<(u32, u32)> {
+    let mut spans: Vec<(u32, u32)> = groups(a)
+        .iter()
+        .flat_map(|g| &g.occurrences)
+        .map(|o| (o.start_line, o.end_line))
+        .collect();
+    spans.sort();
+    spans.dedup();
+    spans
+}
+
+const RS_WITH_MID_FILE_USE: &str = "fn first(a: u32, b: u32) -> u32 { a + b * 2 - a / 3 }\nuse std::fmt;\nfn second(a: u32, b: u32) -> u32 { a * b + 4 - b / 5 }\n";
+
+const GO_SWITCH: &str = "package main\n\nfunc pick(n int) int {\n\tswitch n {\n\tcase 1:\n\t\tvalue := compute(n, 1)\n\t\tlog(value, n)\n\t\treturn value + offset(n)\n\tcase 2:\n\t\tvalue := compute(n, 2)\n\t\tlog(value, n)\n\t\treturn value + offset(n)\n\t}\n\treturn 0\n}\n";
+
+// Catches an end line taken from an end offset just past a newline, which
+// reports the line after the code: the next line of the file, or a line
+// that does not exist.
+#[test]
+fn a_clone_ends_on_its_last_line_of_code() {
+    let a = scan(&[
+        ("a.rs", RS_WITH_MID_FILE_USE),
+        ("b.rs", RS_WITH_MID_FILE_USE),
+    ]);
+    assert_eq!(line_spans(&a), [(1, 3)]);
+}
+
+// Catches trimming only one newline: trailing blank lines inside a node's
+// range are not code either.
+#[test]
+fn a_clone_end_skips_trailing_blank_lines() {
+    let padded = format!("{RS_WITH_MID_FILE_USE}\n\n\n");
+    let a = scan(&[("a.rs", &padded), ("b.rs", &padded)]);
+    assert_eq!(line_spans(&a), [(1, 3)]);
+}
+
+// Catches a Go case's range, which runs to the next line after its last
+// statement, reaching the switch's closing brace.
+#[test]
+fn a_last_case_ends_before_the_closing_brace() {
+    let a = scan(&[("a.go", GO_SWITCH)]);
+    assert_eq!(line_spans(&a), [(5, 8), (9, 12)]);
+}
