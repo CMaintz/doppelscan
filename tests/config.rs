@@ -316,6 +316,16 @@ fn config_shows_where_each_setting_comes_from() {
     assert!(dirs.iter().any(|d| d == "node_modules"), "{shown}");
 }
 
+// Catches the shown skip list drifting from what the walk skips: a
+// directory left off it is skipped with nothing to say why.
+#[test]
+fn config_lists_generated_source_dirs_as_skipped() {
+    let dir = repo_with_config("skips", "");
+    let shown = settings_json(&dir, &[]);
+    let dirs = shown["built_in_skips"]["dirs"].as_array().unwrap();
+    assert!(dirs.iter().any(|d| d == "generated-sources"), "{dirs:?}");
+}
+
 // Catches the MCP settings tool and the CLI drifting apart: an agent and a
 // person must see the same settings for the same path.
 #[test]
