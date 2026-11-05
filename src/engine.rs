@@ -13,7 +13,7 @@ use tree_sitter::Parser;
 use crate::baseline::Baseline;
 use crate::detect::{RawGroup, detect};
 use crate::filter::{PathFilter, PathRules};
-use crate::index::{FileIndex, MIN_STORED_TOKENS, index_source};
+use crate::index::{FileIndex, MIN_STORED_TOKENS, index_source, normalize_line_endings};
 use crate::report::{Analysis, fingerprint};
 use crate::variation::{self, Kind, Variation};
 use crate::walk::{MAX_FILE_BYTES, discover, looks_generated};
@@ -159,7 +159,7 @@ fn read_and_index(
     lang: usize,
     strict: bool,
 ) -> Option<Arc<FileIndex>> {
-    let text = String::from_utf8(std::fs::read(path).ok()?).ok()?;
+    let text = normalize_line_endings(String::from_utf8(std::fs::read(path).ok()?).ok()?);
     if looks_generated(&text) {
         return None;
     }

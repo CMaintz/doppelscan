@@ -194,7 +194,9 @@ fn accept(path: &Path, languages: &[usize]) -> Option<(PathBuf, usize)> {
 }
 
 /// Minified bundles and generated files are duplication nobody should
-/// refactor by hand.
+/// refactor by hand. Callers pass normalised text: CRs would push a marker
+/// out of the head and count towards line length, so an LF revision and its
+/// CRLF checkout could be judged differently.
 pub fn looks_generated(source: &str) -> bool {
     let head = &source[..source.floor_char_boundary(1024)];
     if GENERATED_MARKERS.iter().any(|m| head.contains(m)) {

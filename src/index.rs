@@ -198,14 +198,13 @@ impl FileIndex {
     }
 
     /// First and last line of `[start, end)`, looked up rather than stored
-    /// in every `Frag`: only reported fragments need them. A grammar's node
-    /// ends on the line of its end offset (tree-sitter's end row), a token
-    /// run on the line of its last byte.
+    /// in every `Frag`: only reported fragments need them. The last line is
+    /// that of the last non-whitespace byte, because a grammar's node can
+    /// end past newlines and blank lines that are not part of the code.
     pub fn lines(&self, start: u32, end: u32) -> (u32, u32) {
-        let last = match LANGS[self.lang].syntax {
-            Syntax::Tree(_) => end,
-            Syntax::Tokens(_) => end.saturating_sub(1),
-        };
+        let bytes = &self.source.as_bytes()[start as usize..end as usize];
+        let content = bytes.iter().rposition(|b| !b.is_ascii_whitespace());
+        let last = start + content.unwrap_or(0) as u32;
         (self.line_of(start), self.line_of(last))
     }
 
@@ -273,6 +272,19 @@ pub(crate) fn line_starts(source: &str) -> Vec<u32> {
         .collect()
 }
 
+/// `source` with CRLF line ends as LF, so a checkout's line endings reach
+/// no token, hash or fingerprint. Line numbers stay the same. An LF file
+/// comes back uncopied: the scan for a CR is all it pays. `index_source`
+/// applies this to everything, and readers apply it earlier for the
+/// generated-file check.
+pub(crate) fn normalize_line_endings(source: String) -> String {
+    if source.contains('\r') {
+        source.replace("\r\n", "\n")
+    } else {
+        source
+    }
+}
+
 pub fn index_source(
     parser: &mut Parser,
     path: String,
@@ -280,6 +292,7 @@ pub fn index_source(
     source: String,
     strict: bool,
 ) -> Option<FileIndex> {
+    let source = normalize_line_endings(source);
     let language = match &LANGS[lang].syntax {
         Syntax::Tree(language) => language,
         Syntax::Tokens(lexicon) => {
