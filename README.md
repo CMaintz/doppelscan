@@ -101,8 +101,11 @@ literals only), `--only ts,java`, `--exclude 'generated/**'`,
 mapping boilerplate too; in token-level languages a name that differs in
 several places is taken for a renamed local and not counted).
 
-`.gitignore` is honoured, and dependency/build directories, minified bundles
-and files marked as generated are skipped.
+`.gitignore` is honoured, and dependency/build directories, tool caches,
+minified bundles, files marked as generated and generated-source
+directories (`generated`, `generated-src`, `__generated__` and the like) are
+skipped. Other
+dot-directories, such as `.github`, are scanned.
 
 ## Gating new duplication
 
@@ -173,7 +176,8 @@ find-extract-verify loop for agents.
 
 1. Every file is parsed; every syntax node gets a hash built bottom-up from its
    kind and its children. Identifiers and literals hash to a placeholder by
-   category, operators and keywords by text, comments not at all.
+   category, operators and keywords by text, comments and Java marker
+   annotations (`@Override`, no arguments) not at all.
 2. Equal hashes across the codebase are whole-node clones.
 3. Child sequences of blocks, class bodies, argument lists and literals are
    concatenated and searched with a suffix array for maximal repeated runs, so a
@@ -200,11 +204,12 @@ with winnowing ([Schleimer, Wilkerson and Aiken, SIGMOD
 2003](https://theory.stanford.edu/~aiken/publications/papers/sigmod03.pdf)),
 which guarantees that any shared run of 17 tokens yields a shared
 fingerprint. An inverted index finds the functions that share fingerprints,
-fingerprints common to many functions are dropped as idiom, and pairs are
-scored by Jaccard similarity of their fingerprint counts (counts, so four
-repeated assignments and ten do not look alike). Union-find groups the
-pairs, exact clones are left to the exact scan, and the differing lines come
-from a token-level diff against another copy.
+skipping fingerprints common to many functions (idiom) so they do not pair
+everything, and each pair is scored by Jaccard similarity of all its
+fingerprint counts, idiom included (counts, so four repeated assignments and
+ten do not look alike). Union-find groups the pairs, exact clones are left to
+the exact scan, and the differing lines come from a token-level diff against
+another copy.
 
 ## Performance
 
