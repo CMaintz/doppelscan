@@ -175,26 +175,15 @@ impl Baseline {
             .collect()
     }
 
-    /// The entries still needed to excuse `now`, with counts lowered to
-    /// what remains. Never adds an entry or raises a count, so pruning
-    /// cannot accept new duplication.
+    /// The entries still needed to excuse `now`, with counts lowered and
+    /// places cut to what remains. Never adds an entry, a place or a copy,
+    /// so pruning cannot accept new duplication.
     pub fn pruned(&self, now: &Analysis) -> Self {
         let current: Vec<Entry> = (1..=now.groups.len()).map(|id| entry(now, id)).collect();
         let groups = self
             .groups
             .iter()
-            .filter_map(|e| {
-                let same = current.iter().filter(|c| c.fingerprint == e.fingerprint);
-                if let Some(remaining) = same.map(|c| c.occurrences).max() {
-                    let occurrences = remaining.min(e.occurrences);
-                    return Some(Entry {
-                        occurrences,
-                        ..e.clone()
-                    });
-                }
-                let covers = current.iter().any(|c| is_shrunk_from(c, e));
-                covers.then(|| e.clone())
-            })
+            .filter_map(|e| e.pruned(&current))
             .collect();
         Self {
             version: VERSION,
@@ -212,6 +201,48 @@ impl Baseline {
             (e.fingerprint == group.fingerprint && group.occurrences <= e.occurrences)
                 || is_shrunk_from(group, e)
         })
+    }
+}
+
+impl Entry {
+    /// What the groups found now still need of this entry, or `None` when
+    /// they need none of it.
+    fn pruned(&self, current: &[Entry]) -> Option<Self> {
+        let same: Vec<&Entry> = current
+            .iter()
+            .filter(|c| c.fingerprint == self.fingerprint)
+            .collect();
+        if let Some(remaining) = same.iter().map(|c| c.occurrences).max() {
+            return Some(self.narrowed(self.places_held_by(&same), remaining));
+        }
+        let shrunk: Vec<&Entry> = current.iter().filter(|c| is_shrunk_from(c, self)).collect();
+        (!shrunk.is_empty()).then(|| {
+            let places = self.places_held_by(&shrunk);
+            let remaining = places.len();
+            self.narrowed(places, remaining)
+        })
+    }
+
+    fn narrowed(&self, places: Vec<String>, remaining: usize) -> Self {
+        Self {
+            occurrences: remaining.min(self.occurrences),
+            places,
+            ..self.clone()
+        }
+    }
+
+    /// Only ever a subset of `places`, even for code that moved: following
+    /// it would let the shrink rule excuse clones in places never accepted.
+    fn places_held_by(&self, groups: &[&Entry]) -> Vec<String> {
+        let mut held = vec![false; self.places.len()];
+        let paired = groups
+            .iter()
+            .flat_map(|g| pairings(&g.places, &self.places));
+        for i in paired.flatten() {
+            held[i] = true;
+        }
+        let kept = self.places.iter().zip(held).filter(|(_, held)| *held);
+        kept.map(|(place, _)| place.clone()).collect()
     }
 }
 
@@ -245,17 +276,24 @@ fn entry(analysis: &Analysis, id: usize) -> Entry {
     }
 }
 
-/// Every place in `small` matched to a distinct place in `big` that is the
-/// same or encloses it (`a.ts#Cart` encloses `a.ts#Cart.total`).
+fn is_sub_multiset(small: &[String], big: &[String]) -> bool {
+    pairings(small, big).all(|slot| slot.is_some())
+}
+
+/// For each place in `small`, the index of a distinct place in `big` that
+/// is the same or encloses it (`a.ts#Cart` encloses `a.ts#Cart.total`).
 /// Each place takes the deepest free match, so an exact match is never
 /// spent on a place an enclosing scope could have covered.
-fn is_sub_multiset(small: &[String], big: &[String]) -> bool {
+fn pairings<'a>(
+    small: &'a [String],
+    big: &'a [String],
+) -> impl Iterator<Item = Option<usize>> + 'a {
     let mut used = vec![false; big.len()];
-    small.iter().all(|s| {
+    small.iter().map(move |s| {
         let slot = (0..big.len())
             .filter(|&i| !used[i] && encloses(&big[i], s))
             .max_by_key(|&i| big[i].len());
-        slot.map(|i| used[i] = true).is_some()
+        slot.inspect(|&i| used[i] = true)
     })
 }
 

@@ -221,7 +221,8 @@ A baseline stores each accepted group's fingerprint, copy count and the
 functions it sits in, not line numbers. Moving or renaming known duplication
 passes, and so does shrinking it within the same functions; another copy, a
 clone that grew, or a new top-level clone does not. `--prune` only drops
-entries and lowers counts, so it cannot accept new duplication.
+entries and removes copies that are gone from the rest, so it cannot accept
+new duplication.
 
 `check` reads the working tree, staged or not, so as a pre-commit hook it
 also sees unstaged edits. Commit the baseline with LF line endings

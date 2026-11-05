@@ -5,7 +5,7 @@ use std::process::Command;
 use std::time::Instant;
 
 use common::git;
-use doppelscan::baseline::Baseline;
+use doppelscan::baseline::{Baseline, Entry};
 use doppelscan::engine::{ScanOptions, Source, analyze, index_sources};
 use doppelscan::lang::lang_index_for_path;
 use doppelscan::report::Analysis;
@@ -218,6 +218,75 @@ fn a_written_baseline_accepts_existing_and_rejects_new_duplication() {
     git(&dir, &["add", "."]);
     git(&dir, &["commit", "-qm", "copy"]);
     assert_eq!(doppelscan(&dir, &["check"]).0, 1);
+}
+
+fn written_entries(dir: &Path) -> Vec<Entry> {
+    let file = dir.join(".doppelscan-baseline.json");
+    Baseline::load(&file).unwrap().groups
+}
+
+// Catches prune lowering the count but keeping the removed copy's place:
+// the shrink rule would excuse that copy coming back, which is new
+// duplication the README says a prune cannot accept.
+#[test]
+fn a_pruned_copy_that_returns_is_new() {
+    let dir = repo("prune-place");
+    std::fs::write(dir.join("src/c.ts"), renamed(SUM_TOTALS, 3)).unwrap();
+    assert_eq!(doppelscan(&dir, &["baseline"]).0, 0);
+    std::fs::remove_file(dir.join("src/c.ts")).unwrap();
+    assert_eq!(doppelscan(&dir, &["baseline", "--prune"]).0, 0);
+
+    let entries = written_entries(&dir);
+    assert_eq!(entries[0].occurrences, 2);
+    assert_eq!(entries[0].places.len(), 2, "{:?}", entries[0].places);
+
+    std::fs::write(dir.join("src/c.ts"), renamed(SUM_TOTALS, 3)).unwrap();
+    let (code, out) = doppelscan(&dir, &["check"]);
+    assert_eq!(code, 1, "{out}");
+}
+
+// Catches only the matching-fingerprint path dropping places: an entry kept
+// because a smaller clone still sits in its places would go on excusing the
+// removed copy, by place and by count.
+#[test]
+fn a_shrunk_entry_forgets_a_removed_copy() {
+    let dir = repo("prune-shrunk");
+    let shrunk =
+        renamed(SUM_TOTALS, 2).replace("return Math.round(total * 100) / 100;", "return total;");
+    std::fs::write(dir.join("src/c.ts"), renamed(SUM_TOTALS, 3)).unwrap();
+    assert_eq!(doppelscan(&dir, &["baseline"]).0, 0);
+    std::fs::write(dir.join("src/b.ts"), &shrunk).unwrap();
+    std::fs::remove_file(dir.join("src/c.ts")).unwrap();
+    assert_eq!(doppelscan(&dir, &["baseline", "--prune"]).0, 0);
+
+    let entries = written_entries(&dir);
+    assert_eq!(entries[0].occurrences, 2);
+    assert_eq!(entries[0].places.len(), 2, "{:?}", entries[0].places);
+}
+
+// Catches keeping a place because any copy matches it: of two copies
+// in one function, one is gone, so its place must go too.
+#[test]
+fn pruning_one_of_two_copies_in_a_function_drops_one_place() {
+    let body = r#"
+    for (const row of rows) {
+        if (row.ok) { total += row.value * rate; }
+        log(row.id, row.value, total);
+    }
+    audit(total);
+"#;
+    let gap = "    try { next(); } finally { done(); }\n";
+    // Unlike `other`, so the clone stops at `body` however many it holds.
+    let host = |copies: &[&str]| format!("const f = () => {{{}}};\n", copies.join(gap));
+    let other = format!("function g(x: number) {{{body}    return x;\n}}\n");
+    let base = [("a.ts", host(&[body, body])), ("b.ts", other.clone())];
+    let baseline = Baseline::from_analysis(&scan(&base), &options());
+    assert_eq!(baseline.groups[0].occurrences, 3);
+
+    let one = [("a.ts", host(&[body])), ("b.ts", other)];
+    let pruned = baseline.pruned(&scan(&one));
+    assert_eq!(pruned.groups[0].occurrences, 2);
+    assert_eq!(pruned.groups[0].places.len(), 2);
 }
 
 // Catches errors exiting 1, which a CI gate would read as "new
