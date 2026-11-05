@@ -311,7 +311,10 @@ fn classify_kind(language: &Language, id: u16) -> KindClass {
     if !language.node_kind_is_named(id) {
         return KindClass::Plain;
     }
-    if kind.contains("comment") {
+    // A marker annotation (`@Override`, `@Nullable`) takes no arguments,
+    // so it never changes what the code does; one with arguments
+    // (`@Cacheable("x")`) configures it and stays.
+    if kind.contains("comment") || kind == "marker_annotation" {
         KindClass::Comment
     } else if is_noise(kind) {
         KindClass::Noise

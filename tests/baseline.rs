@@ -378,3 +378,61 @@ fn json_reports_are_written_as_a_sorted_value() {
         assert_eq!(serde_json::to_string_pretty(&report).unwrap() + "\n", out);
     }
 }
+
+fn repo_with_copy_at(name: &str, path: &str) -> PathBuf {
+    let dir = repo(name);
+    let path = dir.join(path);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, renamed(SUM_TOTALS, 3)).unwrap();
+    dir
+}
+
+// Catches skipping every dot-directory: CI scripts under `.github` or
+// `.buildkite` are source like any other and get copied like any other.
+#[test]
+fn copies_in_a_dot_directory_are_found() {
+    let dir = repo_with_copy_at("dotdir", ".github/scripts/c.ts");
+    let (code, out) = doppelscan(&dir, &["."]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains(".github/scripts/c.ts"), "{out}");
+}
+
+// Catches the revision side still skipping dot-directories the working
+// tree now scans: a committed copy there would read as new on every check.
+#[test]
+fn a_committed_copy_in_a_dot_directory_is_not_new() {
+    let dir = repo_with_copy_at("dotrev", ".github/scripts/c.ts");
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-qm", "ci copy"]);
+    let (code, out) = doppelscan(&dir, &["check", "--base", "HEAD"]);
+    assert_eq!(code, 0, "{out}");
+}
+
+// Catches dropping tool output from the skip list: editor local history
+// keeps a full copy of every saved file and is rarely gitignored.
+#[test]
+fn copies_in_local_history_are_skipped() {
+    let dir = repo_with_copy_at("history", ".history/src/a_20261028.ts");
+    let (_, out) = doppelscan(&dir, &["."]);
+    assert!(!out.contains(".history"), "{out}");
+}
+
+// Catches dropping the generated-source names from the skip list: build
+// tools write these without a "generated" header (Elasticsearch's
+// `src/main/generated` has none), so the path is the only sign.
+#[test]
+fn copies_in_generated_source_dirs_are_skipped() {
+    let dir = repo_with_copy_at("gendir", "src/main/generated/c.ts");
+    let (_, out) = doppelscan(&dir, &["."]);
+    assert!(!out.contains("generated"), "{out}");
+}
+
+// Catches matching generated directories by prefix or by a short name:
+// `gen` often holds a hand-written code generator.
+#[test]
+fn copies_in_a_gen_dir_are_found() {
+    let dir = repo_with_copy_at("gen", "tools/gen/c.ts");
+    let (code, out) = doppelscan(&dir, &["."]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("tools/gen/c.ts"), "{out}");
+}

@@ -1,6 +1,7 @@
 //! Source discovery: honours .gitignore (even outside a git checkout) and
 //! skips dependency, build and generated output that would otherwise
-//! dominate any duplication report.
+//! dominate any duplication report. Dot-directories are scanned (CI scripts
+//! live in them), apart from the tool and editor output listed below.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -32,6 +33,42 @@ const EXCLUDED_DIRS: &[&str] = &[
     "DerivedData",
     ".idea",
     ".vs",
+    ".vscode",
+    ".history",
+    ".cache",
+    ".yarn",
+    ".pnpm-store",
+    ".turbo",
+    ".parcel-cache",
+    ".angular",
+    ".nx",
+    ".output",
+    ".astro",
+    ".vercel",
+    ".netlify",
+    ".wrangler",
+    ".serverless",
+    ".nyc_output",
+    ".tox",
+    ".nox",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".terraform",
+    ".dart_tool",
+    ".expo",
+    ".m2",
+];
+
+// Where code generators write their output, often with no "generated"
+// header for `looks_generated` to find. Full names only: `gen` frequently
+// holds the hand-written generator itself.
+const GENERATED_DIRS: &[&str] = &[
+    "generated",
+    "generated-src",
+    "generated_src",
+    "generated-sources",
+    "__generated__",
 ];
 
 const GENERATED_MARKERS: &[&str] = &[
@@ -56,6 +93,7 @@ pub fn discover(
     let (start, entry_filter) = (root.to_path_buf(), filter.clone());
     let walker = WalkBuilder::new(root)
         .require_git(false)
+        .hidden(false)
         .overrides(filter.overrides.clone())
         .filter_entry(move |e| {
             let rel = e.path().strip_prefix(&start).unwrap_or(e.path());
@@ -84,12 +122,9 @@ pub fn discover(
 
 /// The language of a file known from a listing rather than a walk (a git
 /// revision), or `None` when a walk would have skipped it: an excluded or
-/// hidden directory, or an exclude matching it or any parent. `rel` is
-/// relative to the scanned root.
+/// directory, or an exclude matching it or any parent. `rel` is relative
+/// to the scanned root.
 pub fn accept_listed(rel: &Path, filter: &PathFilter, languages: &[usize]) -> Option<usize> {
-    let hidden = rel
-        .components()
-        .any(|c| c.as_os_str().to_str().is_some_and(|n| n.starts_with('.')));
     let excluded = rel
         .ancestors()
         .filter(|a| !a.as_os_str().is_empty())
@@ -101,14 +136,15 @@ pub fn accept_listed(rel: &Path, filter: &PathFilter, languages: &[usize]) -> Op
         .skip(1)
         .filter(|a| !a.as_os_str().is_empty())
         .any(|a| filter.skips_dir(a));
-    if hidden || excluded || pruned || filter.skips_file(rel) {
+    if excluded || pruned || filter.skips_file(rel) {
         return None;
     }
     accept(rel, languages).map(|(_, lang)| lang)
 }
 
 pub(crate) fn is_excluded_dir(name: &std::ffi::OsStr) -> bool {
-    name.to_str().is_some_and(|n| EXCLUDED_DIRS.contains(&n))
+    name.to_str()
+        .is_some_and(|n| EXCLUDED_DIRS.contains(&n) || GENERATED_DIRS.contains(&n))
 }
 
 fn accept(path: &Path, languages: &[usize]) -> Option<(PathBuf, usize)> {
