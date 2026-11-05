@@ -61,6 +61,8 @@ pub struct Lexicon {
     /// Quote bytes that open a multi-line string when tripled. Everywhere
     /// else `''''` is a quoted quote or adjacent empty strings.
     pub triple_quotes: &'static [u8],
+    /// `'` may continue a name (`foldl'`) rather than end it.
+    pub primes: bool,
 }
 
 const PLAIN: Lexicon = Lexicon {
@@ -69,6 +71,7 @@ const PLAIN: Lexicon = Lexicon {
     keywords: &[],
     ignore_case: false,
     triple_quotes: &[],
+    primes: false,
 };
 const C_LIKE: Lexicon = Lexicon {
     line_comments: &["//"],
@@ -264,6 +267,7 @@ pub static LANGS: LazyLock<Vec<Lang>> = LazyLock::new(|| {
                 line_comments: &["--"],
                 block_comments: &[("{-", "-}")],
                 triple_quotes: b"\"",
+                primes: true,
                 ..PLAIN
             },
             &["hs", "elm"],

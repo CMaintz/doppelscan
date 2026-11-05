@@ -321,28 +321,31 @@ fn opens_comment(bytes: &[u8], i: usize, marker: &str) -> bool {
 
 fn token_at(source: &str, i: usize, lexicon: &Lexicon) -> (usize, LeafClass, Shape) {
     let bytes = source.as_bytes();
-    let shape = match bytes[i] {
-        b'{' => Shape::OpenBrace,
-        b'}' => Shape::CloseBrace,
-        b'(' | b'[' => Shape::Open,
-        b')' | b']' => Shape::Close,
-        b';' => Shape::Semi,
-        b',' => Shape::Comma,
-        b'"' | b'\'' | b'`' => {
-            return (
-                string_end(bytes, i, lexicon),
-                LeafClass::Literal,
-                Shape::Other,
-            );
-        }
-        b'0'..=b'9' => return (word_end(bytes, i, true), LeafClass::Literal, Shape::Other),
+    if let Some(shape) = punctuation(bytes[i]) {
+        return (i + 1, LeafClass::Other, shape);
+    }
+    let (end, class) = match bytes[i] {
+        b'"' | b'\'' | b'`' => (string_end(bytes, i, lexicon), LeafClass::Literal),
+        b'0'..=b'9' => (word_end(bytes, i, true, lexicon.primes), LeafClass::Literal),
         b if is_word_byte(b) => {
-            let end = word_end(bytes, i, false);
-            return (end, word_class(&source[i..end], lexicon), Shape::Other);
+            let end = word_end(bytes, i, false, lexicon.primes);
+            (end, word_class(&source[i..end], lexicon))
         }
-        _ => return (char_end(source, i), LeafClass::Other, Shape::Other),
+        _ => (char_end(source, i), LeafClass::Other),
     };
-    (i + 1, LeafClass::Other, shape)
+    (end, class, Shape::Other)
+}
+
+fn punctuation(b: u8) -> Option<Shape> {
+    match b {
+        b'{' => Some(Shape::OpenBrace),
+        b'}' => Some(Shape::CloseBrace),
+        b'(' | b'[' => Some(Shape::Open),
+        b')' | b']' => Some(Shape::Close),
+        b';' => Some(Shape::Semi),
+        b',' => Some(Shape::Comma),
+        _ => None,
+    }
 }
 
 /// Triple-quoted strings run to their closing triple across lines. Others
@@ -366,16 +369,22 @@ fn string_end(bytes: &[u8], i: usize, lexicon: &Lexicon) -> usize {
     }
 }
 
-/// A word runs on through `'` so Haskell and Elm primes (`foldl'`) stay
-/// part of the name instead of opening a string.
-fn word_end(bytes: &[u8], i: usize, number: bool) -> usize {
+fn word_end(bytes: &[u8], i: usize, number: bool, primes: bool) -> usize {
     let mut j = i + 1;
-    while j < bytes.len()
-        && (is_word_byte(bytes[j]) || bytes[j] == b'\'' || (number && bytes[j] == b'.'))
-    {
+    while j < bytes.len() && in_word(bytes, j, number, primes) {
         j += 1;
     }
     j
+}
+
+/// `'` ends a word so that `N'text'` and `L'x'` open their literal, unless
+/// the language has primes (`foldl'`) or it separates digits (`1'000`).
+fn in_word(bytes: &[u8], j: usize, number: bool, primes: bool) -> bool {
+    match bytes[j] {
+        b'\'' => primes || (number && bytes.get(j + 1).is_some_and(u8::is_ascii_alphanumeric)),
+        b'.' => number,
+        b => is_word_byte(b),
+    }
 }
 
 fn is_word_byte(b: u8) -> bool {

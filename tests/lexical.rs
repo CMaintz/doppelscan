@@ -557,3 +557,28 @@ fn offsets_after_a_bom_still_slice_the_source() {
     let template = found.group(1, true).template.unwrap();
     assert_eq!(template, CALLS.trim_end());
 }
+
+// Catches `'` continuing a word in a language without primes: `N'New York
+// City'` splits into `N'New`, `York` and `City'`, so the literal counts as
+// three tokens and its copy with one word in it no longer matches.
+#[test]
+fn a_prefixed_string_is_one_literal() {
+    let cases = [
+        ("sql", "city = N'New York City'\n", "city = N'Oslo'\n"),
+        ("c", "int s = L' ';\n", "int s = L'x';\n"),
+    ];
+    for (ext, one, two) in cases {
+        let (a, b) = (format!("a.{ext}"), format!("b.{ext}"));
+        let found = scan(&[(&a, &format!("{one}{CALLS}")), (&b, &format!("{two}{CALLS}"))]);
+        assert_eq!(start_lines(&found), [1, 1], "{one}");
+    }
+}
+
+// Catches `'` ending every number: a C++ digit separator would open a
+// string, so the same constant written with one would stop matching.
+#[test]
+fn a_digit_separator_stays_in_the_number() {
+    let a = format!("long limit = 1'000'000;\n{CALLS}");
+    let b = format!("long limit = 1000000;\n{CALLS}");
+    assert_eq!(start_lines(&scan(&[("a.cpp", &a), ("b.cpp", &b)])), [1, 1]);
+}
