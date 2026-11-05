@@ -62,7 +62,8 @@ enum Command {
         /// Compare against this git revision instead of a baseline file.
         #[arg(long, conflicts_with = "baseline")]
         base: Option<String>,
-        /// Baseline file [default: PATH/.doppelscan-baseline.json].
+        /// Baseline file [default: the nearest .doppelscan-baseline.json in
+        /// PATH or above it, up to the repository root].
         #[arg(long)]
         baseline: Option<PathBuf>,
         /// Only new groups of at least this many tokens fail the check;
@@ -75,10 +76,12 @@ enum Command {
     /// Write a baseline accepting today's duplication, for `check`.
     Baseline {
         /// Only drop entries that no longer match; never accept new
-        /// duplication. Uses the settings stored in the baseline.
+        /// duplication. Refuses if the settings differ from those stored
+        /// in the baseline.
         #[arg(long)]
         prune: bool,
-        /// Baseline file [default: PATH/.doppelscan-baseline.json].
+        /// Baseline file [default: PATH/.doppelscan-baseline.json; with
+        /// --prune, the nearest one in PATH or above it].
         #[arg(long, short)]
         output: Option<PathBuf>,
         #[command(flatten)]
