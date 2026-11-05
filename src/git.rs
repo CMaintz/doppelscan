@@ -41,7 +41,7 @@ pub fn read_revision(
         "comparing against a revision needs a directory, not {}",
         dir.display()
     );
-    let filter = PathFilter::new(dir, &opts.exclude, &opts.rules, opts.near)?;
+    let filter = PathFilter::new(dir, opts)?;
     let scanned: FxHashSet<String> = discover(dir, &filter, &opts.languages)?
         .into_iter()
         .filter_map(|(path, _)| relative(dir, &path))

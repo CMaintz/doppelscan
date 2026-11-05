@@ -6,7 +6,8 @@
 //! Configs above the scanned path come in with the scan's settings. A
 //! config inside the scanned tree is read as the walk enters its
 //! directory, so a package's excludes hold whether the scan starts at the
-//! package or at the repository root.
+//! package or at the repository root, unless the command named its config
+//! (`--config`, `--no-config`), which then is the only one that counts.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
@@ -16,6 +17,7 @@ use ignore::overrides::{Override, OverrideBuilder};
 use rustc_hash::FxHashMap;
 
 use crate::config::{FILE, nested_rules};
+use crate::engine::ScanOptions;
 use crate::walk::is_excluded_dir;
 
 /// A config file's `exclude` and `include`, as `.gitignore` patterns
@@ -41,6 +43,7 @@ pub struct PathFilter {
 #[derive(Default)]
 struct Nested {
     near: bool,
+    skip: bool,
     found: RwLock<FxHashMap<PathBuf, Compiled>>,
     error: Mutex<Option<anyhow::Error>>,
 }
@@ -55,19 +58,15 @@ struct Compiled {
 }
 
 impl PathFilter {
-    /// `near` adds nested configs' `[near] exclude`.
-    pub fn new(
-        root: &Path,
-        exclude: &[String],
-        rules: &[PathRules],
-        near: bool,
-    ) -> anyhow::Result<Self> {
+    pub fn new(root: &Path, opts: &ScanOptions) -> anyhow::Result<Self> {
+        let rules = opts.rules.iter().map(compile);
         Ok(Self {
             root: root.canonicalize()?,
-            overrides: exclude_overrides(root, exclude)?,
-            rules: Arc::new(rules.iter().map(compile).collect::<anyhow::Result<_>>()?),
+            overrides: exclude_overrides(root, &opts.exclude)?,
+            rules: Arc::new(rules.collect::<anyhow::Result<_>>()?),
             nested: Arc::new(Nested {
-                near,
+                near: opts.near,
+                skip: opts.skip_nested,
                 ..Nested::default()
             }),
         })
@@ -137,7 +136,7 @@ impl PathFilter {
 
     fn read_config_in(&self, dir: &Path) {
         let file = dir.join(FILE);
-        if !file.is_file() {
+        if self.nested.skip || !file.is_file() {
             return;
         }
         match nested_rules(&file, self.nested.near).and_then(|r| compile(&r)) {

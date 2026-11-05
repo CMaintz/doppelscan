@@ -149,8 +149,9 @@ code); inside one, anchor the path (`vendor/ours/`, not `ours/`). As in
 
 A flag or tool argument overrides a setting, `--exclude` adds to the
 config's excludes, `--no-strict` turns off a configured `strict`,
-`--config FILE` reads that file instead and `--no-config` reads none. An
-unknown key is an error.
+`--config FILE` reads that file instead and `--no-config` reads none, in
+both cases including configs inside the scanned tree. An unknown key is an
+error.
 
 ## Ignoring code
 

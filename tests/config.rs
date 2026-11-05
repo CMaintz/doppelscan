@@ -445,3 +445,49 @@ fn only_the_exact_fingerprint_is_accepted() {
     std::fs::write(dir.join(".doppelscan.toml"), config).unwrap();
     assert_eq!(group_count(&dir, &["."]), 1);
 }
+
+// Catches --no-config and --config stopping at the lookup: a config inside
+// the scanned tree is still a config, on either side of a comparison.
+#[test]
+fn config_flags_also_cover_nested_configs() {
+    let dir = repo_with_config("flags-nested", "");
+    write(&dir, "src/.doppelscan.toml", "exclude = [\"*.ts\"]\n");
+    assert_eq!(group_count(&dir, &["."]), 0);
+    assert_eq!(group_count(&dir, &[".", "--no-config"]), 1);
+    let other = dir.join("other.toml");
+    std::fs::write(&other, "min-tokens = 20\n").unwrap();
+    assert_eq!(
+        group_count(&dir, &[".", "--config", other.to_str().unwrap()]),
+        1
+    );
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-qm", "pair"]);
+    let (code, out, err) = run(&dir, &["check", "--base", "HEAD", "--no-config"]);
+    assert_eq!(code, 0, "{out}{err}");
+}
+
+// Catches --no-config still parsing nested configs: it exists to get past
+// a config that does not load.
+#[test]
+fn no_config_survives_a_broken_nested_config() {
+    let dir = repo_with_config("flags-broken", "");
+    write(&dir, "src/.doppelscan.toml", "bogus = 1\n");
+    assert_eq!(run(&dir, &["."]).0, 2);
+    assert_eq!(group_count(&dir, &[".", "--no-config"]), 1);
+}
+
+// Catches near keeping its own route to nested configs.
+#[test]
+fn near_no_config_covers_nested_configs() {
+    let dir = repo_with_config("flags-near", "");
+    let edited = CLONE.replace("sumTotals", "sumFees").replace(
+        "    return",
+        "    audit(total);\n    log(total);\n    return",
+    );
+    write(&dir, "src/b.ts", &edited);
+    write(&dir, "src/.doppelscan.toml", "exclude = [\"*.ts\"]\n");
+    let args = ["near", ".", "--no-config", "--min-tokens", "20"];
+    let (code, out, err) = run(&dir, &[&args[..], &["--similarity", "0.3"]].concat());
+    assert_eq!(code, 0, "{err}");
+    assert!(!out.starts_with("0 near-miss groups"), "{out}");
+}

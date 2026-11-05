@@ -9,6 +9,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::config::{Config, Requested, Set};
+use crate::engine::ScanOptions;
 use crate::filter::{PathFilter, PathRules};
 use crate::lang::LANGS;
 use crate::walk::{BUILT_IN_SKIPS, discover};
@@ -220,7 +221,7 @@ const TEST_GLOBS: &[&str] = &[
 /// default, the languages found, and the test patterns present as near's
 /// excludes.
 pub fn init_template(root: &Path) -> anyhow::Result<String> {
-    let filter = PathFilter::new(root, &[], &[], false)?;
+    let filter = PathFilter::new(root, &ScanOptions::default())?;
     let files = discover(root, &filter, &[])?;
     let mut counts: FxHashMap<usize, usize> = FxHashMap::default();
     for (_, lang) in &files {

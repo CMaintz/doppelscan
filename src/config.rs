@@ -129,6 +129,9 @@ pub struct Config {
     pub near_rules: Vec<PathRules>,
     /// The files read, outermost first.
     pub files: Vec<PathBuf>,
+    /// Configs inside the scanned tree stay unread: the source named which
+    /// config counts.
+    pub skip_nested: bool,
 }
 
 /// Which config a command reads.
@@ -142,6 +145,7 @@ pub enum Source<'a> {
 
 impl Config {
     pub fn read(source: Source) -> anyhow::Result<Self> {
+        let skip_nested = !matches!(source, Source::Lookup(_));
         let paths = match source {
             Source::Lookup(start) => chain(start)?,
             Source::File(path) => vec![
@@ -150,7 +154,10 @@ impl Config {
             ],
             Source::None => Vec::new(),
         };
-        let mut config = Self::default();
+        let mut config = Self {
+            skip_nested,
+            ..Self::default()
+        };
         for path in paths {
             config.merge(load(&path)?, path);
         }
@@ -205,6 +212,7 @@ impl Config {
             languages: languages(&only)?,
             exclude: asked.exclude,
             rules: self.rules.clone(),
+            skip_nested: self.skip_nested,
             accept: self.accepts.iter().map(|a| a.fingerprint.clone()).collect(),
             max_param_density: asked
                 .max_param_density
