@@ -229,6 +229,9 @@ pub fn index_tokens(
 
 struct Lexer<'a> {
     source: &'a str,
+    /// Added to every token: a skipped BOM is still part of the file that
+    /// the reported offsets slice.
+    offset: u32,
     lexicon: &'a Lexicon,
     at: usize,
     line_start: bool,
@@ -236,14 +239,18 @@ struct Lexer<'a> {
 }
 
 fn tokenize(source: &str, lexicon: &Lexicon) -> Vec<Tok> {
+    // Cut off, not stepped over: its bytes would read as a word, and as
+    // the non-space before a `#` on the first line.
+    let text = source.strip_prefix('\u{feff}').unwrap_or(source);
     let mut lexer = Lexer {
-        source,
+        source: text,
+        offset: (source.len() - text.len()) as u32,
         lexicon,
         at: 0,
         line_start: true,
         toks: Vec::new(),
     };
-    while lexer.at < source.len() {
+    while lexer.at < text.len() {
         lexer.step();
     }
     lexer.toks
@@ -269,8 +276,8 @@ impl Lexer<'_> {
         let (end, class, shape) = token_at(self.source, self.at, self.lexicon);
         let first = self.source.as_bytes()[self.at];
         self.toks.push(Tok {
-            start: self.at as u32,
-            end: end as u32,
+            start: self.at as u32 + self.offset,
+            end: end as u32 + self.offset,
             class,
             number: first.is_ascii_digit(),
             shape,

@@ -516,3 +516,44 @@ fn a_head_with_a_body_is_a_definition() {
     let b = format!("error Empty();\nerror Full(uint size);\nlibrary Calc {{\n{body}}}\n");
     assert_eq!(start_lines(&scan(&[("a.sol", &a), ("b.sol", &b)])), [2, 3]);
 }
+
+const BOM: &str = "\u{feff}";
+
+const PS_FUNCTION: &str = "function Get-Total($items) {\n    $sum = Measure-Items $items -Property Amount\n    Write-Output $sum.Sum\n    return $sum.Sum * 2\n}\n";
+
+// Catches a BOM being glued to the first token: `function` becomes a name,
+// so a file saved with a BOM no longer matches its copy from line 1.
+#[test]
+fn a_bom_does_not_change_the_first_token() {
+    let with = format!("{BOM}{PS_FUNCTION}");
+    let found = scan(&[("a.ps1", PS_FUNCTION), ("b.ps1", &with)]);
+    let group = &groups(&found)[0];
+    assert_eq!(group.kind, "node");
+    let spans: Vec<_> = group
+        .occurrences
+        .iter()
+        .map(|o| (o.start_line, o.end_line))
+        .collect();
+    assert_eq!(spans, [(1, 5), (1, 5)]);
+}
+
+// Catches `#` after a BOM not opening a comment because the byte before
+// it is not whitespace: the unclosed bracket would fold the file into one
+// statement.
+#[test]
+fn a_comment_can_follow_a_bom() {
+    let with = format!("{BOM}# note (\n{CALLS}");
+    let found = scan(&[("a.ps1", CALLS), ("b.ps1", &with)]);
+    assert_eq!(start_lines(&found), [1, 2]);
+}
+
+// Catches BOM skipping shifting token offsets: a clone's text is cut from
+// the file by those offsets, so a shift would cut into the BOM or lose
+// the last byte.
+#[test]
+fn offsets_after_a_bom_still_slice_the_source() {
+    let with = format!("{BOM}{CALLS}");
+    let found = scan(&[("a.ps1", &with), ("b.ps1", &with)]);
+    let template = found.group(1, true).template.unwrap();
+    assert_eq!(template, CALLS.trim_end());
+}
