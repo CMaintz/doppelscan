@@ -23,6 +23,7 @@ use crate::engine::ScanOptions;
 use crate::hash::combine;
 use crate::index::{FileIndex, Frag, MIN_STORED_TOKENS};
 use crate::report::Detail;
+use crate::settings::wide;
 
 /// Tokens per k-gram: shorter shared runs never count as a match.
 const K: usize = 10;
@@ -63,7 +64,7 @@ pub struct NearAnalysis {
 pub struct NearGroup {
     pub id: usize,
     /// Jaccard similarity of fingerprint counts, 0 to 1.
-    pub similarity: f32,
+    pub similarity: f64,
     /// Size of the smallest copy.
     pub tokens: u32,
     /// tokens x (occurrences - 1), as for exact groups.
@@ -451,7 +452,7 @@ impl NearAnalysis {
             .collect();
         NearGroup {
             id,
-            similarity: (raw.similarity * 100.0).round() / 100.0,
+            similarity: wide((raw.similarity * 100.0).round() / 100.0),
             tokens: smallest(raw),
             score: near_score(raw),
             occurrences,

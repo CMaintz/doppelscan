@@ -351,7 +351,7 @@ fn near_with_idiom(pair: [(&str, String); 2]) -> Vec<NearGroup> {
 }
 
 /// The similarity of the group holding both a.ts and b.ts, if any.
-fn pair_similarity(found: &[NearGroup]) -> Option<f32> {
+fn pair_similarity(found: &[NearGroup]) -> Option<f64> {
     let has = |g: &NearGroup, f: &str| g.occurrences.iter().any(|o| o.file == f);
     found
         .iter()
@@ -380,7 +380,7 @@ fn a_shared_idiom_does_not_dilute_similarity() {
             ),
         ),
     ]);
-    let similarities: Vec<f32> = found.iter().map(|g| g.similarity).collect();
+    let similarities: Vec<f64> = found.iter().map(|g| g.similarity).collect();
     assert!(pair_similarity(&found).is_some(), "{similarities:?}");
 }
 
@@ -546,4 +546,17 @@ fn a_function_is_not_a_near_copy_of_its_own_lambda() {
 ";
     let gs = groups(&scan_near(&[("a.ts", code.to_string())], 0.8));
     assert!(gs.is_empty(), "{gs:?}");
+}
+
+// Catches the rounded similarity being widened from f32 on its way to
+// JSON, which printed 0.8100000023841858 for 81%.
+#[test]
+fn similarity_in_json_keeps_its_two_decimals() {
+    let gs = groups(&scan_near(
+        &[("a.ts", REPORT.to_string()), ("b.ts", with_audit(REPORT))],
+        0.7,
+    ));
+    let json = serde_json::to_value(&gs[0]).unwrap();
+    let similarity = json["similarity"].to_string();
+    assert!(similarity.len() <= 4, "{similarity}");
 }
