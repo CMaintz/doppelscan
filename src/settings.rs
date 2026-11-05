@@ -78,7 +78,7 @@ pub fn explain(config: &Config, asked: &Requested, near_similarity: Option<f32>)
         include: patterns(&config.rules, |r| &r.include),
         near_exclude: patterns(&config.near_rules, |r| &r.exclude),
         built_in_skips: Skips {
-            dirs: BUILT_IN_SKIPS.dirs.to_vec(),
+            dirs: [BUILT_IN_SKIPS.dirs, BUILT_IN_SKIPS.generated_dirs].concat(),
             names: BUILT_IN_SKIPS.names.to_vec(),
             generated_markers: BUILT_IN_SKIPS.generated_markers.to_vec(),
         },

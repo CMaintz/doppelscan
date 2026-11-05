@@ -121,9 +121,9 @@ pub fn discover(
 }
 
 /// The language of a file known from a listing rather than a walk (a git
-/// revision), or `None` when a walk would have skipped it: an excluded or
-/// directory, or an exclude matching it or any parent. `rel` is relative
-/// to the scanned root.
+/// revision), or `None` when a walk would have skipped it: a built-in
+/// skipped directory, or an exclude matching it or any parent. `rel` is
+/// relative to the scanned root.
 pub fn accept_listed(rel: &Path, filter: &PathFilter, languages: &[usize]) -> Option<usize> {
     let excluded = rel
         .ancestors()
@@ -160,6 +160,7 @@ fn is_skipped_name(name: &str) -> bool {
 /// The skip list a config cannot see, for `doppelscan config` to show.
 pub struct BuiltInSkips {
     pub dirs: &'static [&'static str],
+    pub generated_dirs: &'static [&'static str],
     /// File name globs.
     pub names: &'static [&'static str],
     /// A file with one of these in its first KB is taken for generated.
@@ -168,6 +169,7 @@ pub struct BuiltInSkips {
 
 pub const BUILT_IN_SKIPS: BuiltInSkips = BuiltInSkips {
     dirs: EXCLUDED_DIRS,
+    generated_dirs: GENERATED_DIRS,
     names: SKIPPED_NAMES,
     generated_markers: GENERATED_MARKERS,
 };
