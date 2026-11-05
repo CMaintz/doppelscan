@@ -10,6 +10,8 @@
 //! knows what a binding is, so these files get no renames and no near-miss
 //! units.
 
+use std::borrow::Cow;
+
 use crate::hash::{combine, hash_bytes, seed};
 use crate::index::{
     FileIndex, Frag, Leaf, LeafClass, MIN_STORED_TOKENS, NO_SCOPE, Role, Seqs, line_starts,
@@ -196,7 +198,7 @@ pub fn index_tokens(
 ) -> FileIndex {
     let lang_seed = hash_bytes(LANGS[lang].name.as_bytes());
     let lines = line_starts(&source);
-    let mut builder = Builder::new(&source, strict, lang_seed);
+    let mut builder = Builder::new(&source, strict, lexicon.ignore_case, lang_seed);
     for tok in tokenize(&source, lexicon) {
         builder.push(&tok);
     }
@@ -400,18 +402,25 @@ fn char_end(source: &str, i: usize) -> usize {
 }
 
 fn word_class(word: &str, lexicon: &Lexicon) -> LeafClass {
-    let folded;
-    let word = if lexicon.ignore_case {
-        folded = word.to_ascii_lowercase();
-        folded.as_str()
-    } else {
-        word
-    };
-    if KEYWORDS.contains(&word) || lexicon.keywords.contains(&word) {
+    let ignore_case = lexicon.ignore_case;
+    if find_word(KEYWORDS, word, ignore_case).is_some()
+        || find_word(lexicon.keywords, word, ignore_case).is_some()
+    {
         LeafClass::Other
     } else {
         LeafClass::Identifier
     }
+}
+
+/// The entry of `list` that `word` spells, as `list` spells it.
+fn find_word(list: &[&'static str], word: &str, ignore_case: bool) -> Option<&'static str> {
+    list.iter().copied().find(|entry| {
+        if ignore_case {
+            entry.eq_ignore_ascii_case(word)
+        } else {
+            *entry == word
+        }
+    })
 }
 
 /// A statement being read.
@@ -440,6 +449,7 @@ struct Block {
 struct Builder<'a> {
     source: &'a str,
     strict: bool,
+    ignore_case: bool,
     lang_seed: u64,
     leaves: Vec<Leaf>,
     nodes: Vec<Frag>,
@@ -450,10 +460,11 @@ struct Builder<'a> {
 }
 
 impl<'a> Builder<'a> {
-    fn new(source: &'a str, strict: bool, lang_seed: u64) -> Self {
+    fn new(source: &'a str, strict: bool, ignore_case: bool, lang_seed: u64) -> Self {
         Self {
             source,
             strict,
+            ignore_case,
             lang_seed,
             leaves: Vec::new(),
             nodes: Vec::new(),
@@ -545,10 +556,20 @@ impl<'a> Builder<'a> {
     fn leaf_hash(&self, tok: &Tok) -> u64 {
         let text = &self.source.as_bytes()[tok.start as usize..tok.end as usize];
         match tok.class {
-            LeafClass::Identifier => placeholder(self.strict, 1, text),
+            // Only --strict reads the text, so only it pays to fold it.
+            LeafClass::Identifier if self.strict => placeholder(true, 1, &self.folded(text)),
+            LeafClass::Identifier => placeholder(false, 1, text),
             LeafClass::Literal if tok.number => placeholder(self.strict, 3, text),
             LeafClass::Literal => placeholder(self.strict, 2, text),
-            LeafClass::Other => combine(TOKEN_KIND, hash_bytes(text)),
+            LeafClass::Other => combine(TOKEN_KIND, hash_bytes(&self.folded(text))),
+        }
+    }
+
+    fn folded<'t>(&self, text: &'t [u8]) -> Cow<'t, [u8]> {
+        if self.ignore_case && text.iter().any(u8::is_ascii_uppercase) {
+            Cow::Owned(text.to_ascii_lowercase())
+        } else {
+            Cow::Borrowed(text)
         }
     }
 
@@ -605,9 +626,10 @@ impl<'a> Builder<'a> {
         let [first, second, ..] = leaves else {
             return false;
         };
-        let (head, next) = (self.leaf_text(first), self.leaf_text(second));
-        DIRECTIVE_NOISE.contains(&(head, next))
-            || (NOISE_HEADS.contains(&head) && self.imports(stmt, head, leaves))
+        let (word, next) = (self.leaf_text(first), self.leaf_text(second));
+        DIRECTIVE_NOISE.contains(&(word, next))
+            || find_word(NOISE_HEADS, word, self.ignore_case)
+                .is_some_and(|head| self.imports(stmt, head, leaves))
     }
 
     /// Whether a statement opening with a head word is an import: what it

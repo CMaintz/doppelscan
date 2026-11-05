@@ -56,7 +56,9 @@ pub struct Lexicon {
     /// Keywords beyond the shared list, for languages whose keywords are
     /// common names elsewhere (SQL's `order`, `values`).
     pub keywords: &'static [&'static str],
-    /// Keywords match in any case (SQL's `SELECT`, PowerShell's `If`).
+    /// Keywords and names match in any case, as they do to the language
+    /// (SQL's `SELECT` and `Orders`, PowerShell's `If` and `$Total`).
+    /// Literals keep theirs.
     pub ignore_case: bool,
     /// Quote bytes that open a multi-line string when tripled. Everywhere
     /// else `''''` is a quoted quote or adjacent empty strings.
@@ -121,6 +123,10 @@ impl Lang {
     fn opt_in(mut self) -> Self {
         self.opt_in = true;
         self
+    }
+
+    pub fn ignores_case(&self) -> bool {
+        matches!(&self.syntax, Syntax::Tokens(lexicon) if lexicon.ignore_case)
     }
 
     pub fn class_of(&self, kind_id: u16) -> KindClass {

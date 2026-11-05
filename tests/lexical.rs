@@ -603,3 +603,57 @@ fn ruby_block_comments_run_from_line_start_to_line_start() {
     let found = scan(&[("a.rb", &a), ("b.rb", RUBY_METHOD)]);
     assert_eq!(start_lines(&found), [5, 1]);
 }
+
+const CASED_QUERY: &str = "SELECT Id, Total, Status\nFROM Orders\nWHERE Total > 10\nORDER BY Id DESC;\nDELETE FROM Audit WHERE Age > 30;\n";
+
+// Catches keywords being hashed with their case: SQL's `SELECT` and
+// `select` are one keyword, so a query and its lowercased copy are a clone.
+#[test]
+fn sql_keywords_match_in_any_case() {
+    let lower = CASED_QUERY.to_lowercase();
+    assert_eq!(scan(&[("a.sql", CASED_QUERY), ("b.sql", &lower)]).groups.len(), 1);
+}
+
+// Catches names differing only in case being hashed apart under --strict:
+// `Orders` and `orders` are the same table, as PowerShell's `$Sum` and
+// `$sum` are the same variable.
+#[test]
+fn strict_folds_names_where_the_language_does() {
+    let lower = CASED_QUERY.to_lowercase();
+    let found = scan_with(&[("a.sql", CASED_QUERY), ("b.sql", &lower)], true);
+    assert_eq!(found.groups.len(), 1);
+    let found = scan_with(&[("a.c", SUM_PAID), ("b.c", &SUM_PAID.to_lowercase())], true);
+    assert!(found.groups.is_empty(), "{:?}", found.groups);
+}
+
+// Catches a keyword or name differing in case counting as a parameter:
+// there is nothing for a helper to take, and enough of them trip the
+// density veto and drop the group.
+#[test]
+fn case_alone_is_not_a_parameter() {
+    let lower = CASED_QUERY.to_lowercase();
+    let found = scan(&[("a.sql", CASED_QUERY), ("b.sql", &lower)]);
+    assert!(groups(&found)[0].parameters.is_empty());
+}
+
+// Catches case folding reaching literals: `'Paid'` and `'paid'` are
+// different values even in SQL, so they stay a parameter.
+#[test]
+fn a_string_keeps_its_case() {
+    let a = format!("UPDATE Orders SET Status = 'Paid' WHERE Id = 7;\n{CASED_QUERY}");
+    let b = a.replace("'Paid'", "'paid'");
+    let g = &groups(&scan(&[("a.sql", &a), ("b.sql", &b)]))[0];
+    assert_eq!(g.parameters.len(), 1);
+    assert_eq!(g.parameters[0].values, ["'Paid'", "'paid'"]);
+}
+
+// Catches an uppercase import escaping the noise list: `USE shop` is `use
+// shop`, and a repeated block of it is not a clone.
+#[test]
+fn imports_match_in_any_case_where_keywords_do() {
+    for line in ["USE shop;", "USE [shop]"] {
+        let imports = format!("{line}\n").repeat(12);
+        let found = scan(&[("a.sql", &imports), ("b.sql", &imports)]);
+        assert!(found.groups.is_empty(), "{line}: {:?}", found.groups);
+    }
+}
