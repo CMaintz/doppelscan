@@ -97,6 +97,16 @@ impl PathFilter {
         (builtin && !included) || self.matches(&abs, false, |c| &c.exclude)
     }
 
+    /// Whether a config's `include` names the file `rel`, relative to the
+    /// scanned path.
+    pub fn includes(&self, rel: &Path) -> bool {
+        let no_nested = self.nested.found.read().unwrap().is_empty();
+        if self.rules.is_empty() && no_nested {
+            return false;
+        }
+        self.matches(&self.absolute(rel), false, |c| &c.include)
+    }
+
     /// Whether `--exclude` matches `rel`, relative to the scanned path.
     /// Asked with the path the walk would ask with: the matcher strips its
     /// root as a prefix, so a bare `rel` that happens to start with a name

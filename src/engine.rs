@@ -16,7 +16,7 @@ use crate::filter::{PathFilter, PathRules};
 use crate::index::{FileIndex, MIN_STORED_TOKENS, index_source};
 use crate::report::{Analysis, fingerprint};
 use crate::variation::{self, Kind, Variation};
-use crate::walk::{MAX_FILE_BYTES, discover, looks_generated};
+use crate::walk::{Found, MAX_FILE_BYTES, discover, looks_generated};
 
 #[derive(Clone, Debug)]
 pub struct ScanOptions {
@@ -84,9 +84,14 @@ struct Cached {
     index: Option<Arc<FileIndex>>,
 }
 
+/// Root, file, strict, included: what the indexed result hangs on besides
+/// the file's stamp. `included` counts because a config can start naming a
+/// generated file without the file itself changing.
+type CacheKey = (PathBuf, PathBuf, bool, bool);
+
 #[derive(Default)]
 pub struct Engine {
-    cache: Mutex<FxHashMap<(PathBuf, PathBuf, bool), Cached>>,
+    cache: Mutex<FxHashMap<CacheKey, Cached>>,
 }
 
 /// An in-memory file, for tests and for snippets an agent asks about.
@@ -114,8 +119,8 @@ impl Engine {
         let base = base.as_deref().unwrap_or(&root);
         let indexed: Vec<_> = found
             .par_iter()
-            .map_init(Parser::new, |parser, (path, lang)| {
-                self.index_cached(parser, base, path, *lang, opts.strict)
+            .map_init(Parser::new, |parser, file| {
+                self.index_cached(parser, base, file, opts.strict)
             })
             .collect();
         Ok(indexed.into_iter().flatten().collect())
@@ -125,16 +130,16 @@ impl Engine {
         &self,
         parser: &mut Parser,
         root: &Path,
-        path: &Path,
-        lang: usize,
+        file: &Found,
         strict: bool,
     ) -> Option<Arc<FileIndex>> {
+        let path = file.path.as_path();
         let meta = std::fs::metadata(path).ok()?;
         if meta.len() > MAX_FILE_BYTES {
             return None;
         }
         let stamp = (meta.modified().ok()?, meta.len());
-        let key = (root.to_path_buf(), path.to_path_buf(), strict);
+        let key = (root.to_path_buf(), path.to_path_buf(), strict, file.included);
         if let Some(hit) = self
             .cache
             .lock()
@@ -144,7 +149,7 @@ impl Engine {
         {
             return hit.index.clone();
         }
-        let index = read_and_index(parser, root, path, lang, strict);
+        let index = read_and_index(parser, root, file, strict);
         self.cache.lock().unwrap().insert(
             key,
             Cached {
@@ -159,15 +164,15 @@ impl Engine {
 fn read_and_index(
     parser: &mut Parser,
     root: &Path,
-    path: &Path,
-    lang: usize,
+    file: &Found,
     strict: bool,
 ) -> Option<Arc<FileIndex>> {
-    let text = String::from_utf8(std::fs::read(path).ok()?).ok()?;
-    if looks_generated(&text) {
+    let text = String::from_utf8(std::fs::read(&file.path).ok()?).ok()?;
+    if looks_generated(&text, file.included) {
         return None;
     }
-    index_source(parser, display_path(root, path), lang, text, strict).map(Arc::new)
+    let shown = display_path(root, &file.path);
+    index_source(parser, shown, file.lang, text, strict).map(Arc::new)
 }
 
 fn display_path(root: &Path, path: &Path) -> String {

@@ -81,11 +81,19 @@ const GENERATED_MARKERS: &[&str] = &[
 
 pub const MAX_FILE_BYTES: u64 = 1 << 20;
 
+/// A source file a walk turned up.
+pub struct Found {
+    pub path: PathBuf,
+    pub lang: usize,
+    /// A config's `include` names it, so a generated marker does not count.
+    pub included: bool,
+}
+
 pub fn discover(
     root: &Path,
     filter: &PathFilter,
     languages: &[usize],
-) -> anyhow::Result<Vec<(PathBuf, usize)>> {
+) -> anyhow::Result<Vec<Found>> {
     // A file named directly is scanned even in an opt-in language.
     let named = root.is_file() && languages.is_empty();
     let own: Vec<usize> = lang_index_for_path(root).into_iter().collect();
@@ -106,7 +114,8 @@ pub fn discover(
     let found = Mutex::new(Vec::new());
     walker.run(|| {
         Box::new(|entry| {
-            if let Some(hit) = entry.ok().and_then(|e| accept(e.path(), languages)) {
+            let hit = entry.ok().and_then(|e| found_at(e.path(), root, filter, languages));
+            if let Some(hit) = hit {
                 found.lock().unwrap().push(hit);
             }
             WalkState::Continue
@@ -116,8 +125,23 @@ pub fn discover(
         return Err(e);
     }
     let mut files = found.into_inner().unwrap();
-    files.sort();
+    files.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(files)
+}
+
+fn found_at(
+    path: &Path,
+    root: &Path,
+    filter: &PathFilter,
+    languages: &[usize],
+) -> Option<Found> {
+    let (path, lang) = accept(path, languages)?;
+    let included = filter.includes(path.strip_prefix(root).unwrap_or(&path));
+    Some(Found {
+        path,
+        lang,
+        included,
+    })
 }
 
 /// The language of a file known from a listing rather than a walk (a git
@@ -194,10 +218,11 @@ fn accept(path: &Path, languages: &[usize]) -> Option<(PathBuf, usize)> {
 }
 
 /// Minified bundles and generated files are duplication nobody should
-/// refactor by hand.
-pub fn looks_generated(source: &str) -> bool {
+/// refactor by hand. An `included` file was asked for, marker or not; being
+/// minified still rules it out, since nothing in it could be extracted.
+pub fn looks_generated(source: &str, included: bool) -> bool {
     let head = &source[..source.floor_char_boundary(1024)];
-    if GENERATED_MARKERS.iter().any(|m| head.contains(m)) {
+    if !included && GENERATED_MARKERS.iter().any(|m| head.contains(m)) {
         return true;
     }
     let lines = source.lines().count().max(1);

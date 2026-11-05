@@ -44,7 +44,7 @@ pub fn read_revision(
     let filter = PathFilter::new(dir, opts)?;
     let scanned: FxHashSet<String> = discover(dir, &filter, &opts.languages)?
         .into_iter()
-        .filter_map(|(path, _)| relative(dir, &path))
+        .filter_map(|file| relative(dir, &file.path))
         .collect();
     let listed = list_tree(dir, rev)?;
     let submodules = listed
@@ -67,7 +67,8 @@ pub fn read_revision(
         .zip(contents)
         .filter_map(|((l, lang), bytes)| {
             let text = String::from_utf8(bytes?).ok()?;
-            (!looks_generated(&text)).then(|| Source {
+            let included = filter.includes(Path::new(&l.path));
+            (!looks_generated(&text, included)).then(|| Source {
                 path: format!("{display_prefix}{}", l.path),
                 lang,
                 text,

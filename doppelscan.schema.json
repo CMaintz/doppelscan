@@ -24,7 +24,7 @@
       }
     },
     "include": {
-      "description": ".gitignore patterns, relative to this file, of directories the\nbuilt-in skip list leaves out that should be scanned.",
+      "description": ".gitignore patterns, relative to this file, of directories the\nbuilt-in skip list leaves out that should be scanned. What they\nname is scanned even when marked as generated.",
       "type": "array",
       "default": [],
       "items": {

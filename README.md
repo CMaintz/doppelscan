@@ -144,7 +144,9 @@ from configs inside the scanned tree, so a package's excludes hold whether
 the scan starts at the package or at the root; that package's other
 settings only apply to a scan that starts inside it. `include` brings back
 directories the built-in list skips (dependencies, build output, generated
-code); inside one, anchor the path (`vendor/ours/`, not `ours/`). As in
+code), and what it names is scanned even when marked as generated; minified
+files stay out. Inside a skipped directory, anchor the path (`vendor/ours/`,
+not `ours/`). As in
 `.gitignore`, nothing inside an excluded directory can be re-included.
 
 A flag or tool argument overrides a setting, `--exclude` adds to the

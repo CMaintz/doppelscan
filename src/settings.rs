@@ -190,7 +190,7 @@ pub fn render(e: &Effective) -> String {
     }
     let skips = &e.built_in_skips;
     out.push_str(&format!(
-        "\nBuilt-in skips (`include` brings directories back):\n  dirs: {}\n  names: {}\n  generated markers: {}\n",
+        "\nBuilt-in skips (`include` brings back directories and marked files):\n  dirs: {}\n  names: {}\n  generated markers: {}\n",
         skips.dirs.join(", "),
         skips.names.join(", "),
         skips.generated_markers.join(", ")
@@ -224,12 +224,12 @@ pub fn init_template(root: &Path) -> anyhow::Result<String> {
     let filter = PathFilter::new(root, &ScanOptions::default())?;
     let files = discover(root, &filter, &[])?;
     let mut counts: FxHashMap<usize, usize> = FxHashMap::default();
-    for (_, lang) in &files {
-        *counts.entry(*lang).or_default() += 1;
+    for file in &files {
+        *counts.entry(file.lang).or_default() += 1;
     }
     let mut langs: Vec<(usize, usize)> = counts.into_iter().collect();
     langs.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-    let tests = present_tests(root, files.iter().map(|(p, _)| p.as_path()))?;
+    let tests = present_tests(root, files.iter().map(|f| f.path.as_path()))?;
     Ok(template(&langs, &tests))
 }
 

@@ -44,7 +44,8 @@ struct File {
     #[serde(default)]
     exclude: Vec<String>,
     /// .gitignore patterns, relative to this file, of directories the
-    /// built-in skip list leaves out that should be scanned.
+    /// built-in skip list leaves out that should be scanned. What they
+    /// name is scanned even when marked as generated.
     #[serde(default)]
     include: Vec<String>,
     /// Groups needing more parameters than this per 100 tokens are dropped
