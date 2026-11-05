@@ -111,11 +111,13 @@ impl Analysis {
             return Some(id);
         }
         let whole = key.len() == FINGERPRINT_CHARS;
-        if !whole && (digits || key.len() < MIN_FINGERPRINT_PREFIX) {
-            return None;
-        }
-        let mut hits =
-            (1..=self.groups.len()).filter(|&i| fingerprint(&self.groups[i - 1]).starts_with(&key));
+        let usable = whole || (!digits && key.len() >= MIN_FINGERPRINT_PREFIX);
+        usable.then(|| self.by_fingerprint(&key)).flatten()
+    }
+
+    fn by_fingerprint(&self, prefix: &str) -> Option<usize> {
+        let mut hits = (1..=self.groups.len())
+            .filter(|&i| fingerprint(&self.groups[i - 1]).starts_with(prefix));
         let first = hits.next()?;
         hits.next().is_none().then_some(first)
     }
@@ -137,18 +139,23 @@ impl Analysis {
         anyhow::ensure!(from <= to, "line range {from}-{to} ends before it starts");
         let file = file.replace('\\', "/");
         let file = file.trim_start_matches("./");
-        anyhow::ensure!(
-            self.files.iter().any(|f| f.path == file),
-            "{file} is not among the {} files scanned: it is missing, excluded, generated or \
-             in another language; pass the path as results show it",
-            self.files.len()
-        );
+        self.require_scanned(file)?;
         let covers = |o: &Occ| {
             self.files[o.file as usize].path == file && o.start_line <= to && from <= o.end_line
         };
         Ok((1..=self.groups.len())
             .filter(|&id| self.groups[id - 1].occs.iter().any(covers))
             .collect())
+    }
+
+    fn require_scanned(&self, file: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.files.iter().any(|f| f.path == file),
+            "{file} is not among the {} files scanned: it is missing, excluded, generated or \
+             in another language; pass the path as results show it",
+            self.files.len()
+        );
+        Ok(())
     }
 
     pub fn summary(&self) -> Summary {

@@ -407,22 +407,20 @@ fn line_range(args: &Value) -> anyhow::Result<(u32, u32)> {
 fn find_similar(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<String> {
     let code =
         str_arg(args, "code").ok_or_else(|| anyhow::anyhow!("missing required argument: code"))?;
-    let lang_name = str_arg(args, "language")
-        .ok_or_else(|| anyhow::anyhow!("missing required argument: language"))?;
-    let lang = lang_index_by_name(lang_name).ok_or_else(|| {
-        anyhow::anyhow!("unknown language {lang_name:?}; known: {}", known_langs())
-    })?;
-    let found = engine.similar(
-        &scan_root(root, args)?,
-        code,
-        lang,
-        &snippet_options(root, args)?,
-    )?;
+    let (lang, opts) = (snippet_lang(args)?, snippet_options(root, args)?);
+    let found = engine.similar(&scan_root(root, args)?, code, lang, &opts)?;
     if found.hits.is_empty() && found.accepted.is_empty() {
         return Ok("No existing code matches this snippet's structure.\n".into());
     }
     let out = render(&found.analysis, &found.hits, false);
     Ok(out + &render_accepted(&found.analysis, &found.accepted))
+}
+
+fn snippet_lang(args: &Value) -> anyhow::Result<usize> {
+    let name = str_arg(args, "language")
+        .ok_or_else(|| anyhow::anyhow!("missing required argument: language"))?;
+    lang_index_by_name(name)
+        .ok_or_else(|| anyhow::anyhow!("unknown language {name:?}; known: {}", known_langs()))
 }
 
 /// The same as `doppelscan config --format json`, so an agent sees what a
