@@ -177,15 +177,16 @@ impl Baseline {
 
     /// The entries still needed to excuse `now`, with counts lowered and
     /// places cut to what remains. Never adds an entry, a place or a copy,
-    /// so pruning cannot accept new duplication.
-    pub fn pruned(&self, now: &Analysis) -> Self {
+    /// so pruning cannot accept new duplication. `now` is a scan of `scope`;
+    /// entries it cannot see all of are kept as they are.
+    pub fn pruned(&self, now: &Analysis, scope: &Scope) -> Self {
         let found = now.groups.iter().chain(&now.accepted);
         let current: Vec<Entry> = found.map(|group| entry(now, group)).collect();
-        let groups = self
-            .groups
-            .iter()
-            .filter_map(|e| e.pruned(&current))
-            .collect();
+        let judged = |e: &Entry| match scope.sees_all_of(e) {
+            true => e.pruned(&current),
+            false => Some(e.clone()),
+        };
+        let groups = self.groups.iter().filter_map(judged).collect();
         Self {
             version: VERSION,
             settings: self.settings.clone(),
@@ -202,6 +203,37 @@ impl Baseline {
             (e.fingerprint == group.fingerprint && group.occurrences <= e.occurrences)
                 || is_shrunk_from(group, e)
         })
+    }
+}
+
+/// The part of a baseline's directory one scan covers. The default is all
+/// of it.
+#[derive(Debug, Clone, Default)]
+pub struct Scope {
+    within: String,
+}
+
+impl Scope {
+    /// `path` is a directory or file, relative to the baseline's directory.
+    pub fn of(path: &str) -> Self {
+        Self {
+            within: path.trim_end_matches('/').to_string(),
+        }
+    }
+
+    /// A partial scan has to see every copy to judge an entry: a copy left
+    /// alone inside it forms no group there, so it would look deleted while
+    /// its twin outside lives on. Fewer places than copies means a copy has
+    /// moved somewhere no place records, which may be outside.
+    fn sees_all_of(&self, e: &Entry) -> bool {
+        self.within.is_empty()
+            || (e.places.len() >= e.occurrences && e.places.iter().all(|p| self.holds(p)))
+    }
+
+    fn holds(&self, place: &str) -> bool {
+        place
+            .strip_prefix(&self.within)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(['/', '#']))
     }
 }
 
