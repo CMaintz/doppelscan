@@ -97,7 +97,7 @@ pub fn explain(config: &Config, asked: &Requested, near_similarity: Option<f32>)
             })
             .collect(),
         built_in_skips: Skips {
-            dirs: BUILT_IN_SKIPS.dirs.to_vec(),
+            dirs: [BUILT_IN_SKIPS.dirs, BUILT_IN_SKIPS.generated_dirs].concat(),
             names: BUILT_IN_SKIPS.names.to_vec(),
             generated_markers: BUILT_IN_SKIPS.generated_markers.to_vec(),
         },
