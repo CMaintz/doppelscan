@@ -189,9 +189,11 @@ reason = "Generated from the OpenAPI spec; regenerated, never edited."
 ```
 
 An accepted group is left out of every report and never fails `check`,
-however many copies it has. Editing the code changes its fingerprint, so
-the clone comes back for another look. `near` groups have no fingerprint
-and are not affected.
+however many copies it has. A change to the code's structure changes its
+fingerprint, so the clone comes back for another look; renaming things or
+changing literals does not, unless the scan is `strict`, where any text
+change does and fingerprints differ from a non-strict scan's. Hex case does
+not matter. `near` groups have no fingerprint and are not affected.
 
 ## Gating new duplication
 

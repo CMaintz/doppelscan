@@ -384,8 +384,9 @@ fn template(langs: &[(usize, usize)], tests: &[&str]) -> String {
 # min-tokens = 0
 
 # A clone group kept on purpose, by the fingerprint doppelscan shows in
-# brackets: left out of every report and never failing `check`. Editing
-# the code changes the fingerprint, so it comes back for another look.
+# brackets: left out of every report and never failing `check`. Changing
+# the code's structure changes the fingerprint, so it comes back for another
+# look; renames and changed literals do not, unless the scan is strict.
 # [[accept]]
 # fingerprint = \"b4a94232d76e\"
 # reason = \"Generated from the OpenAPI spec; regenerated, never edited.\"

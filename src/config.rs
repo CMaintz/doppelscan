@@ -59,8 +59,9 @@ struct File {
     check: CheckFile,
     /// Clone groups the team has decided to keep, by fingerprint. They are
     /// left out of every report and never fail `check`, however many
-    /// copies there are. A change to the code changes the fingerprint, so
-    /// the clone comes back for another look.
+    /// copies there are. A change to the code's structure changes the
+    /// fingerprint, so the clone comes back for another look; renames and
+    /// changed literals do not, unless the scan is strict.
     #[serde(default)]
     accept: Vec<AcceptFile>,
 }
@@ -214,7 +215,7 @@ impl Config {
             exclude: asked.exclude,
             rules: self.rules.clone(),
             skip_nested: self.skip_nested,
-            accept: self.accepts.iter().map(|a| a.fingerprint.clone()).collect(),
+            accept: self.accepts.iter().map(normalized_fingerprint).collect(),
             max_param_density: asked
                 .max_param_density
                 .or(value(&self.max_param_density))
@@ -250,6 +251,11 @@ impl Config {
     pub fn similarity(&self, asked: Option<f32>) -> f32 {
         asked.or(value(&self.similarity)).unwrap_or(0.8)
     }
+}
+
+/// As the scan prints it; `show` takes either case, so a config may too.
+fn normalized_fingerprint(accept: &Accept) -> String {
+    accept.fingerprint.to_ascii_lowercase()
 }
 
 fn override_with<T>(slot: &mut Option<Set<T>>, nearer: Option<T>, from: &Path) {

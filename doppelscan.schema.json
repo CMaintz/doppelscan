@@ -5,7 +5,7 @@
   "type": "object",
   "properties": {
     "accept": {
-      "description": "Clone groups the team has decided to keep, by fingerprint. They are\nleft out of every report and never fail `check`, however many\ncopies there are. A change to the code changes the fingerprint, so\nthe clone comes back for another look.",
+      "description": "Clone groups the team has decided to keep, by fingerprint. They are\nleft out of every report and never fail `check`, however many\ncopies there are. A change to the code's structure changes the\nfingerprint, so the clone comes back for another look; renames and\nchanged literals do not, unless the scan is strict.",
       "type": "array",
       "items": {
         "$ref": "#/$defs/AcceptFile"

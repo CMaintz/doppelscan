@@ -768,3 +768,15 @@ fn a_config_that_reaches_or_has_no_patterns_does_not_warn() {
     let (_, _, err) = run(&repo, &["src", "--config", "gate.toml"]);
     assert!(!err.contains("warning:"), "{err}");
 }
+
+// Catches accepting a fingerprint only in the case doppelscan prints it,
+// while `show` takes either: the clone stays reported with no hint why.
+#[test]
+fn an_accepted_fingerprint_matches_in_any_case() {
+    let dir = repo_with_config("accept-case", "");
+    let fingerprint = only_fingerprint(&dir).to_uppercase();
+    assert_eq!(run(&dir, &["show", &fingerprint]).0, 0);
+    let config = format!("[[accept]]\nfingerprint = \"{fingerprint}\"\nreason = \"x\"\n");
+    std::fs::write(dir.join(".doppelscan.toml"), config).unwrap();
+    assert_eq!(group_count(&dir, &["."]), 0);
+}
