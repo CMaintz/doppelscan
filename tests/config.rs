@@ -635,3 +635,21 @@ fn a_symlink_named_directly_is_still_scanned() {
     let report: Value = serde_json::from_str(&out).unwrap();
     assert_eq!(report["summary"]["files"], 1, "{out}");
 }
+
+// Catches a directory entered only on the way to an include being treated
+// as wanted: a dependency's broken config would fail the scan.
+#[test]
+fn a_config_in_a_directory_only_passed_through_is_not_read() {
+    let dir = repo_with_config("reach", "include = [\"**/generated/\"]\n");
+    write(&dir, "node_modules/foo/.doppelscan.toml", "bogus = 1\n");
+    assert_eq!(group_count(&dir, &["."]), 1);
+}
+
+// Catches losing configs where they do count: a directory the include
+// names is scanned, so its config has its say.
+#[test]
+fn a_config_in_an_included_directory_still_applies() {
+    let dir = repo_with_config("reach-included", "include = [\"vendor/ours/\"]\n");
+    write(&dir, "vendor/ours/.doppelscan.toml", "bogus = 1\n");
+    assert_eq!(run(&dir, &["."]).0, 2);
+}

@@ -80,9 +80,13 @@ impl PathFilter {
     pub fn skips_dir(&self, rel: &Path) -> bool {
         let abs = self.absolute(rel);
         let builtin = rel.components().any(|c| is_excluded_dir(c.as_os_str()));
-        let wanted = self.matches(&abs, true, |c| &c.include) || self.reaches_include(&abs);
+        let included = self.matches(&abs, true, |c| &c.include);
+        let wanted = included || self.reaches_include(&abs);
         let skipped = (builtin && !wanted) || self.matches(&abs, true, |c| &c.exclude);
-        if !skipped && !rel.as_os_str().is_empty() {
+        // A skipped directory entered only on the way to an include has no
+        // say: its config is a dependency's, and may not even load.
+        let passing_through = builtin && !included;
+        if !skipped && !passing_through && !rel.as_os_str().is_empty() {
             self.read_config_in(&abs);
         }
         skipped
