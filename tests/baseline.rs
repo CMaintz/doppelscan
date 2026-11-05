@@ -561,3 +561,15 @@ fn a_non_utf8_directory_is_left_out_of_the_walk() {
     assert_eq!(code, 0, "{out}");
     assert!(!out.contains("c.ts"), "{out}");
 }
+
+// Catches a case-only rename reading as new where the filesystem folds
+// case: the old name still "exists", but no scanned path spells it that way,
+// so the revision side dropped it. Trivially green on a case-sensitive
+// filesystem, where the old name is simply gone.
+#[test]
+fn an_uncommitted_case_only_rename_is_not_new() {
+    let dir = repo("case-rename");
+    git(&dir, &["mv", "-f", "src/a.ts", "src/A.ts"]);
+    let (code, out) = doppelscan(&dir, &["check", "--base", "HEAD"]);
+    assert_eq!(code, 0, "{out}");
+}

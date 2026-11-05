@@ -45,6 +45,7 @@ pub fn read_revision(
     let scanned: FxHashSet<String> = discover(dir, &filter, &opts.languages)?
         .into_iter()
         .filter_map(|file| relative(dir, &file.path))
+        .map(|path| case_folded(&path))
         .collect();
     let listed = list_tree(dir, rev)?;
     let submodules = listed
@@ -57,7 +58,7 @@ pub fn read_revision(
         .filter(|l| !l.submodule)
         .filter_map(|l| {
             let lang = accept_listed(Path::new(&l.path), &filter, &opts.languages)?;
-            let wanted = !dir.join(&l.path).exists() || scanned.contains(&l.path);
+            let wanted = !dir.join(&l.path).exists() || scanned.contains(&case_folded(&l.path));
             wanted.then_some((l, lang))
         })
         .collect();
@@ -79,6 +80,17 @@ pub fn read_revision(
         sources,
         submodules,
     })
+}
+
+/// A path as these filesystems compare it. After a case-only rename the old
+/// spelling still "exists" there, and comparing it exactly would drop the
+/// file from the revision and make its unchanged clones read as new.
+fn case_folded(path: &str) -> String {
+    if cfg!(any(windows, target_os = "macos")) {
+        path.to_lowercase()
+    } else {
+        path.to_string()
+    }
 }
 
 fn relative(dir: &Path, path: &Path) -> Option<String> {
