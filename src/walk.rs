@@ -128,7 +128,7 @@ pub fn accept_listed(rel: &Path, filter: &PathFilter, languages: &[usize]) -> Op
     let excluded = rel
         .ancestors()
         .filter(|a| !a.as_os_str().is_empty())
-        .any(|a| filter.overrides.matched(a, a != rel).is_ignore());
+        .any(|a| filter.excluded_by_glob(a, a != rel));
     // Every directory on the way, as the walk would prune it: a file under
     // an excluded directory stays out even where a pattern re-includes it.
     let pruned = rel

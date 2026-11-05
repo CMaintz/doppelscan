@@ -33,6 +33,8 @@ pub struct PathRules {
 pub struct PathFilter {
     /// The scanned path, canonical, to anchor config patterns against.
     root: PathBuf,
+    /// The scanned path as the walk sees it, which `overrides` is rooted at.
+    given_root: PathBuf,
     pub(crate) overrides: Override,
     rules: Arc<Vec<Compiled>>,
     nested: Arc<Nested>,
@@ -62,6 +64,7 @@ impl PathFilter {
         let rules = opts.rules.iter().map(compile);
         Ok(Self {
             root: root.canonicalize()?,
+            given_root: root.to_path_buf(),
             overrides: exclude_overrides(root, &opts.exclude)?,
             rules: Arc::new(rules.collect::<anyhow::Result<_>>()?),
             nested: Arc::new(Nested {
@@ -94,16 +97,23 @@ impl PathFilter {
         (builtin && !included) || self.matches(&abs, false, |c| &c.exclude)
     }
 
+    /// Whether `--exclude` matches `rel`, relative to the scanned path.
+    /// Asked with the path the walk would ask with: the matcher strips its
+    /// root as a prefix, so a bare `rel` that happens to start with a name
+    /// like the root's would lose that component too.
+    pub fn excluded_by_glob(&self, rel: &Path, is_dir: bool) -> bool {
+        let walked = joined(&self.given_root, rel);
+        self.overrides.matched(walked, is_dir).is_ignore()
+    }
+
     /// A config inside the tree that could not be read, once the walk is
     /// done.
     pub fn take_error(&self) -> Option<anyhow::Error> {
         self.nested.error.lock().unwrap().take()
     }
 
-    /// Joined part by part: a listed path uses `/`, which a verbatim
-    /// Windows root (`\\?\C:\...`) would keep as part of one name.
     fn absolute(&self, rel: &Path) -> PathBuf {
-        rel.components().fold(self.root.clone(), |p, c| p.join(c))
+        joined(&self.root, rel)
     }
 
     fn matches(&self, abs: &Path, is_dir: bool, which: impl Fn(&Compiled) -> &Gitignore) -> bool {
@@ -150,6 +160,12 @@ impl PathFilter {
             }
         }
     }
+}
+
+/// Joined part by part: a listed path uses `/`, which a verbatim Windows
+/// root (`\\?\C:\...`) would keep as part of one name.
+fn joined(root: &Path, rel: &Path) -> PathBuf {
+    rel.components().fold(root.to_path_buf(), |p, c| p.join(c))
 }
 
 fn compile(rules: &PathRules) -> anyhow::Result<Compiled> {

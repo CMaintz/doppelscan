@@ -481,3 +481,21 @@ fn copies_in_a_gen_dir_are_found() {
     assert_eq!(code, 0, "{out}");
     assert!(out.contains("tools/gen/c.ts"), "{out}");
 }
+
+// Catches `--exclude` being judged on the revision side with the scan root's
+// name stripped from a path that never carried it: a directory named like
+// the root loses its first component there, so an unchanged tree looks new.
+#[test]
+fn a_directory_named_like_the_relative_root_is_excluded_alike() {
+    let dir = repo("same-name");
+    std::fs::remove_dir_all(dir.join("src")).unwrap();
+    std::fs::create_dir_all(dir.join("a/a/x")).unwrap();
+    std::fs::create_dir_all(dir.join("a/y")).unwrap();
+    std::fs::write(dir.join("a/a/x/one.ts"), renamed(SUM_TOTALS, 1)).unwrap();
+    std::fs::write(dir.join("a/a/x/two.ts"), renamed(SUM_TOTALS, 2)).unwrap();
+    std::fs::write(dir.join("a/y/one.ts"), CLAMP).unwrap();
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-qm", "nested"]);
+    let (code, out) = doppelscan(&dir, &["check", "a", "--exclude", "x/*.ts"]);
+    assert_eq!(code, 0, "{out}");
+}
