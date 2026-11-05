@@ -35,19 +35,29 @@ when referring back to a group; ids depend on the scan options.";
 
 pub fn serve(engine: &Engine, root: &Path) -> anyhow::Result<()> {
     let root = root.canonicalize()?;
-    let stdin = std::io::stdin();
+    let mut stdin = std::io::stdin().lock();
     let mut stdout = std::io::stdout().lock();
-    for line in stdin.lock().lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        if stdin.read_until(b'\n', &mut line)? == 0 {
+            return Ok(());
         }
-        if let Some(reply) = handle_line(engine, &root, &line) {
+        if let Some(reply) = handle_bytes(engine, &root, &line) {
             writeln!(stdout, "{reply}")?;
             stdout.flush()?;
         }
     }
-    Ok(())
+}
+
+/// Decoded here rather than by the reader, whose UTF-8 error would end the
+/// session over one bad line.
+fn handle_bytes(engine: &Engine, root: &Path, line: &[u8]) -> Option<String> {
+    match std::str::from_utf8(line) {
+        Ok(text) if text.trim().is_empty() => None,
+        Ok(text) => handle_line(engine, root, text),
+        Err(e) => Some(error(Value::Null, -32700, &format!("parse error: {e}"), None).to_string()),
+    }
 }
 
 /// One JSON-RPC message in, at most one out (notifications get none).
@@ -60,6 +70,10 @@ pub fn handle_line(engine: &Engine, root: &Path, line: &str) -> Option<String> {
             );
         }
     };
+    if !msg.is_object() {
+        let message = "invalid request: not a JSON object";
+        return Some(error(Value::Null, -32600, message, None).to_string());
+    }
     let id = msg.get("id")?.clone();
     let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
     let params = msg.get("params").cloned().unwrap_or(json!({}));

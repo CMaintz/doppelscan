@@ -1,6 +1,8 @@
 mod common;
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use common::git;
 use doppelscan::engine::Engine;
@@ -275,4 +277,48 @@ fn a_limit_of_zero_returns_every_group() {
     let text = tool_text(&reply);
     assert!(text.contains("src/a.ts:2-10"), "{text}");
     assert!(!text.contains("More groups"), "{text}");
+}
+
+/// Feeds `input` to a real server over stdio and returns its replies.
+fn serve(root: &Path, input: &[u8]) -> Vec<Value> {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_doppelscan"))
+        .args(["mcp", "--root"])
+        .arg(root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    let out = child.wait_with_output().unwrap();
+    let text = String::from_utf8(out.stdout).unwrap();
+    text.lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
+}
+
+// Catches one undecodable line ending the read loop, which drops every
+// later request and takes the server down with it.
+#[test]
+fn invalid_utf8_is_answered_and_the_server_keeps_serving() {
+    let root = fixture("utf8");
+    let mut input = b"{\"id\":1,\"method\":\"\xff\"}\n".to_vec();
+    input.extend_from_slice(b"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}\n");
+    let replies = serve(&root, &input);
+    assert_eq!(replies.len(), 2, "{replies:?}");
+    assert_eq!(replies[0]["error"]["code"], -32700);
+    assert_eq!(replies[1]["id"], 2);
+    assert!(replies[1].get("result").is_some(), "{replies:?}");
+}
+
+// Catches valid JSON without an id being mistaken for a notification, which
+// leaves the client waiting for a reply forever.
+#[test]
+fn json_that_is_not_an_object_is_an_invalid_request() {
+    let (engine, root) = (Engine::default(), fixture("not-object"));
+    for line in ["5", "[]", "\"x\"", "null", "true"] {
+        let reply = handle_line(&engine, &root, line).expect(line);
+        let reply: Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(reply["error"]["code"], -32600, "{line}");
+        assert_eq!(reply["id"], Value::Null, "{line}");
+    }
 }
