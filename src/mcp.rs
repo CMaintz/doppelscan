@@ -354,7 +354,7 @@ fn get_group(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<Strin
     let analysis = engine.scan(&scan_root(root, args)?, &options(root, args)?)?;
     let id = analysis
         .resolve(key)
-        .ok_or_else(|| anyhow::anyhow!("no clone group {key:?}; run find_duplicates again"))?;
+        .ok_or_else(|| anyhow::anyhow!("{}. {SCAN_HINT}", analysis.unresolved(key)))?;
     let mut out = render_group(&analysis.group(id, true), Detail::Full);
     if args
         .get("include_code")
@@ -365,6 +365,10 @@ fn get_group(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<Strin
     }
     Ok(out)
 }
+
+const SCAN_HINT: &str = "Groups depend on the scan: pass the path, min_tokens and languages it was \
+found with (YAML needs languages: [\"yaml\"]). A group find_similar_code listed with <snippet> \
+in it exists only in that call: read its locations instead.";
 
 fn occurrence_code(analysis: &Analysis, id: usize) -> String {
     analysis.groups[id - 1]

@@ -372,10 +372,7 @@ fn ignore_closed_pipe(written: std::io::Result<()>) -> anyhow::Result<()> {
 fn show(engine: &Engine, id: &str, common: &Common) -> anyhow::Result<()> {
     let analysis = engine.scan(&common.path, &options(common)?)?;
     let Some(id) = analysis.resolve(id) else {
-        bail!(
-            "no clone group {id:?} (ids run 1..={})",
-            analysis.groups.len()
-        )
+        bail!("{}", analysis.unresolved(id))
     };
     print_groups(&analysis, &[id], true, common.format)
 }

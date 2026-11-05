@@ -451,3 +451,24 @@ fn a_path_outside_the_server_root_reads_like_any_other() {
         );
     }
 }
+
+// Catches a lookup failure sending the agent back to find_duplicates, which
+// never lists a group that only exists under other options or with a
+// snippet in the scan, and hiding why the id or prefix was refused.
+#[test]
+fn an_unknown_group_says_what_would_find_it() {
+    let (engine, root) = (Engine::default(), fixture("unknown"));
+    let args = json!({ "id": "abcdef123456", "path": "src", "min_tokens": 20 });
+    let reply = tool(&engine, &root, "get_duplicate_group", args);
+    assert_eq!(reply["result"]["isError"], true, "{reply}");
+    let text = tool_text(&reply);
+    assert!(!text.contains("run find_duplicates again"), "{text}");
+    for wanted in [
+        "ids run 1..=1",
+        "at least 4",
+        "languages",
+        "find_similar_code",
+    ] {
+        assert!(text.contains(wanted), "{wanted}: {text}");
+    }
+}

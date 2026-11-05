@@ -98,19 +98,35 @@ impl Analysis {
         }
     }
 
-    /// Accepts a numeric id or a fingerprint (or a unique prefix of one).
+    /// Accepts a numeric id, a whole fingerprint, or a unique fingerprint
+    /// prefix. A shorter all-digit value is only ever an id: otherwise a
+    /// mistyped id would land on whichever fingerprint starts with it.
     pub fn resolve(&self, key: &str) -> Option<usize> {
-        let key = key.trim().trim_start_matches('#');
+        let key = key.trim().trim_start_matches('#').to_ascii_lowercase();
+        let digits = key.bytes().all(|b| b.is_ascii_digit());
         if let Ok(id) = key.parse::<usize>()
+            && digits
             && (1..=self.groups.len()).contains(&id)
         {
             return Some(id);
         }
-        let key = key.to_ascii_lowercase();
+        let whole = key.len() == FINGERPRINT_CHARS;
+        if !whole && (digits || key.len() < MIN_FINGERPRINT_PREFIX) {
+            return None;
+        }
         let mut hits =
             (1..=self.groups.len()).filter(|&i| fingerprint(&self.groups[i - 1]).starts_with(&key));
         let first = hits.next()?;
         hits.next().is_none().then_some(first)
+    }
+
+    /// Why `resolve` found nothing for `key`.
+    pub fn unresolved(&self, key: &str) -> String {
+        format!(
+            "no clone group {key:?}: ids run 1..={}, and a fingerprint prefix needs at least \
+             {MIN_FINGERPRINT_PREFIX} characters, one of them a letter, and must match one group",
+            self.groups.len()
+        )
     }
 
     /// Groups with an occurrence overlapping `file` lines `[from, to]`.
@@ -155,6 +171,9 @@ impl Analysis {
 pub fn fingerprint(group: &RawGroup) -> String {
     format!("{:012x}", group.hash >> 16)
 }
+
+const FINGERPRINT_CHARS: usize = 12;
+const MIN_FINGERPRINT_PREFIX: usize = 4;
 
 const MAX_VALUE_CHARS: usize = 48;
 
