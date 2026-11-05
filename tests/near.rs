@@ -397,3 +397,53 @@ fn a_different_amount_of_idiom_still_counts() {
     let similarity = pair_similarity(&found);
     assert!(similarity.is_none(), "reported as {similarity:?} alike");
 }
+
+const ROUNDING_SHORT: &str = r#"
+function f() {
+    const r = a ? b : c;
+    x.y.z(1, "s");
+    delete p.q;
+    if (a > 1) { b(); }
+    await w();
+    return;
+    for (const x of y) { z.push(x); }
+    let u = [1, 2, 3];
+    delete p.q;
+    try { f(); } catch (e) { g(e); }
+    const r = a ? b : c;
+    const r = a ? b : c;
+    for (const x of y) { z.push(x); }
+    while (i < 3) { i += 2; }
+    await w();
+}
+"#;
+
+const ROUNDING_ADDED: &str = r#"    try { f(); } catch (e) { g(e); }
+    n = -m * (k + 1) / 2;
+    delete p.q;
+    n = -m * (k + 1) / 2;
+    while (i < 3) { i += 2; }
+    while (i < 3) { i += 2; }
+    await w();
+    const r = a ? b : c;
+    try { f(); } catch (e) { g(e); }
+"#;
+
+// Catches a size prefilter stricter than the score: these fingerprint
+// counts are 15 inside 25, exactly 0.6 by Jaccard, but 0.6f32 * 25 rounds
+// up to 15.000001 and the pair was dropped before it was scored. If token
+// hashing changes, this stops being exactly 15/25 and fails on the
+// similarity rather than passing without testing anything.
+#[test]
+fn a_pair_scoring_exactly_the_threshold_is_reported() {
+    let tail = "    await w();\n}\n";
+    let long = ROUNDING_SHORT
+        .replace("function f", "function g")
+        .replace(tail, &format!("{ROUNDING_ADDED}{tail}"));
+    let gs = groups(&scan_near(
+        &[("a.ts", ROUNDING_SHORT.to_string()), ("b.ts", long)],
+        0.6,
+    ));
+    assert_eq!(gs.len(), 1, "{gs:?}");
+    assert_eq!(gs[0].similarity, 0.6);
+}

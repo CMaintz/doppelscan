@@ -283,9 +283,12 @@ fn candidates_of(
 
 fn similarity(a: &Prints, b: &Prints, threshold: f32) -> Option<f32> {
     // Jaccard is at most the smaller size over the larger, which skips the
-    // merge for most pairs of unequal size.
-    let (sa, sb) = (size(a) as f32, size(b) as f32);
-    if sa.min(sb) < threshold * sa.max(sb) {
+    // merge for most pairs of unequal size. Divides as `jaccard` does:
+    // threshold * larger rounds differently (0.6f32 * 25 is 15.000001) and
+    // would reject a pair whose real score is exactly the threshold.
+    let (sa, sb) = (size(a), size(b));
+    let bound = sa.min(sb) as f32 / sa.max(sb) as f32;
+    if bound < threshold {
         return None;
     }
     let similarity = jaccard(a, b);
