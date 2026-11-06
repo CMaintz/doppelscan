@@ -294,6 +294,7 @@ fn with_fingerprints(prints: &[u64]) -> Analysis {
     };
     Analysis {
         files: Vec::new(),
+        accepted: Vec::new(),
         groups: prints.iter().map(group).collect(),
         elapsed: Duration::ZERO,
     }
