@@ -152,23 +152,43 @@ fn similar_classes(
     let reps: Vec<Unit> = classes.iter().map(|c| c[0]).collect();
     let prints: Vec<Prints> = reps.par_iter().map(|u| winnow(&tokens(files, u))).collect();
     let mut pairs = similar_pairs(files, &reps, &prints, threshold);
-    pairs.retain(|&(a, b, _)| apart(&classes[a as usize], &classes[b as usize]));
+    let wrapped = always_inside_another(classes);
+    pairs.retain(|&(a, b, _)| {
+        let (a_class, b_class) = (&classes[a as usize], &classes[b as usize]);
+        !(wrapped[a as usize] && holds(b_class, a_class))
+            && !(wrapped[b as usize] && holds(a_class, b_class))
+    });
     pairs
 }
 
-/// Whether both classes exist in their own right. One whose every copy sits
-/// inside the other is that code, however many files the pair is copied
-/// to, and pairing them would let the wrapper replace it in a group. Each
-/// copy of a wrapper brings its own inner copy, so a single nested copy
-/// proves nothing: the inner class may also stand alone, which makes a real
-/// pair. Judging all copies keeps the answer independent of file order.
-/// Checked after scoring, because it walks copies.
-fn apart(a: &[Unit], b: &[Unit]) -> bool {
-    !all_inside(a, b) && !all_inside(b, a)
+/// Which classes never stand alone: every copy sits inside some other unit.
+/// Paired with a function that holds a copy, such a class is that function's
+/// own body, however many files they are copied to, and the exact scan
+/// already reports its copies; the pair would let the wrapper replace it in
+/// a group. The other copies' wrappers can be different code, so they need
+/// not be similar. A copy outside any unit makes a real pair with a wrapper,
+/// so one nested copy proves nothing. Judging all copies keeps the answer
+/// independent of file order.
+fn always_inside_another(classes: &[Vec<Unit>]) -> Vec<bool> {
+    let span = |u: &Unit| (u.file, u.frag.start, std::cmp::Reverse(u.frag.end));
+    let mut units: Vec<&Unit> = classes.iter().flatten().collect();
+    units.sort_unstable_by_key(|u| span(u));
+    let mut wrapped = vec![true; classes.len()];
+    let mut widest: Option<&Unit> = None;
+    for unit in units {
+        match widest.filter(|outer| strictly_inside(unit, outer)) {
+            Some(_) => {}
+            None => wrapped[unit.class as usize] = false,
+        }
+        if widest.is_none_or(|outer| !nested(unit, outer)) {
+            widest = Some(unit);
+        }
+    }
+    wrapped
 }
 
-fn all_inside(inner: &[Unit], outer: &[Unit]) -> bool {
-    inner.iter().all(|i| outer.iter().any(|o| nested(i, o)))
+fn holds(outer: &[Unit], inner: &[Unit]) -> bool {
+    inner.iter().any(|i| outer.iter().any(|o| nested(i, o)))
 }
 
 fn tokens(files: &[Arc<FileIndex>], unit: &Unit) -> Vec<u32> {
