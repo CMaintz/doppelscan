@@ -502,6 +502,38 @@ fn a_wrapped_lambda_and_its_bare_copy_are_left_to_the_exact_scan() {
     }
 }
 
+// Catches a lambda paired with the functions around it because neither one
+// holds every copy of it: each copy sits in a wrapper, so the lambda has no
+// life of its own, and the wrappers here are too unlike to pair themselves.
+#[test]
+fn a_lambda_inside_two_different_wrappers_is_not_paired_with_them() {
+    let arrow = "(orders: Order[], config: Config): number => {
+    let total = 0;
+    for (const order of orders) {
+        if (order.status === \"paid\") { total += order.amount * config.rate; }
+    }
+    return Math.round(total * 100) / 100;
+}";
+    let plain = format!(
+        "export function make() {{
+    return {arrow};
+}}
+"
+    );
+    let logged = format!(
+        "export function build() {{
+    log(1);
+    return {arrow};
+}}
+"
+    );
+    for (first, second) in [("a.ts", "b.ts"), ("b.ts", "a.ts")] {
+        let files = [(first, plain.clone()), (second, logged.clone())];
+        let gs = groups(&scan_near(&files, 0.8));
+        assert!(gs.is_empty(), "{gs:?}");
+    }
+}
+
 // Catches nesting judged on each class's first copy: a wrapper around an
 // arrow and that arrow standing alone are a real pair, but only if the
 // standalone copy happened to sort first.
