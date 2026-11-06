@@ -9,6 +9,7 @@ use std::sync::Mutex;
 use ignore::{DirEntry, WalkBuilder, WalkState};
 
 use crate::filter::PathFilter;
+use crate::index::normalize_line_endings;
 use crate::lang::{LANGS, lang_index_for_path};
 
 const EXCLUDED_DIRS: &[&str] = &[
@@ -80,6 +81,18 @@ const GENERATED_MARKERS: &[&str] = &[
 ];
 
 pub const MAX_FILE_BYTES: u64 = 1 << 20;
+
+/// The most a file can be on disk and still fit `MAX_FILE_BYTES` once
+/// normalised: CRLF to LF at most halves it. Larger is rejected unread.
+pub const MAX_RAW_BYTES: u64 = 2 * MAX_FILE_BYTES;
+
+/// Source bytes as a scan reads them, or `None` when they are not UTF-8 or
+/// too large. The cap applies after normalising because raw size depends on
+/// the checkout: an LF blob and its CRLF working copy must be judged alike.
+pub fn scannable_text(bytes: Vec<u8>) -> Option<String> {
+    let text = normalize_line_endings(String::from_utf8(bytes).ok()?);
+    (text.len() as u64 <= MAX_FILE_BYTES).then_some(text)
+}
 
 /// A source file a walk turned up.
 pub struct Found {

@@ -841,6 +841,64 @@ fn check_skips_a_generated_file_under_crlf_too() {
     assert_eq!(code, 0, "{out}");
 }
 
+const SIZE_CAP: usize = 1 << 20;
+
+/// A third copy padded to `size` bytes with lines CRLF grows by a third.
+fn padded_copy(size: usize) -> String {
+    let code = renamed(SUM_TOTALS, 3);
+    let padding = size.saturating_sub(code.len()) / 3;
+    code + &"//\n".repeat(padding)
+}
+
+fn with_crlf(text: &str) -> String {
+    text.replace('\n', "\r\n")
+}
+
+// Catches the revision side capping raw blob bytes: a file committed with
+// CRLF drops out there but not from its LF checkout, so its unchanged clone
+// reads as new on a clean tree.
+#[test]
+fn the_size_cap_judges_a_blob_by_its_normalised_size() {
+    let dir = repo("cap-blob");
+    let copy = padded_copy(SIZE_CAP * 9 / 10);
+    write_all(&dir, &[("src/big.ts", with_crlf(&copy))]);
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-qm", "crlf copy"]);
+    write_all(&dir, &[("src/big.ts", copy)]);
+    let (code, out) = doppelscan(&dir, &["check", "--base", "HEAD"]);
+    assert_eq!(code, 0, "{out}");
+}
+
+// Catches the working tree capping raw checkout bytes: the same file would
+// be scanned or not depending on the platform's line endings.
+#[test]
+fn the_size_cap_judges_a_checkout_by_its_normalised_size() {
+    let dir = repo("cap-file");
+    let copy = with_crlf(&padded_copy(SIZE_CAP * 9 / 10));
+    write_all(&dir, &[("src/big.ts", copy)]);
+    let (code, out) = doppelscan(&dir, &["."]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("src/big.ts"), "{out}");
+}
+
+// Catches loosening the cap to the raw limit: a file past it after
+// normalising must stay out on both sides, or the revision would excuse a
+// copy by one no scan of the tree reads.
+#[test]
+fn a_file_over_the_cap_once_normalised_stays_out_on_both_sides() {
+    let dir = repo("cap-over");
+    std::fs::remove_file(dir.join("src/b.ts")).unwrap();
+    write_all(&dir, &[("src/big.ts", padded_copy(SIZE_CAP * 3 / 2))]);
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-qm", "big copy"]);
+    let (_, out) = doppelscan(&dir, &["."]);
+    assert!(!out.contains("src/big.ts"), "{out}");
+
+    write_all(&dir, &[("src/b.ts", renamed(SUM_TOTALS, 2))]);
+    let (code, out) = doppelscan(&dir, &["check", "--base", "HEAD"]);
+    assert_eq!(code, 1, "{out}");
+}
+
 // Catches `--exclude` being judged on the revision side with the scan root's
 // name stripped from a path that never carried it: a directory named like
 // the root loses its first component there, so an unchanged tree looks new.

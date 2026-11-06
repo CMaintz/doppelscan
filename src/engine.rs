@@ -13,10 +13,10 @@ use tree_sitter::Parser;
 use crate::baseline::{Baseline, Scope};
 use crate::detect::{Occ, RawGroup, detect};
 use crate::filter::{PathFilter, PathRules};
-use crate::index::{FileIndex, MIN_STORED_TOKENS, index_source, normalize_line_endings};
+use crate::index::{FileIndex, MIN_STORED_TOKENS, index_source};
 use crate::report::{Analysis, fingerprint};
 use crate::variation::{self, Kind, Variation};
-use crate::walk::{Found, MAX_FILE_BYTES, discover, looks_generated};
+use crate::walk::{Found, MAX_RAW_BYTES, discover, looks_generated, scannable_text};
 
 #[derive(Clone, Debug)]
 pub struct ScanOptions {
@@ -135,7 +135,7 @@ impl Engine {
     ) -> Option<Arc<FileIndex>> {
         let path = file.path.as_path();
         let meta = std::fs::metadata(path).ok()?;
-        if meta.len() > MAX_FILE_BYTES {
+        if meta.len() > MAX_RAW_BYTES {
             return None;
         }
         let stamp = (meta.modified().ok()?, meta.len());
@@ -172,7 +172,7 @@ fn read_and_index(
     file: &Found,
     strict: bool,
 ) -> Option<Arc<FileIndex>> {
-    let text = normalize_line_endings(String::from_utf8(std::fs::read(&file.path).ok()?).ok()?);
+    let text = scannable_text(std::fs::read(&file.path).ok()?)?;
     if looks_generated(&text, file.included) {
         return None;
     }
