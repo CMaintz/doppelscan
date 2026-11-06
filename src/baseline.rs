@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
+use crate::detect::RawGroup;
 use crate::engine::ScanOptions;
 use crate::lang::{LANGS, Syntax};
 use crate::report::{Analysis, fingerprint};
@@ -116,9 +117,8 @@ fn scanned_languages(languages: &[usize]) -> Vec<usize> {
 
 impl Baseline {
     pub fn from_analysis(analysis: &Analysis, opts: &ScanOptions) -> Self {
-        let mut groups: Vec<Entry> = (1..=analysis.groups.len())
-            .map(|id| entry(analysis, id))
-            .collect();
+        let raw = analysis.groups.iter();
+        let mut groups: Vec<Entry> = raw.map(|group| entry(analysis, group)).collect();
         groups.sort_by(|a, b| a.fingerprint.cmp(&b.fingerprint));
         Self {
             version: VERSION,
@@ -171,31 +171,22 @@ impl Baseline {
     /// Ids of the groups in `now` that this baseline does not account for.
     pub fn new_groups(&self, now: &Analysis) -> Vec<usize> {
         (1..=now.groups.len())
-            .filter(|&id| !self.excuses(&entry(now, id)))
+            .filter(|&id| !self.excuses(&entry(now, &now.groups[id - 1])))
             .collect()
     }
 
-    /// The entries still needed to excuse `now`, with counts lowered to
-    /// what remains. Never adds an entry or raises a count, so pruning
-    /// cannot accept new duplication.
-    pub fn pruned(&self, now: &Analysis) -> Self {
-        let current: Vec<Entry> = (1..=now.groups.len()).map(|id| entry(now, id)).collect();
-        let groups = self
-            .groups
-            .iter()
-            .filter_map(|e| {
-                let same = current.iter().filter(|c| c.fingerprint == e.fingerprint);
-                if let Some(remaining) = same.map(|c| c.occurrences).max() {
-                    let occurrences = remaining.min(e.occurrences);
-                    return Some(Entry {
-                        occurrences,
-                        ..e.clone()
-                    });
-                }
-                let covers = current.iter().any(|c| is_shrunk_from(c, e));
-                covers.then(|| e.clone())
-            })
-            .collect();
+    /// The entries still needed to excuse `now`, with counts lowered and
+    /// places cut to what remains. Never adds an entry, a place or a copy,
+    /// so pruning cannot accept new duplication. `now` is a scan of `scope`;
+    /// entries it cannot see all of are kept as they are.
+    pub fn pruned(&self, now: &Analysis, scope: &Scope) -> Self {
+        let found = now.groups.iter().chain(&now.accepted);
+        let current: Vec<Entry> = found.map(|group| entry(now, group)).collect();
+        let judged = |e: &Entry| match scope.sees_all_of(e) {
+            true => e.pruned(&current),
+            false => Some(e.clone()),
+        };
+        let groups = self.groups.iter().filter_map(judged).collect();
         Self {
             version: VERSION,
             settings: self.settings.clone(),
@@ -215,6 +206,79 @@ impl Baseline {
     }
 }
 
+/// The part of a baseline's directory one scan covers. The default is all
+/// of it.
+#[derive(Debug, Clone, Default)]
+pub struct Scope {
+    within: String,
+}
+
+impl Scope {
+    /// `path` is a directory or file, relative to the baseline's directory.
+    pub fn of(path: &str) -> Self {
+        Self {
+            within: path.trim_end_matches('/').to_string(),
+        }
+    }
+
+    /// A partial scan has to see every copy to judge an entry: a copy left
+    /// alone inside it forms no group there, so it would look deleted while
+    /// its twin outside lives on. Fewer places than copies means a copy has
+    /// moved somewhere no place records, which may be outside.
+    fn sees_all_of(&self, e: &Entry) -> bool {
+        self.within.is_empty()
+            || (e.places.len() >= e.occurrences && e.places.iter().all(|p| self.holds(p)))
+    }
+
+    fn holds(&self, place: &str) -> bool {
+        place
+            .strip_prefix(&self.within)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(['/', '#']))
+    }
+}
+
+impl Entry {
+    /// What the groups found now still need of this entry, or `None` when
+    /// they need none of it.
+    fn pruned(&self, current: &[Entry]) -> Option<Self> {
+        let same: Vec<&Entry> = current
+            .iter()
+            .filter(|c| c.fingerprint == self.fingerprint)
+            .collect();
+        if let Some(remaining) = same.iter().map(|c| c.occurrences).max() {
+            return Some(self.narrowed(self.places_held_by(&same), remaining));
+        }
+        let shrunk: Vec<&Entry> = current.iter().filter(|c| is_shrunk_from(c, self)).collect();
+        (!shrunk.is_empty()).then(|| {
+            let places = self.places_held_by(&shrunk);
+            let remaining = places.len();
+            self.narrowed(places, remaining)
+        })
+    }
+
+    fn narrowed(&self, places: Vec<String>, remaining: usize) -> Self {
+        Self {
+            occurrences: remaining.min(self.occurrences),
+            places,
+            ..self.clone()
+        }
+    }
+
+    /// Only ever a subset of `places`, even for code that moved: following
+    /// it would let the shrink rule excuse clones in places never accepted.
+    fn places_held_by(&self, groups: &[&Entry]) -> Vec<String> {
+        let mut held = vec![false; self.places.len()];
+        let paired = groups
+            .iter()
+            .flat_map(|g| pairings(&g.places, &self.places));
+        for i in paired.flatten() {
+            held[i] = true;
+        }
+        let kept = self.places.iter().zip(held).filter(|(_, held)| *held);
+        kept.map(|(place, _)| place.clone()).collect()
+    }
+}
+
 /// Only named places count: two files sharing one top-level clone must not
 /// excuse every later top-level clone between them.
 fn is_shrunk_from(group: &Entry, accepted: &Entry) -> bool {
@@ -223,8 +287,7 @@ fn is_shrunk_from(group: &Entry, accepted: &Entry) -> bool {
         && is_sub_multiset(&group.places, &accepted.places)
 }
 
-fn entry(analysis: &Analysis, id: usize) -> Entry {
-    let raw = &analysis.groups[id - 1];
+fn entry(analysis: &Analysis, raw: &RawGroup) -> Entry {
     let mut places: Vec<String> = raw
         .occs
         .iter()
@@ -245,17 +308,24 @@ fn entry(analysis: &Analysis, id: usize) -> Entry {
     }
 }
 
-/// Every place in `small` matched to a distinct place in `big` that is the
-/// same or encloses it (`a.ts#Cart` encloses `a.ts#Cart.total`).
+fn is_sub_multiset(small: &[String], big: &[String]) -> bool {
+    pairings(small, big).all(|slot| slot.is_some())
+}
+
+/// For each place in `small`, the index of a distinct place in `big` that
+/// is the same or encloses it (`a.ts#Cart` encloses `a.ts#Cart.total`).
 /// Each place takes the deepest free match, so an exact match is never
 /// spent on a place an enclosing scope could have covered.
-fn is_sub_multiset(small: &[String], big: &[String]) -> bool {
+fn pairings<'a>(
+    small: &'a [String],
+    big: &'a [String],
+) -> impl Iterator<Item = Option<usize>> + 'a {
     let mut used = vec![false; big.len()];
-    small.iter().all(|s| {
+    small.iter().map(move |s| {
         let slot = (0..big.len())
             .filter(|&i| !used[i] && encloses(&big[i], s))
             .max_by_key(|&i| big[i].len());
-        slot.map(|i| used[i] = true).is_some()
+        slot.inspect(|&i| used[i] = true)
     })
 }
 

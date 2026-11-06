@@ -501,10 +501,7 @@ fn write_baseline(
     };
     let requested = options(common)?;
     let baseline = if prune {
-        let old = Baseline::load(&path)?;
-        old.settings.require_same(&requested, &path)?;
-        let opts = anchored(requested, common, &path)?;
-        old.pruned(&engine.scan(&common.path, &opts)?)
+        engine.prune(&common.path, &path, &requested)?
     } else {
         let opts = anchored(requested, common, &path)?;
         Baseline::from_analysis(&engine.scan(&common.path, &opts)?, &opts)

@@ -5,7 +5,7 @@ use std::process::Command;
 use std::time::Instant;
 
 use common::git;
-use doppelscan::baseline::Baseline;
+use doppelscan::baseline::{Baseline, Entry, Scope};
 use doppelscan::engine::{ScanOptions, Source, analyze, index_sources};
 use doppelscan::lang::lang_index_for_path;
 use doppelscan::report::Analysis;
@@ -148,7 +148,7 @@ fn pruning_drops_resolved_entries_and_never_adds() {
         ("f.ts", renamed(PARSE_ROWS, 3)),
     ];
     let now = scan(&now);
-    let pruned = baseline.pruned(&now);
+    let pruned = baseline.pruned(&now, &Scope::default());
     assert_eq!(pruned.groups.len(), 1, "the parseRows entry is resolved");
     assert_eq!(pruned.new_groups(&now), vec![1], "the third copy stays new");
 }
@@ -218,6 +218,233 @@ fn a_written_baseline_accepts_existing_and_rejects_new_duplication() {
     git(&dir, &["add", "."]);
     git(&dir, &["commit", "-qm", "copy"]);
     assert_eq!(doppelscan(&dir, &["check"]).0, 1);
+}
+
+fn written_entries(dir: &Path) -> Vec<Entry> {
+    let file = dir.join(".doppelscan-baseline.json");
+    Baseline::load(&file).unwrap().groups
+}
+
+// Catches prune lowering the count but keeping the removed copy's place:
+// the shrink rule would excuse that copy coming back, which is new
+// duplication the README says a prune cannot accept.
+#[test]
+fn a_pruned_copy_that_returns_is_new() {
+    let dir = repo("prune-place");
+    std::fs::write(dir.join("src/c.ts"), renamed(SUM_TOTALS, 3)).unwrap();
+    assert_eq!(doppelscan(&dir, &["baseline"]).0, 0);
+    std::fs::remove_file(dir.join("src/c.ts")).unwrap();
+    assert_eq!(doppelscan(&dir, &["baseline", "--prune"]).0, 0);
+
+    let entries = written_entries(&dir);
+    assert_eq!(entries[0].occurrences, 2);
+    assert_eq!(entries[0].places.len(), 2, "{:?}", entries[0].places);
+
+    std::fs::write(dir.join("src/c.ts"), renamed(SUM_TOTALS, 3)).unwrap();
+    let (code, out) = doppelscan(&dir, &["check"]);
+    assert_eq!(code, 1, "{out}");
+}
+
+// Catches only the matching-fingerprint path dropping places: an entry kept
+// because a smaller clone still sits in its places would go on excusing the
+// removed copy, by place and by count.
+#[test]
+fn a_shrunk_entry_forgets_a_removed_copy() {
+    let dir = repo("prune-shrunk");
+    let shrunk =
+        renamed(SUM_TOTALS, 2).replace("return Math.round(total * 100) / 100;", "return total;");
+    std::fs::write(dir.join("src/c.ts"), renamed(SUM_TOTALS, 3)).unwrap();
+    assert_eq!(doppelscan(&dir, &["baseline"]).0, 0);
+    std::fs::write(dir.join("src/b.ts"), &shrunk).unwrap();
+    std::fs::remove_file(dir.join("src/c.ts")).unwrap();
+    assert_eq!(doppelscan(&dir, &["baseline", "--prune"]).0, 0);
+
+    let entries = written_entries(&dir);
+    assert_eq!(entries[0].occurrences, 2);
+    assert_eq!(entries[0].places.len(), 2, "{:?}", entries[0].places);
+}
+
+// Catches keeping a place because any copy matches it: of two copies
+// in one function, one is gone, so its place must go too.
+#[test]
+fn pruning_one_of_two_copies_in_a_function_drops_one_place() {
+    let body = r#"
+    for (const row of rows) {
+        if (row.ok) { total += row.value * rate; }
+        log(row.id, row.value, total);
+    }
+    audit(total);
+"#;
+    let gap = "    try { next(); } finally { done(); }\n";
+    // Unlike `other`, so the clone stops at `body` however many it holds.
+    let host = |copies: &[&str]| format!("const f = () => {{{}}};\n", copies.join(gap));
+    let other = format!("function g(x: number) {{{body}    return x;\n}}\n");
+    let base = [("a.ts", host(&[body, body])), ("b.ts", other.clone())];
+    let baseline = Baseline::from_analysis(&scan(&base), &options());
+    assert_eq!(baseline.groups[0].occurrences, 3);
+
+    let one = [("a.ts", host(&[body])), ("b.ts", other)];
+    let pruned = baseline.pruned(&scan(&one), &Scope::default());
+    assert_eq!(pruned.groups[0].occurrences, 2);
+    assert_eq!(pruned.groups[0].places.len(), 2);
+}
+
+fn repo_accepting_its_baseline(name: &str) -> PathBuf {
+    let dir = repo(name);
+    assert_eq!(doppelscan(&dir, &["baseline"]).0, 0);
+    let fingerprint = &written_entries(&dir)[0].fingerprint;
+    let accept = format!("[[accept]]\nfingerprint = \"{fingerprint}\"\nreason = \"vendored\"\n");
+    std::fs::write(dir.join(".doppelscan.toml"), accept).unwrap();
+    dir
+}
+
+// Catches pruning against visible groups only: accepting a group hides it
+// from the scan, and dropping its entry would fail `check` on untouched
+// code the day the accept line is removed.
+#[test]
+fn an_accepted_group_is_hidden_not_gone() {
+    let dir = repo_accepting_its_baseline("accept-kept");
+    let (code, out) = doppelscan(&dir, &["check"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(!out.contains("no longer match"), "{out}");
+
+    assert_eq!(doppelscan(&dir, &["baseline", "--prune"]).0, 0);
+    assert_eq!(written_entries(&dir).len(), 1);
+    std::fs::remove_file(dir.join(".doppelscan.toml")).unwrap();
+    let (code, out) = doppelscan(&dir, &["check"]);
+    assert_eq!(code, 0, "{out}");
+}
+
+// Catches keeping an entry for its accept line alone: once the code is
+// deleted the entry has nothing left to excuse and would stay forever.
+#[test]
+fn an_accepted_group_whose_code_is_gone_is_resolved() {
+    let dir = repo_accepting_its_baseline("accept-gone");
+    std::fs::remove_file(dir.join("src/b.ts")).unwrap();
+    let (_, out) = doppelscan(&dir, &["check"]);
+    assert!(out.contains("no longer match"), "{out}");
+    assert_eq!(doppelscan(&dir, &["baseline", "--prune"]).0, 0);
+    assert!(written_entries(&dir).is_empty());
+}
+
+fn write_all(dir: &Path, files: &[(&str, String)]) {
+    for (path, text) in files {
+        let path = dir.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+}
+
+/// The `repo` pair in `src`, and a separate clone in `src-old`: a sibling
+/// sharing the name's start, so a bare prefix test reads it as inside `src`.
+fn repo_with_sibling(name: &str) -> PathBuf {
+    let dir = repo(name);
+    let sibling = [
+        ("src-old/x.ts", renamed(PARSE_ROWS, 1)),
+        ("src-old/y.ts", renamed(PARSE_ROWS, 2)),
+    ];
+    write_all(&dir, &sibling);
+    assert_eq!(doppelscan(&dir, &["baseline"]).0, 0);
+    assert_eq!(written_entries(&dir).len(), 2);
+    dir
+}
+
+fn repo_with_spanning_clone(name: &str) -> PathBuf {
+    let dir = repo(name);
+    write_all(&dir, &[("other/c.ts", renamed(SUM_TOTALS, 3))]);
+    assert_eq!(doppelscan(&dir, &["baseline"]).0, 0);
+    assert_eq!(written_entries(&dir)[0].occurrences, 3);
+    dir
+}
+
+// Catches comparing a partial scan with the whole baseline: entries for
+// code the scan never looked at would read as resolved, and pruning would
+// fail the next root check on untouched code.
+#[test]
+fn entries_outside_a_scanned_directory_are_not_resolved() {
+    let dir = repo_with_sibling("scope-outside");
+    let (code, out) = doppelscan(&dir, &["check", "src"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(!out.contains("no longer match"), "{out}");
+
+    assert_eq!(doppelscan(&dir, &["baseline", "--prune", "src"]).0, 0);
+    assert_eq!(written_entries(&dir).len(), 2);
+    let (code, out) = doppelscan(&dir, &["check"]);
+    assert_eq!(code, 0, "{out}");
+}
+
+// Catches scoping prunes away altogether: an entry wholly inside the
+// scanned directory is the scan's to resolve, whatever lies outside.
+#[test]
+fn entries_inside_a_scanned_directory_can_still_be_resolved() {
+    let dir = repo_with_sibling("scope-inside");
+    std::fs::remove_file(dir.join("src/b.ts")).unwrap();
+    let (_, out) = doppelscan(&dir, &["check", "src"]);
+    assert!(out.contains("1 baseline entry no longer match"), "{out}");
+
+    assert_eq!(doppelscan(&dir, &["baseline", "--prune", "src"]).0, 0);
+    let entries = written_entries(&dir);
+    assert_eq!(entries.len(), 1);
+    assert!(entries[0].places[0].starts_with("src-old/"), "{entries:?}");
+}
+
+// Catches lowering a count to the copies a partial scan can see: the copy
+// outside is still there, so a root check would fail on untouched code.
+#[test]
+fn a_clone_spanning_the_scanned_directory_keeps_its_count() {
+    let dir = repo_with_spanning_clone("scope-span");
+    let (_, out) = doppelscan(&dir, &["check", "src"]);
+    assert!(!out.contains("no longer match"), "{out}");
+
+    assert_eq!(doppelscan(&dir, &["baseline", "--prune", "src"]).0, 0);
+    assert_eq!(written_entries(&dir)[0].occurrences, 3);
+    let (code, out) = doppelscan(&dir, &["check"]);
+    assert_eq!(code, 0, "{out}");
+}
+
+// Catches pruning a spanning clone by its copies inside: one copy left in
+// the scanned directory is no group there, so it looks deleted though the
+// clone with the copy outside is alive.
+#[test]
+fn a_lone_copy_of_a_spanning_clone_is_not_gone() {
+    let dir = repo_with_spanning_clone("scope-lone");
+    std::fs::remove_file(dir.join("src/b.ts")).unwrap();
+    assert_eq!(doppelscan(&dir, &["baseline", "--prune", "src"]).0, 0);
+    let entries = written_entries(&dir);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].places.len(), 3, "only a root scan can tell");
+    let (code, out) = doppelscan(&dir, &["check"]);
+    assert_eq!(code, 0, "{out}");
+}
+
+// Catches trusting places a root prune has already cut: the moved copy is
+// recorded nowhere, so the entry only looks wholly inside `src`.
+#[test]
+fn an_entry_with_an_unrecorded_copy_survives_a_partial_prune() {
+    let dir = repo("scope-moved");
+    assert_eq!(doppelscan(&dir, &["baseline"]).0, 0);
+    std::fs::remove_file(dir.join("src/b.ts")).unwrap();
+    write_all(&dir, &[("other/b.ts", renamed(SUM_TOTALS, 2))]);
+    assert_eq!(doppelscan(&dir, &["baseline", "--prune"]).0, 0);
+    assert_eq!(written_entries(&dir)[0].places.len(), 1);
+
+    assert_eq!(doppelscan(&dir, &["baseline", "--prune", "src"]).0, 0);
+    let (code, out) = doppelscan(&dir, &["check"]);
+    assert_eq!(code, 0, "{out}");
+}
+
+// Catches treating a scanned file like a directory: places name it
+// directly, so nothing would ever look inside it and its entries could
+// never resolve.
+#[test]
+fn a_scanned_file_can_resolve_its_own_entries() {
+    let dir = repo("scope-file");
+    let two = renamed(PARSE_ROWS, 1) + &renamed(PARSE_ROWS, 2);
+    write_all(&dir, &[("src/c.ts", two)]);
+    assert_eq!(doppelscan(&dir, &["baseline"]).0, 0);
+    write_all(&dir, &[("src/c.ts", renamed(PARSE_ROWS, 1))]);
+    let (_, out) = doppelscan(&dir, &["check", "src/c.ts"]);
+    assert!(out.contains("1 baseline entry no longer match"), "{out}");
 }
 
 // Catches errors exiting 1, which a CI gate would read as "new

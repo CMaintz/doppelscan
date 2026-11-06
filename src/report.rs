@@ -17,6 +17,9 @@ pub struct Analysis {
     pub files: Vec<Arc<FileIndex>>,
     /// Sorted by score, highest first; a group's id is its index + 1.
     pub groups: Vec<RawGroup>,
+    /// Groups the config accepts: left out of every report, but still
+    /// there, so a baseline entry for one has not been resolved.
+    pub accepted: Vec<RawGroup>,
     pub elapsed: Duration,
 }
 
