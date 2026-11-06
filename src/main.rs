@@ -6,7 +6,7 @@ use anyhow::{Context, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use doppelscan::baseline::{Baseline, DEFAULT_FILE};
 use doppelscan::config::{Config, Requested, Source, known_langs};
-use doppelscan::engine::{Against, Check, Engine, ScanOptions, Similar, anchor};
+use doppelscan::engine::{Against, Check, Engine, ScanOptions, Similar};
 use doppelscan::lang::{lang_index_by_name, lang_index_for_path};
 use doppelscan::near::{render_near, render_near_summary};
 use doppelscan::report::{
@@ -565,11 +565,12 @@ fn write_baseline(
         (None, true) => Baseline::find(&common.path).context("no baseline to prune")?,
         (None, false) => common.path.join(DEFAULT_FILE),
     };
-    let requested = options(common)?;
     let baseline = if prune {
+        let settings = Against::File(path.clone()).config_root(&common.path)?;
+        let requested = config_for(common, &settings)?.options(requested(common))?;
         engine.prune(&common.path, &path, &requested)?
     } else {
-        engine.baseline(&common.path, &path, &requested)?
+        engine.baseline(&common.path, &path, &options(common)?)?
     };
     baseline.save(&path)?;
     let _ = writeln!(
@@ -578,24 +579,6 @@ fn write_baseline(
         path.display(),
         baseline.groups.len()
     );
-    if prune {
-        note_partial_prune(&common.path, &path)?;
-    }
-    Ok(())
-}
-
-/// A prune of part of the tree succeeds and changes nothing, which would
-/// otherwise read as there being nothing to prune.
-fn note_partial_prune(scanned: &Path, file: &Path) -> anyhow::Result<()> {
-    let whole = anchor(scanned, file)?;
-    if whole != scanned.canonicalize()? {
-        let _ = writeln!(
-            std::io::stderr(),
-            "note: nothing was pruned: a copy that left {} looks deleted from inside it. Prune {} instead.",
-            scanned.display(),
-            shown(&whole)
-        );
-    }
     Ok(())
 }
 

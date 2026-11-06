@@ -10,7 +10,7 @@ use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use tree_sitter::Parser;
 
-use crate::baseline::{Baseline, Scope};
+use crate::baseline::Baseline;
 use crate::detect::{Occ, RawGroup, detect};
 use crate::filter::{PathFilter, PathRules};
 use crate::index::{FileIndex, MIN_STORED_TOKENS, index_source};
@@ -389,7 +389,7 @@ impl Engine {
     ) -> anyhow::Result<Check> {
         let view = self.comparison(root, against, opts)?;
         let analysis = self.scan(&view.root, &view.opts)?;
-        let kept = view.baseline.pruned(&analysis, &Scope::default());
+        let kept = view.baseline.pruned(&analysis);
         let resolved = view.baseline.groups.len() - kept.groups.len();
         let (new, small): (Vec<usize>, Vec<usize>) = view
             .baseline
@@ -435,11 +435,11 @@ impl Engine {
         }
     }
 
-    /// The baseline in `file` without what a scan of `root` shows is gone.
+    /// The baseline in `file` without what a scan of everything it describes
+    /// shows is gone. `root` only has to lie inside that.
     pub fn prune(&self, root: &Path, file: &Path, opts: &ScanOptions) -> anyhow::Result<Baseline> {
         let view = against_file(root, file, opts)?;
-        let scope = Scope::of(&view.shown);
-        Ok(view.baseline.pruned(&self.scan(root, &view.opts)?, &scope))
+        Ok(view.baseline.pruned(&self.scan(&view.root, &view.opts)?))
     }
 
     /// A new baseline of `root` for `file`, which may sit above it. Places

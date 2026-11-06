@@ -6,7 +6,7 @@ use std::process::Command;
 use std::time::Instant;
 
 use common::git;
-use doppelscan::baseline::{Baseline, DEFAULT_FILE, Entry, Scope};
+use doppelscan::baseline::{Baseline, DEFAULT_FILE, Entry};
 use doppelscan::engine::{ScanOptions, Source, analyze, index_sources};
 use doppelscan::lang::lang_index_for_path;
 use doppelscan::report::Analysis;
@@ -149,7 +149,7 @@ fn pruning_drops_resolved_entries_and_never_adds() {
         ("f.ts", renamed(PARSE_ROWS, 3)),
     ];
     let now = scan(&now);
-    let pruned = baseline.pruned(&now, &Scope::default());
+    let pruned = baseline.pruned(&now);
     assert_eq!(pruned.groups.len(), 1, "the parseRows entry is resolved");
     assert_eq!(pruned.new_groups(&now), vec![1], "the third copy stays new");
 }
@@ -306,7 +306,7 @@ fn pruning_one_of_two_copies_in_a_function_drops_one_place() {
     assert_eq!(baseline.groups[0].occurrences, 3);
 
     let one = [("a.ts", host(&[body])), ("b.ts", other)];
-    let pruned = baseline.pruned(&scan(&one), &Scope::default());
+    let pruned = baseline.pruned(&scan(&one));
     assert_eq!(pruned.groups[0].occurrences, 2);
     assert_eq!(pruned.groups[0].places.len(), 2);
 }
@@ -379,7 +379,7 @@ fn repo_with_spanning_clone(name: &str) -> PathBuf {
     dir
 }
 
-// Catches comparing a partial scan with the whole baseline: entries for
+// Catches comparing part of the tree with the whole baseline: entries for
 // code the scan never looked at would read as resolved, and pruning would
 // fail the next root check on untouched code.
 #[test]
@@ -395,7 +395,7 @@ fn entries_outside_a_scanned_directory_are_not_resolved() {
     assert_eq!(code, 0, "{out}");
 }
 
-// Catches a partial scan judging an entry by its recorded places, stale once
+// Catches judging an entry from part of the tree by its recorded places, stale once
 // a copy moves: the copy looks deleted from inside, so dropping the entry
 // fails the next root check on code that still exists.
 #[test]
@@ -407,16 +407,24 @@ fn a_copy_moved_out_of_a_scanned_directory_keeps_its_entry() {
     let (_, out) = doppelscan(&dir, &["check", "src"]);
     assert!(!out.contains("no longer match"), "{out}");
 
-    let (code, out) = doppelscan(&dir, &["baseline", "--prune", "src"]);
-    assert_eq!(code, 0, "{out}");
-    assert!(out.contains("nothing was pruned"), "{out}");
+    assert_eq!(doppelscan(&dir, &["baseline", "--prune", "src"]).0, 0);
     assert_eq!(written_entries(&dir).len(), 1);
     let (code, out) = doppelscan(&dir, &["check"]);
     assert_eq!(code, 0, "{out}");
 }
 
-// Catches a partial prune still lowering counts: two copies in view of three
-// reads as one gone when it moved outside, and the root check then counts
+// Catches a prune judging only the path it was given: run from a package,
+// it would keep an entry for code that is gone from the rest of the tree.
+#[test]
+fn a_prune_from_a_subdirectory_covers_the_whole_baseline() {
+    let dir = repo_with_sibling("scope-prune-all");
+    std::fs::remove_file(dir.join("src/b.ts")).unwrap();
+    assert_eq!(doppelscan(&dir, &["baseline", "--prune", "src"]).0, 0);
+    assert_eq!(written_entries(&dir).len(), 1);
+}
+
+// Catches a prune from a subdirectory lowering counts: two copies in view of
+// three reads as one gone when it moved outside, and the root check then counts
 // three against the two left.
 #[test]
 fn a_copy_moved_out_of_a_scanned_directory_keeps_its_count() {
@@ -435,7 +443,7 @@ fn a_copy_moved_out_of_a_scanned_directory_keeps_its_count() {
 // Catches the rule stopping pruning altogether: code that really is gone
 // still goes, once a scan of the whole directory can say so.
 #[test]
-fn a_root_scan_resolves_what_a_partial_scan_left() {
+fn a_check_from_anywhere_sees_what_is_resolved() {
     let dir = repo_with_sibling("scope-root");
     std::fs::remove_file(dir.join("src/b.ts")).unwrap();
     for args in [&["check", "src"][..], &["check"][..]] {
@@ -449,7 +457,7 @@ fn a_root_scan_resolves_what_a_partial_scan_left() {
     assert!(entries[0].places[0].starts_with("src-old/"), "{entries:?}");
 }
 
-// Catches lowering a count to the copies a partial scan can see: the copy
+// Catches lowering a count to the copies under the given path: the copy
 // outside is still there, so a root check would fail on untouched code.
 #[test]
 fn a_clone_spanning_the_scanned_directory_keeps_its_count() {
@@ -464,8 +472,8 @@ fn a_clone_spanning_the_scanned_directory_keeps_its_count() {
 }
 
 // Catches pruning a spanning clone by its copies inside: one copy left in
-// the scanned directory is no group there, so it looks deleted though the
-// clone with the copy outside is alive.
+// that directory is no group there, so it looks deleted though the clone
+// with the copy outside is alive.
 #[test]
 fn a_lone_copy_of_a_spanning_clone_is_not_gone() {
     let dir = repo_with_spanning_clone("scope-lone");
@@ -473,7 +481,7 @@ fn a_lone_copy_of_a_spanning_clone_is_not_gone() {
     assert_eq!(doppelscan(&dir, &["baseline", "--prune", "src"]).0, 0);
     let entries = written_entries(&dir);
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].places.len(), 3, "only a root scan can tell");
+    assert_eq!(entries[0].places.len(), 2, "{entries:?}");
     let (code, out) = doppelscan(&dir, &["check"]);
     assert_eq!(code, 0, "{out}");
 }
@@ -481,7 +489,7 @@ fn a_lone_copy_of_a_spanning_clone_is_not_gone() {
 // Catches trusting places a root prune has already cut: the moved copy is
 // recorded nowhere, so the entry only looks wholly inside `src`.
 #[test]
-fn an_entry_with_an_unrecorded_copy_survives_a_partial_prune() {
+fn an_entry_with_an_unrecorded_copy_survives_a_prune_from_a_subdirectory() {
     let dir = repo("scope-moved");
     assert_eq!(doppelscan(&dir, &["baseline"]).0, 0);
     std::fs::remove_file(dir.join("src/b.ts")).unwrap();
