@@ -620,6 +620,17 @@ fn ruby_block_comments_run_from_line_start_to_line_start() {
     assert_eq!(start_lines(&found), [5, 1]);
 }
 
+const ZIG_FUNCTION: &str = "pub fn two(a: u32, b: u32) u32 {\n    const v = a + b;\n    const w = v * 2;\n    const z = w + a + b;\n    return z + v + w;\n}\n";
+
+// Catches Zig getting a block comment it does not have: `/*` in a multiline
+// string would swallow the rest of the file.
+#[test]
+fn zig_has_no_block_comments() {
+    let a = format!("const q =\n    \\\\/* a header\n;\n{ZIG_FUNCTION}");
+    let found = scan(&[("a.zig", &a), ("b.zig", ZIG_FUNCTION)]);
+    assert_eq!(start_lines(&found), [4, 1]);
+}
+
 const CASED_QUERY: &str = "SELECT Id, Total, Status\nFROM Orders\nWHERE Total > 10\nORDER BY Id DESC;\nDELETE FROM Audit WHERE Age > 30;\n";
 
 // Catches keywords being hashed with their case: SQL's `SELECT` and

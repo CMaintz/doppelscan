@@ -277,7 +277,14 @@ pub static LANGS: LazyLock<Vec<Lang>> = LazyLock::new(|| {
             },
             &["dart"],
         ),
-        Lang::tokens("zig", C_LIKE, &["zig"]),
+        Lang::tokens(
+            "zig",
+            Lexicon {
+                block_comments: &[],
+                ..C_LIKE
+            },
+            &["zig"],
+        ),
         Lang::tokens("solidity", C_LIKE, &["sol"]),
         Lang::tokens("protobuf", C_LIKE, &["proto"]),
         Lang::tokens("scss", C_LIKE, &["scss", "less"]),
