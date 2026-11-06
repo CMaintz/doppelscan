@@ -67,11 +67,29 @@ pub struct Lexicon {
     pub primes: bool,
     /// Block comments nest, so only the matching closer ends one.
     pub nested_comments: bool,
+    /// Words that open an import. A language that ignores case lists its
+    /// own: the shared list, folded, would take SQL's `PART` column for
+    /// Dart's `part`.
+    pub import_heads: &'static [&'static str],
     /// Heads that import when called, whatever the arguments: R's
     /// `require(dplyr)` loads a package where Solidity's `require(ok)` is a
     /// check, and the two read the same.
     pub load_calls: &'static [&'static str],
 }
+
+/// Statements that only bring names in: never a clone, and they break a
+/// run like the grammar path's import nodes.
+const IMPORT_HEADS: &[&str] = &[
+    "import",
+    "include",
+    "using",
+    "require",
+    "require_relative",
+    "use",
+    "package",
+    "library",
+    "part",
+];
 
 const PLAIN: Lexicon = Lexicon {
     line_comments: &[],
@@ -81,6 +99,7 @@ const PLAIN: Lexicon = Lexicon {
     triple_quotes: &[],
     primes: false,
     nested_comments: false,
+    import_heads: IMPORT_HEADS,
     load_calls: &[],
 };
 const C_LIKE: Lexicon = Lexicon {
@@ -277,6 +296,7 @@ pub static LANGS: LazyLock<Vec<Lang>> = LazyLock::new(|| {
                     "left", "right", "inner", "outer", "exists", "between", "like",
                 ],
                 ignore_case: true,
+                import_heads: &["use"],
                 ..PLAIN
             },
             &["sql"],
@@ -320,6 +340,7 @@ pub static LANGS: LazyLock<Vec<Lang>> = LazyLock::new(|| {
                 line_comments: &["#"],
                 block_comments: &[("<#", "#>")],
                 ignore_case: true,
+                import_heads: &["using"],
                 ..PLAIN
             },
             &["ps1", "psm1"],

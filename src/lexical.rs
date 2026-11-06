@@ -136,20 +136,6 @@ const KEYWORDS: &[&str] = &[
     "yield",
 ];
 
-/// Statements that only bring names in: never a clone, and they break a
-/// run like the grammar path's import nodes.
-const NOISE_HEADS: &[&str] = &[
-    "import",
-    "include",
-    "using",
-    "require",
-    "require_relative",
-    "use",
-    "package",
-    "library",
-    "part",
-];
-
 /// Punctuation that can follow a head in a real import, for the heads that
 /// have such a form (`import { a } from`, `import * as`, T-SQL's `use [db]`).
 const NOISE_OPENERS: &[(&str, &str)] = &[("import", "{"), ("import", "*"), ("use", "[")];
@@ -656,13 +642,14 @@ impl<'a> Builder<'a> {
         };
         let (word, next) = (self.leaf_text(first), self.leaf_text(second));
         DIRECTIVE_NOISE.contains(&(word, next))
-            || find_word(NOISE_HEADS, word, self.lexicon.ignore_case)
+            || find_word(self.lexicon.import_heads, word, self.lexicon.ignore_case)
                 .is_some_and(|head| self.imports(stmt, head, leaves))
     }
 
     /// Whether a statement opening with a head word is an import: what it
     /// brings in has to come next. `include:`, `package =`, `part->a` and
-    /// `require(a > 0, "x")` use the word as a key, a name or a function.
+    /// `require(a > 0, "x")` use the word as a key, a name or a function, and
+    /// SQL's `USE AS c` is a column: `use` never brings in a keyword.
     fn imports(&self, stmt: &Stmt, head: &str, leaves: &[Leaf]) -> bool {
         let next = &leaves[1];
         let named = next.class == LeafClass::Literal
@@ -670,7 +657,8 @@ impl<'a> Builder<'a> {
         if named {
             // `library L { ... }` and `package p { ... }` hold code; every
             // other head with braces lists names (`import a.{b, c}`).
-            return !(stmt.closed_block && matches!(head, "library" | "package"));
+            let definition = stmt.closed_block && matches!(head, "library" | "package");
+            return !definition && !(head == "use" && next.class == LeafClass::Other);
         }
         NOISE_OPENERS.contains(&(head, self.leaf_text(next))) || self.is_load_call(head, leaves)
     }

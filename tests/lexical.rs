@@ -676,6 +676,19 @@ fn imports_match_in_any_case_where_keywords_do() {
     }
 }
 
+// Catches the shared head list folding with the language's case: `PART`
+// and `LIBRARY` are columns to SQL, which has no such statements, and
+// dropping them hid a repeated SELECT list. Lowercase spellings are no
+// different, and `use` followed by a keyword is not `USE shop`.
+#[test]
+fn sql_columns_named_like_import_heads_are_code() {
+    let upper = "SELECT\n  PART AS P1,\n  LIBRARY AS L1,\n  a AS b,\n  USE AS c,\n  d AS e,\n  f AS g\nFROM\n  t;\n";
+    for list in [upper.to_string(), upper.to_lowercase()] {
+        let found = scan(&[("a.sql", &list), ("b.sql", &list)]);
+        assert_eq!(found.groups.len(), 1, "{list}");
+    }
+}
+
 // Catches a nested block comment closing at its first closer: what is
 // left of it reads as code, and the bracket in it folds the rest of the
 // file into one statement.
