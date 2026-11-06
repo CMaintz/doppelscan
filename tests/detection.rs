@@ -791,3 +791,111 @@ fn a_run_of_statements_is_found_in_go() {
     let starts: Vec<u32> = best.occurrences.iter().map(|o| o.start_line).collect();
     assert_eq!(starts, [4, 4]);
 }
+
+const MULTI_LINE_IMPORT_TS: &str = r#"export function describe(items: string[], config: Config): string {
+    const header = `first line
+second line`;
+    let out = header;
+    for (const item of items) {
+        if (item.length > config.min) {
+            out += alpha(item) + beta(item);
+        }
+    }
+    return out;
+}
+
+import {
+    alpha,
+    beta,
+} from "./letters";
+
+export function count(items: string[], config: Config): number {
+    let total = 0;
+    for (const item of items) {
+        if (item.length > config.max) {
+            total += item.length * config.rate;
+        }
+    }
+    return total;
+}
+"#;
+
+const MULTI_LINE_STRING_SQL: &str = "SELECT id, name, 'first line\nsecond line' AS label, total\nFROM orders\nWHERE status = 'paid' AND total > 100 AND region = 'north'\nORDER BY total DESC, name ASC, id ASC;\n";
+
+fn fingerprints(a: &Analysis) -> Vec<String> {
+    let mut prints: Vec<String> = groups(a).into_iter().map(|g| g.fingerprint).collect();
+    prints.sort();
+    prints
+}
+
+// Catches raw bytes reaching the hashes: a mid-file multi-line import is
+// hashed as text, so an LF and a CRLF copy lose their whole-file group;
+// strict multi-line literals differ the same way; and normalising past the
+// early return for grammar-less languages would miss the SQL case.
+#[test]
+fn line_endings_do_not_change_fingerprints() {
+    let cases = [
+        ("a.ts", "b.ts", MULTI_LINE_IMPORT_TS),
+        ("a.sql", "b.sql", MULTI_LINE_STRING_SQL),
+    ];
+    for (a, b, lf) in cases {
+        let crlf = lf.replace('\n', "\r\n");
+        for strict in [false, true] {
+            let opts = || ScanOptions {
+                min_tokens: 20,
+                strict,
+                ..ScanOptions::default()
+            };
+            let both_lf = fingerprints(&scan_with(&[(a, lf), (b, lf)], opts()));
+            assert!(!both_lf.is_empty(), "{a} strict={strict}");
+            let mixed = scan_with(&[(a, lf), (b, &crlf)], opts());
+            let both_crlf = scan_with(&[(a, &crlf), (b, &crlf)], opts());
+            assert_eq!(fingerprints(&mixed), both_lf, "{a} strict={strict}");
+            assert_eq!(fingerprints(&both_crlf), both_lf, "{a} strict={strict}");
+        }
+    }
+}
+
+fn line_spans(a: &Analysis) -> Vec<(u32, u32)> {
+    let mut spans: Vec<(u32, u32)> = groups(a)
+        .iter()
+        .flat_map(|g| &g.occurrences)
+        .map(|o| (o.start_line, o.end_line))
+        .collect();
+    spans.sort();
+    spans.dedup();
+    spans
+}
+
+const RS_WITH_MID_FILE_USE: &str = "fn first(a: u32, b: u32) -> u32 { a + b * 2 - a / 3 }\nuse std::fmt;\nfn second(a: u32, b: u32) -> u32 { a * b + 4 - b / 5 }\n";
+
+const GO_SWITCH: &str = "package main\n\nfunc pick(n int) int {\n\tswitch n {\n\tcase 1:\n\t\tvalue := compute(n, 1)\n\t\tlog(value, n)\n\t\treturn value + offset(n)\n\tcase 2:\n\t\tvalue := compute(n, 2)\n\t\tlog(value, n)\n\t\treturn value + offset(n)\n\t}\n\treturn 0\n}\n";
+
+// Catches an end line taken from an end offset just past a newline, which
+// reports the line after the code: the next line of the file, or a line
+// that does not exist.
+#[test]
+fn a_clone_ends_on_its_last_line_of_code() {
+    let a = scan(&[
+        ("a.rs", RS_WITH_MID_FILE_USE),
+        ("b.rs", RS_WITH_MID_FILE_USE),
+    ]);
+    assert_eq!(line_spans(&a), [(1, 3)]);
+}
+
+// Catches trimming only one newline: trailing blank lines inside a node's
+// range are not code either.
+#[test]
+fn a_clone_end_skips_trailing_blank_lines() {
+    let padded = format!("{RS_WITH_MID_FILE_USE}\n\n\n");
+    let a = scan(&[("a.rs", &padded), ("b.rs", &padded)]);
+    assert_eq!(line_spans(&a), [(1, 3)]);
+}
+
+// Catches a Go case's range, which runs to the next line after its last
+// statement, reaching the switch's closing brace.
+#[test]
+fn a_last_case_ends_before_the_closing_brace() {
+    let a = scan(&[("a.go", GO_SWITCH)]);
+    assert_eq!(line_spans(&a), [(5, 8), (9, 12)]);
+}
