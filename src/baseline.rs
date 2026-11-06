@@ -27,6 +27,11 @@ pub struct Baseline {
     /// The scan settings the entries were found with; checks reuse them,
     /// since a different minimum size finds different groups.
     pub settings: Settings,
+    /// The folder the entries describe, relative to the file's directory
+    /// with a trailing slash; empty for that directory itself. Clones depend
+    /// on what is in view, so comparisons have to scan exactly this.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub scanned: String,
     pub groups: Vec<Entry>,
 }
 
@@ -125,6 +130,7 @@ impl Baseline {
         Self {
             version: VERSION,
             settings: Settings::from_options(opts),
+            scanned: String::new(),
             groups,
         }
     }
@@ -183,6 +189,7 @@ impl Baseline {
         Self {
             version: VERSION,
             settings: self.settings.clone(),
+            scanned: self.scanned.clone(),
             groups,
         }
     }

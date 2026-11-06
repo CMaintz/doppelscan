@@ -6,7 +6,7 @@ use std::process::Command;
 use std::time::Instant;
 
 use common::git;
-use doppelscan::baseline::{Baseline, Entry, Scope};
+use doppelscan::baseline::{Baseline, DEFAULT_FILE, Entry, Scope};
 use doppelscan::engine::{ScanOptions, Source, analyze, index_sources};
 use doppelscan::lang::lang_index_for_path;
 use doppelscan::report::Analysis;
@@ -438,10 +438,10 @@ fn a_copy_moved_out_of_a_scanned_directory_keeps_its_count() {
 fn a_root_scan_resolves_what_a_partial_scan_left() {
     let dir = repo_with_sibling("scope-root");
     std::fs::remove_file(dir.join("src/b.ts")).unwrap();
-    let (_, out) = doppelscan(&dir, &["check", "src"]);
-    assert!(!out.contains("no longer match"), "{out}");
-    let (_, out) = doppelscan(&dir, &["check"]);
-    assert!(out.contains("1 baseline entry no longer match"), "{out}");
+    for args in [&["check", "src"][..], &["check"][..]] {
+        let (_, out) = doppelscan(&dir, args);
+        assert!(out.contains("1 baseline entry no longer match"), "{out}");
+    }
 
     assert_eq!(doppelscan(&dir, &["baseline", "--prune"]).0, 0);
     let entries = written_entries(&dir);
@@ -700,6 +700,141 @@ fn checking_a_subdirectory_uses_the_baseline_above_it() {
     git(&dir, &["add", "."]);
     git(&dir, &["commit", "-qm", "copy"]);
     assert_eq!(doppelscan(&dir, &["check", "src"]).0, 1);
+}
+
+/// One function holding `SUM_TOTALS` with `extra` in front of it, so two
+/// functions built with different `extra` share only the summing run.
+fn sum_totals_after(name: &str, extra: &str) -> String {
+    let body = SUM_TOTALS.split_once('{').unwrap().1;
+    format!(
+        "export function {name}(orders: Order[], config: Config): number {{
+{extra}{body}"
+    )
+}
+
+const AUDIT: &str = "    audit.record(orders.length, config.rate, Date.now());
+    metrics.increment(\"totals\", { region: config.region, tier: config.tier });
+    logger.info(\"totals\", { count: orders.length, rate: config.rate });
+";
+
+const TRACE: &str = "    tracer.begin(\"sum\", orders.length, config.region, config.tier);
+    cache.touch(config.region, config.tier, orders.length, Date.now());
+    limiter.take(config.tier, orders.length, config.rate);
+";
+
+/// `src/one.ts` and `other/one.ts` share a large function, and so do the
+/// two `two.ts`, while both functions hold the same smaller run. From the
+/// root that run sits inside clones already reported; from `src` alone it
+/// is a clone of `one.ts` and `two.ts`.
+fn tree_hiding_a_run_inside_larger_clones(name: &str) -> PathBuf {
+    let dir = repo(name);
+    std::fs::remove_dir_all(dir.join("src")).unwrap();
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::create_dir_all(dir.join("other")).unwrap();
+    for folder in ["src", "other"] {
+        let one = sum_totals_after("one", AUDIT);
+        let two = sum_totals_after("two", TRACE);
+        std::fs::write(dir.join(folder).join("one.ts"), one).unwrap();
+        std::fs::write(dir.join(folder).join("two.ts"), two).unwrap();
+    }
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-qm", "tree"]);
+    dir
+}
+
+// Catches a subdirectory being judged on its own: what counts as one clone
+// changes with what else is in view, so an untouched tree failed its gate.
+#[test]
+fn an_unchanged_subdirectory_passes_against_the_baseline_above_it() {
+    let dir = tree_hiding_a_run_inside_larger_clones("hidden-run");
+    assert_eq!(doppelscan(&dir, &["baseline"]).0, 0);
+    assert_eq!(doppelscan(&dir, &["check"]).0, 0);
+    let (code, out) = doppelscan(&dir, &["check", "src"]);
+    assert_eq!(code, 0, "{out}");
+}
+
+// Catches a scoped check only seeing copies inside the scope: pasting
+// existing code into `src` from elsewhere is the duplication it is there for.
+#[test]
+fn a_subdirectory_check_finds_a_new_copy_of_code_outside_it() {
+    let dir = repo("copied-in");
+    std::fs::create_dir_all(dir.join("other")).unwrap();
+    std::fs::write(dir.join("other/rows.ts"), PARSE_ROWS).unwrap();
+    assert_eq!(doppelscan(&dir, &["baseline"]).0, 0);
+    std::fs::write(dir.join("src/rows.ts"), renamed(PARSE_ROWS, 2)).unwrap();
+    let (code, out) = doppelscan(&dir, &["check", "src"]);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("other/rows.ts"), "{out}");
+}
+
+// Catches a scoped check failing on duplication the scope has no part in.
+#[test]
+fn a_subdirectory_check_ignores_new_copies_elsewhere() {
+    let dir = repo("elsewhere");
+    std::fs::create_dir_all(dir.join("other")).unwrap();
+    std::fs::write(dir.join("other/rows.ts"), PARSE_ROWS).unwrap();
+    assert_eq!(doppelscan(&dir, &["baseline"]).0, 0);
+    std::fs::write(dir.join("other/more.ts"), renamed(PARSE_ROWS, 2)).unwrap();
+    assert_eq!(doppelscan(&dir, &["check"]).0, 1);
+    let (code, out) = doppelscan(&dir, &["check", "src"]);
+    assert_eq!(code, 0, "{out}");
+}
+
+// Catches a check taking its config from the path it was given while
+// scanning from the baseline: a `root = true` there cuts off the root config
+// the baseline was written with, and what it excludes reads as new.
+#[test]
+fn a_subdirectory_check_uses_the_config_the_baseline_was_written_with() {
+    let dir = repo("config-above");
+    write_all(
+        &dir,
+        &[
+            (".doppelscan.toml", "exclude = [\"legacy/\"]\n".to_string()),
+            ("src/.doppelscan.toml", "root = true\n".to_string()),
+            ("legacy/a.ts", renamed(SUM_TOTALS, 3)),
+        ],
+    );
+    assert_eq!(doppelscan(&dir, &["baseline"]).0, 0);
+    let (code, out) = doppelscan(&dir, &["check", "src"]);
+    assert_eq!(code, 0, "{out}");
+}
+
+// Catches a pass that looked at nothing: the path holds a built-in skip, so
+// the scan never reaches it, and "no new duplication" would read as a verdict.
+#[test]
+fn a_check_of_a_path_no_scan_reaches_says_so() {
+    let dir = repo("skipped-path");
+    assert_eq!(doppelscan(&dir, &["baseline"]).0, 0);
+    write_all(
+        &dir,
+        &[
+            ("src/bin/a.ts", renamed(PARSE_ROWS, 1)),
+            ("src/bin/b.ts", renamed(PARSE_ROWS, 2)),
+        ],
+    );
+    let (code, out) = doppelscan(&dir, &["check", "src/bin"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("not checked"), "{out}");
+}
+
+// Catches a baseline of one folder kept above it being compared with
+// everything around that folder: code it never covered would read as new.
+#[test]
+fn a_baseline_of_a_subdirectory_stays_about_that_subdirectory() {
+    let dir = repo("baseline-of-src");
+    write_all(
+        &dir,
+        &[
+            ("other/x.ts", renamed(PARSE_ROWS, 1)),
+            ("other/y.ts", renamed(PARSE_ROWS, 2)),
+        ],
+    );
+    let file = DEFAULT_FILE;
+    assert_eq!(doppelscan(&dir, &["baseline", "src", "-o", file]).0, 0);
+    let (code, out) = doppelscan(&dir, &["check", "src"]);
+    assert_eq!(code, 0, "{out}");
+    let (code, out) = doppelscan(&dir, &["check"]);
+    assert_eq!(code, 2, "{out}");
 }
 
 // Catches a streamed JSON report drifting from what a serde_json Value

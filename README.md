@@ -237,8 +237,11 @@ clone that grew, or a new top-level clone does not. `--prune` only drops
 entries and forgets copies that are gone, so it cannot accept new
 duplication. Only a scan of the whole directory the baseline describes can
 tell that code is gone: from a subdirectory, a copy that moved out looks
-deleted. So `check` on a subdirectory reports no entries as resolved, and
-`--prune` on one changes nothing and says so.
+deleted. So `check` on a subdirectory scans all of that directory and reports
+the new groups with a copy under the path, using the settings from there, and
+`--prune` on one changes nothing and says so. A baseline of one folder kept
+above it (`baseline src -o baseline.json`) records that folder, and describes
+nothing outside it.
 
 `check` reads the working tree, staged or not, so as a pre-commit hook it
 also sees unstaged edits. Commit the baseline with LF line endings
