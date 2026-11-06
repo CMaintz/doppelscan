@@ -106,7 +106,7 @@ pub fn explain(config: &Config, asked: &Requested, near_similarity: Option<f32>)
 
 /// An f32 as the f64 its shortest decimal names, so 0.8 shows as 0.8 and
 /// not 0.800000011920929.
-fn wide(v: f32) -> f64 {
+pub(crate) fn wide(v: f32) -> f64 {
     v.to_string().parse().unwrap_or(v as f64)
 }
 
