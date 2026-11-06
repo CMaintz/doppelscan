@@ -395,7 +395,7 @@ fn while_unreadable(path: &Path, during: impl FnOnce()) {
 fn while_unreadable(path: &Path, during: impl FnOnce()) {
     use std::os::unix::fs::PermissionsExt as _;
     let original = std::fs::metadata(path).unwrap().permissions();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0)).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000)).unwrap();
     during();
     std::fs::set_permissions(path, original).unwrap();
 }
