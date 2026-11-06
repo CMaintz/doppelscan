@@ -315,6 +315,7 @@ impl Lexer<'_> {
         match marker {
             "#" => before.is_none_or(|b| b.is_ascii_whitespace()),
             "//" => before != Some(b':'),
+            "--" => !self.lexicon.dash_operators || !in_operator(bytes, i),
             "=begin" => {
                 before.is_none_or(|b| b == b'\n')
                     && ends_word(bytes, i + marker.len())
@@ -323,6 +324,16 @@ impl Lexer<'_> {
             _ => true,
         }
     }
+}
+
+/// Whether the dashes at `i` belong to a longer symbol (`-->`, `|--`). A dash
+/// before them counts, so a long run is walked once, from its start.
+fn in_operator(bytes: &[u8], i: usize) -> bool {
+    const SYMBOLS: &[u8] = b"!#$%&*+./<=>?@\\^|~:";
+    let before = i.checked_sub(1).map(|p| bytes[p]);
+    let after = bytes[i..].iter().find(|&&b| b != b'-');
+    before.is_some_and(|b| b == b'-' || SYMBOLS.contains(&b))
+        || after.is_some_and(|b| SYMBOLS.contains(b))
 }
 
 /// Ruby's `=begin` and `=end` count only as whole words, unlike a line that

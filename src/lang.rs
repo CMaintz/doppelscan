@@ -69,6 +69,8 @@ pub struct Lexicon {
     pub raw_triples: &'static [&'static str],
     /// `'` may continue a name (`foldl'`) rather than end it.
     pub primes: bool,
+    /// Dashes inside a longer symbol are an operator, not a comment.
+    pub dash_operators: bool,
     /// Block comments nest, so only the matching closer ends one.
     pub nested_comments: bool,
     /// Words that open an import. A language that ignores case lists its
@@ -111,6 +113,7 @@ const PLAIN: Lexicon = Lexicon {
     triple_quotes: &[],
     raw_triples: &[],
     primes: false,
+    dash_operators: false,
     nested_comments: false,
     import_heads: IMPORT_HEADS,
     import_openers: &[("import", "{"), ("import", "*")],
@@ -341,6 +344,7 @@ pub static LANGS: LazyLock<Vec<Lang>> = LazyLock::new(|| {
                 block_comments: &[("{-", "-}")],
                 triple_quotes: b"\"",
                 primes: true,
+                dash_operators: true,
                 nested_comments: true,
                 ..PLAIN
             },

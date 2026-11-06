@@ -397,6 +397,37 @@ fn data_files_are_not_scanned() {
 
 const CALLS: &str = "call(alpha, beta, gamma, delta)\ncall(alpha, beta, gamma, delta, 1)\ncall(alpha, beta, gamma, delta, 2)\n";
 
+// Catches `-->` hiding the code after it: dashes in a longer symbol are a
+// Haskell operator, not a comment.
+#[test]
+fn a_haskell_operator_with_dashes_is_code() {
+    let code = "go1 a b = a --> call(alpha, beta, gamma, delta, epsilon, zeta, eta, theta)\ngo2 a b = a |-- call(alpha, beta, gamma, delta, epsilon, zeta, eta, theta)\n";
+    let found = scan(&[("a.hs", code), ("b.hs", code)]);
+    assert_eq!(found.groups.len(), 1);
+}
+
+// Catches the operator rule eating real comments, in Haskell or in a
+// language where any `--` opens one: the bracket on these lines would
+// fold the code below into one statement.
+#[test]
+fn dashes_still_open_comments() {
+    let cases = [
+        ("hs", "--- heading (\n"),
+        ("hs", "--note (\n"),
+        ("sql", "--> note (\n"),
+        ("lua", "--> note (\n"),
+    ];
+    for (ext, comment) in cases {
+        let (a, b) = (format!("a.{ext}"), format!("b.{ext}"));
+        let with = format!("{comment}{CALLS}");
+        assert_eq!(
+            start_lines(&scan(&[(&a, &with), (&b, CALLS)])),
+            [2, 1],
+            "{comment}"
+        );
+    }
+}
+
 // Catches an escaped quote closing a triple-quoted string: the leftover
 // `"""` would open another one and swallow the rest of the file.
 #[test]
