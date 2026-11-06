@@ -145,34 +145,38 @@ impl Engine {
             strict,
             file.included,
         );
-        if let Some(hit) = self
-            .cache
-            .lock()
-            .unwrap()
-            .get(&key)
-            .filter(|c| c.stamp == stamp)
-        {
-            return hit.index.clone();
+        if let Some(hit) = self.cached(&key, stamp) {
+            return hit;
         }
-        let index = read_and_index(parser, root, file, strict);
-        self.cache.lock().unwrap().insert(
-            key,
-            Cached {
-                stamp,
-                index: index.clone(),
-            },
-        );
+        // Left out of the cache on purpose: a locked file reads fine later
+        // under the same stamp, and a cached miss would hide it until then.
+        let bytes = std::fs::read(path).ok()?;
+        let index = index_bytes(parser, root, file, strict, bytes);
+        let cached = Cached {
+            stamp,
+            index: index.clone(),
+        };
+        self.cache.lock().unwrap().insert(key, cached);
         index
+    }
+
+    /// What is stored for `key` at `stamp`, itself `None` for a file that
+    /// was read and rejected.
+    fn cached(&self, key: &CacheKey, stamp: (SystemTime, u64)) -> Option<Option<Arc<FileIndex>>> {
+        let cache = self.cache.lock().unwrap();
+        let hit = cache.get(key).filter(|c| c.stamp == stamp);
+        hit.map(|c| c.index.clone())
     }
 }
 
-fn read_and_index(
+fn index_bytes(
     parser: &mut Parser,
     root: &Path,
     file: &Found,
     strict: bool,
+    bytes: Vec<u8>,
 ) -> Option<Arc<FileIndex>> {
-    let text = scannable_text(std::fs::read(&file.path).ok()?)?;
+    let text = scannable_text(bytes)?;
     if looks_generated(&text, file.included) {
         return None;
     }

@@ -379,6 +379,38 @@ fn numeric_arguments_that_cannot_be_used_are_tool_errors() {
     }
 }
 
+/// Runs `during` while reading `path` fails, leaving its mtime and size alone.
+#[cfg(windows)]
+fn while_unreadable(path: &Path, during: impl FnOnce()) {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    let mut open = std::fs::OpenOptions::new();
+    let _lock = open.read(true).share_mode(0).open(path).unwrap();
+    during();
+}
+
+#[cfg(unix)]
+fn while_unreadable(path: &Path, during: impl FnOnce()) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let original = std::fs::metadata(path).unwrap().permissions();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0)).unwrap();
+    during();
+    std::fs::set_permissions(path, original).unwrap();
+}
+
+// Catches caching a failed read under the file's stamp: the server would
+// keep a file that was only locked for a moment missing until its mtime
+// changed.
+#[test]
+fn a_file_that_could_not_be_read_is_read_again() {
+    let (engine, root) = (Engine::default(), fixture("locked"));
+    let args = json!({ "path": "src", "min_tokens": 20 });
+    while_unreadable(&root.join("src/b.ts"), || {
+        tool(&engine, &root, "find_duplicates", args.clone());
+    });
+    let reply = tool(&engine, &root, "find_duplicates", args);
+    assert!(tool_text(&reply).contains("src/b.ts"), "{reply}");
+}
+
 // Catches an explicit null, how some clients spell "unset", being refused
 // now that wrong types are.
 #[test]
