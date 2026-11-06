@@ -17,7 +17,7 @@ use crate::index::{
     FileIndex, Frag, Leaf, LeafClass, MIN_STORED_TOKENS, NO_SCOPE, Role, Seqs, line_starts,
     placeholder,
 };
-use crate::lang::{LANGS, Lexicon};
+use crate::lang::{EMBDOC, LANGS, Lexicon};
 
 /// Hashed by text rather than anonymised, so `if (a) return b` and
 /// `foo (a) bar b` stay different. One list serves every language: a
@@ -217,6 +217,8 @@ struct Lexer<'a> {
     /// the reported offsets slice.
     offset: u32,
     lexicon: &'a Lexicon,
+    /// Past this, a `=begin` has no `=end` to close it.
+    last_embdoc_end: usize,
     at: usize,
     line_start: bool,
     toks: Vec<Tok>,
@@ -230,6 +232,7 @@ fn tokenize(source: &str, lexicon: &Lexicon) -> Vec<Tok> {
         source: text,
         offset: (source.len() - text.len()) as u32,
         lexicon,
+        last_embdoc_end: last_embdoc_end(text, lexicon),
         at: 0,
         line_start: true,
         toks: Vec::new(),
@@ -240,6 +243,17 @@ fn tokenize(source: &str, lexicon: &Lexicon) -> Vec<Tok> {
     lexer.toks
 }
 
+/// Found once up front: asking at each `=begin` would rescan the file for
+/// every one left unclosed.
+fn last_embdoc_end(text: &str, lexicon: &Lexicon) -> usize {
+    if !lexicon.block_comments.contains(&EMBDOC) {
+        return 0;
+    }
+    text.rmatch_indices(EMBDOC.1)
+        .find(|(at, close)| ends_word(text.as_bytes(), at + close.len()))
+        .map_or(0, |(at, _)| at)
+}
+
 impl Lexer<'_> {
     fn step(&mut self) {
         let b = self.source.as_bytes()[self.at];
@@ -248,7 +262,7 @@ impl Lexer<'_> {
             self.at += 1;
         } else if b.is_ascii_whitespace() {
             self.at += 1;
-        } else if let Some(end) = comment_end(self.source, self.at, self.lexicon) {
+        } else if let Some(end) = self.comment_end() {
             self.line_start |= self.source[self.at..end].contains('\n');
             self.at = end;
         } else {
@@ -270,28 +284,72 @@ impl Lexer<'_> {
         self.line_start = false;
         self.at = end;
     }
+
+    /// Where a comment starting here ends, if one starts here.
+    fn comment_end(&self) -> Option<usize> {
+        let (source, i, lexicon) = (self.source, self.at, self.lexicon);
+        let rest = &source[i..];
+        let block = lexicon
+            .block_comments
+            .iter()
+            .find(|(open, _)| rest.starts_with(open) && self.opens_comment(open));
+        if let Some((open, close)) = block {
+            return Some(block_comment_end(source, i, open, close, lexicon));
+        }
+        let marker = lexicon
+            .line_comments
+            .iter()
+            .find(|m| rest.starts_with(**m))?;
+        self.opens_comment(marker)
+            .then(|| rest.find('\n').map_or(source.len(), |e| i + e))
+    }
+
+    /// `#` mid-word is shell's `$#` or a YAML `a#b` value, and `//` after a
+    /// colon is a URL scheme (an unquoted SCSS `url(http://...)`). Ruby's
+    /// `=begin` away from a line start is an assignment (`a =begin_at`), and
+    /// one no `=end` follows is text in a heredoc: Ruby rejects it as a
+    /// comment. None of them starts one.
+    fn opens_comment(&self, marker: &str) -> bool {
+        let (bytes, i) = (self.source.as_bytes(), self.at);
+        let before = i.checked_sub(1).map(|p| bytes[p]);
+        match marker {
+            "#" => before.is_none_or(|b| b.is_ascii_whitespace()),
+            "//" => before != Some(b':'),
+            "=begin" => {
+                before.is_none_or(|b| b == b'\n')
+                    && ends_word(bytes, i + marker.len())
+                    && i < self.last_embdoc_end
+            }
+            _ => true,
+        }
+    }
 }
 
-/// Where a comment starting at `i` ends, if one starts there.
-fn comment_end(source: &str, i: usize, lexicon: &Lexicon) -> Option<usize> {
-    let rest = &source[i..];
+/// Ruby's `=begin` and `=end` count only as whole words, unlike a line that
+/// merely starts with them (`=ending`).
+fn ends_word(bytes: &[u8], i: usize) -> bool {
+    bytes.get(i).is_none_or(u8::is_ascii_whitespace)
+}
+
+/// `=end` closes at a whole word and takes the rest of its line with it.
+fn embdoc_end(source: &str, body: usize) -> usize {
     let bytes = source.as_bytes();
-    let block = lexicon
-        .block_comments
-        .iter()
-        .find(|(open, _)| rest.starts_with(open) && opens_comment(bytes, i, open));
-    if let Some((open, close)) = block {
-        return Some(block_comment_end(source, i, open, close, lexicon));
-    }
-    let marker = lexicon
-        .line_comments
-        .iter()
-        .find(|m| rest.starts_with(**m))?;
-    opens_comment(bytes, i, marker).then(|| rest.find('\n').map_or(source.len(), |e| i + e))
+    let close = source[body..]
+        .match_indices(EMBDOC.1)
+        .map(|(at, close)| body + at + close.len())
+        .find(|&after| ends_word(bytes, after));
+    close.map_or(source.len(), |after| {
+        source[after..]
+            .find('\n')
+            .map_or(source.len(), |e| after + e)
+    })
 }
 
 fn block_comment_end(source: &str, i: usize, open: &str, close: &str, lexicon: &Lexicon) -> usize {
     let body = i + open.len();
+    if open == EMBDOC.0 {
+        return embdoc_end(source, body);
+    }
     if lexicon.nested_comments {
         return nested_comment_end(source.as_bytes(), body, open, close);
     }
@@ -319,20 +377,6 @@ fn nested_comment_end(bytes: &[u8], body: usize, open: &str, close: &str) -> usi
         }
     }
     bytes.len()
-}
-
-/// `#` mid-word is shell's `$#` or a YAML `a#b` value, `//` after a colon
-/// is a URL scheme (an unquoted SCSS `url(http://...)`), and Ruby's
-/// `=begin` away from a line start is an assignment (`a =begin_at`); none
-/// of them starts a comment.
-fn opens_comment(bytes: &[u8], i: usize, marker: &str) -> bool {
-    let before = i.checked_sub(1).map(|p| bytes[p]);
-    match marker {
-        "#" => before.is_none_or(|b| b.is_ascii_whitespace()),
-        "//" => before != Some(b':'),
-        "=begin" => before.is_none_or(|b| b == b'\n'),
-        _ => true,
-    }
 }
 
 fn token_at(source: &str, i: usize, lexicon: &Lexicon) -> (usize, LeafClass, Shape) {

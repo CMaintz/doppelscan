@@ -620,6 +620,43 @@ fn ruby_block_comments_run_from_line_start_to_line_start() {
     assert_eq!(start_lines(&found), [5, 1]);
 }
 
+// Catches `=end` closing on a prefix: `=ending` is text inside the comment,
+// so the bracket after it would become code and fold the file together.
+#[test]
+fn ruby_end_needs_a_word_boundary() {
+    let a = format!("=begin\ntext\n=ending is not end\nmore (\n=end\n{RUBY_METHOD}");
+    let found = scan(&[("a.rb", &a), ("b.rb", RUBY_METHOD)]);
+    assert_eq!(start_lines(&found), [6, 1]);
+}
+
+// Catches the rest of the `=end` line being read as code: Ruby ignores it,
+// and the bracket there would swallow the method below.
+#[test]
+fn ruby_ignores_the_rest_of_the_end_line() {
+    let a = format!("=begin\ndocs\n=end of docs (\n{RUBY_METHOD}");
+    let found = scan(&[("a.rb", &a), ("b.rb", RUBY_METHOD)]);
+    assert_eq!(start_lines(&found), [4, 1]);
+}
+
+// Catches `=begin` opening on a prefix: `=beginning` at a line start is an
+// assignment's value, and treating it as a comment hid the code up to the
+// next `=end`.
+#[test]
+fn ruby_begin_needs_a_word_boundary() {
+    let a = format!("value\n=beginning\n{RUBY_METHOD}=end\n");
+    let found = scan(&[("a.rb", &a), ("b.rb", RUBY_METHOD)]);
+    assert_eq!(start_lines(&found), [3, 1]);
+}
+
+// Catches an unclosed `=begin` running to the end of the file: Ruby rejects
+// one, so it can only be text, such as a line of a heredoc.
+#[test]
+fn an_unclosed_ruby_begin_is_not_a_comment() {
+    let a = format!("def one(x)\n  doc = <<~TXT\n=begin\n  TXT\n  x + 1\nend\n{RUBY_METHOD}");
+    let found = scan(&[("a.rb", &a), ("b.rb", RUBY_METHOD)]);
+    assert_eq!(start_lines(&found), [7, 1]);
+}
+
 const ZIG_FUNCTION: &str = "pub fn two(a: u32, b: u32) u32 {\n    const v = a + b;\n    const w = v * 2;\n    const z = w + a + b;\n    return z + v + w;\n}\n";
 
 // Catches Zig getting a block comment it does not have: `/*` in a multiline

@@ -81,6 +81,10 @@ pub struct Lexicon {
     pub load_calls: &'static [&'static str],
 }
 
+/// Ruby's embedded document. `=end` only closes at a line start, hence its
+/// newline; `=begin` has the same rule, in the lexer's `opens_comment`.
+pub const EMBDOC: (&str, &str) = ("=begin", "\n=end");
+
 /// Statements that only bring names in: never a clone, and they break a
 /// run like the grammar path's import nodes.
 const IMPORT_HEADS: &[&str] = &[
@@ -339,9 +343,7 @@ pub static LANGS: LazyLock<Vec<Lang>> = LazyLock::new(|| {
             "ruby",
             Lexicon {
                 line_comments: &["#"],
-                // `=end` only closes at a line start, hence its newline;
-                // `=begin` has the same rule, in `opens_comment`.
-                block_comments: &[("=begin", "\n=end")],
+                block_comments: &[EMBDOC],
                 ..PLAIN
             },
             &["rb", "rake"],
