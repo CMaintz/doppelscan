@@ -341,6 +341,16 @@ pub enum Against {
 }
 
 impl Against {
+    /// Where settings for a check are looked up from `scanned`. A baseline
+    /// file's scan starts at its own folder, whatever path was asked for, and
+    /// has to use the settings it was written with.
+    pub fn config_root(&self, scanned: &Path) -> anyhow::Result<PathBuf> {
+        match self {
+            Against::File(path) => baseline_root(path),
+            Against::Rev(_) => Ok(scanned.to_path_buf()),
+        }
+    }
+
     pub fn label(&self) -> String {
         match self {
             // Canonical Windows paths carry a `\\?\` prefix nobody wants to read.
@@ -377,28 +387,17 @@ impl Engine {
         opts: &ScanOptions,
         min_new_tokens: u32,
     ) -> anyhow::Result<Check> {
-        let (baseline, opts, scope) = match against {
-            Against::File(path) => against_file(root, path, opts)?,
-            // Both sides scan `root`, so all of this baseline is in view.
-            Against::Rev(rev) => {
-                let (base, opts) = self.scan_rev(root, rev, opts)?;
-                let baseline = Baseline::from_analysis(&base, &opts);
-                (baseline, opts, Scope::default())
-            }
-        };
-        let analysis = self.scan(root, &opts)?;
-        let resolved = baseline.groups.len() - baseline.pruned(&analysis, &scope).groups.len();
-        let (new, small): (Vec<usize>, Vec<usize>) = baseline
+        let view = self.comparison(root, against, opts)?;
+        let analysis = self.scan(&view.root, &view.opts)?;
+        let kept = view.baseline.pruned(&analysis, &Scope::default());
+        let resolved = view.baseline.groups.len() - kept.groups.len();
+        let (new, small): (Vec<usize>, Vec<usize>) = view
+            .baseline
             .new_groups(&analysis)
             .into_iter()
+            .filter(|&id| touches(&analysis, id, &view.shown))
             .partition(|&id| analysis.groups[id - 1].tokens >= min_new_tokens);
-        let note = (!small.is_empty()).then(|| {
-            let groups = if small.len() == 1 { "group is" } else { "groups are" };
-            format!(
-                "{} smaller new {groups} under {min_new_tokens} tokens, listed last; they do not fail the check.",
-                small.len()
-            )
-        });
+        let note = notes(&analysis, &view.shown, small.len(), min_new_tokens);
         Ok(Check {
             analysis,
             new,
@@ -408,10 +407,60 @@ impl Engine {
         })
     }
 
+    /// What `check` compares. A baseline file was written from its whole
+    /// directory, and what counts as one clone changes with what else is in
+    /// view: a run inside two larger clones is no group of its own from the
+    /// top, but is one from a folder holding one copy of each. So a check of
+    /// part of that directory still scans all of it, and `shown` narrows the
+    /// result afterwards. Both sides of a revision check see the same tree.
+    fn comparison(
+        &self,
+        root: &Path,
+        against: &Against,
+        opts: &ScanOptions,
+    ) -> anyhow::Result<Comparison> {
+        match against {
+            Against::File(path) => against_file(root, path, opts),
+            Against::Rev(rev) => {
+                let (base, opts) = self.scan_rev(root, rev, opts)?;
+                let baseline = Baseline::from_analysis(&base, &opts);
+                let root = root.to_path_buf();
+                Ok(Comparison {
+                    baseline,
+                    opts,
+                    root,
+                    shown: String::new(),
+                })
+            }
+        }
+    }
+
     /// The baseline in `file` without what a scan of `root` shows is gone.
     pub fn prune(&self, root: &Path, file: &Path, opts: &ScanOptions) -> anyhow::Result<Baseline> {
-        let (baseline, opts, scope) = against_file(root, file, opts)?;
-        Ok(baseline.pruned(&self.scan(root, &opts)?, &scope))
+        let view = against_file(root, file, opts)?;
+        let scope = Scope::of(&view.shown);
+        Ok(view.baseline.pruned(&self.scan(root, &view.opts)?, &scope))
+    }
+
+    /// A new baseline of `root` for `file`, which may sit above it. Places
+    /// are relative to the file's directory, so later checks find them from
+    /// anywhere under it.
+    pub fn baseline(
+        &self,
+        root: &Path,
+        file: &Path,
+        opts: &ScanOptions,
+    ) -> anyhow::Result<Baseline> {
+        let base = anchor(root, file)?;
+        let opts = ScanOptions {
+            display_base: Some(base.clone()),
+            ..opts.clone()
+        };
+        let analysis = self.scan(root, &opts)?;
+        Ok(Baseline {
+            scanned: prefix_of(&root.canonicalize()?, &base),
+            ..Baseline::from_analysis(&analysis, &opts)
+        })
     }
 
     /// `root` at the fork point of `rev`, with paths shown as a working-tree
@@ -466,23 +515,82 @@ fn prefix_of(root: &Path, base: &Path) -> String {
     if rel.is_empty() { rel } else { rel + "/" }
 }
 
+/// One side of a check, with what to scan for the other.
+struct Comparison {
+    baseline: Baseline,
+    opts: ScanOptions,
+    root: PathBuf,
+    /// Path prefix a group needs a copy under to be reported; empty for all.
+    shown: String,
+}
+
+/// Whether `path` lies under `shown`, a path with a trailing slash; the
+/// slash added here lets it name a file as well as a directory.
+fn is_under(path: &str, shown: &str) -> bool {
+    format!("{path}/").starts_with(shown)
+}
+
+fn touches(analysis: &Analysis, id: usize, shown: &str) -> bool {
+    let path = |o: &crate::detect::Occ| &analysis.files[o.file as usize].path;
+    let occs = &analysis.groups[id - 1].occs;
+    occs.iter().any(|o| is_under(path(o), shown))
+}
+
+fn notes(analysis: &Analysis, shown: &str, small: usize, min_tokens: u32) -> Option<String> {
+    let unscanned = !analysis.files.iter().any(|f| is_under(&f.path, shown));
+    let unscanned = unscanned.then(|| {
+        format!(
+            "{} was not checked: the scan the baseline describes skips everything there.",
+            shown.trim_end_matches('/')
+        )
+    });
+    let groups = if small == 1 { "group is" } else { "groups are" };
+    let small = (small > 0).then(|| {
+        format!("{small} smaller new {groups} under {min_tokens} tokens, listed last; they do not fail the check.")
+    });
+    let lines: Vec<String> = [unscanned, small].into_iter().flatten().collect();
+    (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
+fn scanned_path(base: &Path, scanned: &str) -> PathBuf {
+    // One component at a time: a verbatim Windows path takes `/` literally.
+    let parts = scanned.split('/').filter(|part| !part.is_empty());
+    parts.fold(base.to_path_buf(), |path, part| path.join(part))
+}
+
+/// The folder a baseline file's entries describe.
+fn baseline_root(file: &Path) -> anyhow::Result<PathBuf> {
+    let dir = file.parent().filter(|d| !d.as_os_str().is_empty());
+    let dir = dir.unwrap_or(Path::new(".")).canonicalize()?;
+    Ok(scanned_path(&dir, &Baseline::load(file)?.scanned))
+}
+
 /// Places in a baseline are relative to the file's own directory, so the
-/// scan is shown from there whatever subdirectory is being checked. The
-/// scope says whether that was all of what the baseline describes.
-fn against_file(
-    root: &Path,
-    path: &Path,
-    opts: &ScanOptions,
-) -> anyhow::Result<(Baseline, ScanOptions, Scope)> {
+/// scan is shown from there whatever subdirectory is being checked.
+fn against_file(root: &Path, path: &Path, opts: &ScanOptions) -> anyhow::Result<Comparison> {
     let baseline = Baseline::load(path)?;
     baseline.settings.require_same(opts, path)?;
     let base = anchor(root, path)?;
-    let scope = Scope::of(&prefix_of(&root.canonicalize()?, &base));
+    let covered = scanned_path(&base, &baseline.scanned);
+    let asked = root.canonicalize()?;
+    anyhow::ensure!(
+        asked.starts_with(&covered),
+        "{} describes {}, which does not cover {}",
+        path.display(),
+        covered.display(),
+        asked.display()
+    );
+    let shown = prefix_of(&asked, &base);
     let opts = ScanOptions {
         display_base: Some(base),
         ..opts.clone()
     };
-    Ok((baseline, opts, scope))
+    Ok(Comparison {
+        baseline,
+        opts,
+        root: covered,
+        shown,
+    })
 }
 
 /// The directory a baseline file describes; `root` must lie inside it.

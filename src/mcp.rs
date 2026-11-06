@@ -462,8 +462,11 @@ fn find_near(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<Strin
 fn check_new(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<String> {
     let path = scan_root(root, args)?;
     let against = against(root, &path, args)?;
-    let min_new = config(root, args)?.check_min_tokens(requested(args)?.check_min_tokens);
-    let check = engine.check(&path, &against, &options(root, args)?, min_new)?;
+    let config = Config::for_scan(&against.config_root(&path)?)?;
+    let asked = requested(args)?;
+    let min_new = config.check_min_tokens(asked.check_min_tokens);
+    let opts = with_root(root, args, config.options(asked)?)?;
+    let check = engine.check(&path, &against, &opts, min_new)?;
     Ok(render_check(&check, &against))
 }
 

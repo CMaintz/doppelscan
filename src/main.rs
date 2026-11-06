@@ -265,10 +265,15 @@ fn init(path: &Path, force: bool) -> anyhow::Result<()> {
 
 /// Read once per command: reading warns about a `--config` file.
 fn config(c: &Common) -> anyhow::Result<Config> {
+    config_for(c, &c.path)
+}
+
+/// As [`config`], looking up from `start` when no flag names the config.
+fn config_for(c: &Common, start: &Path) -> anyhow::Result<Config> {
     let config = Config::read(match (&c.config, c.no_config) {
         (Some(file), _) => Source::File(file),
         (None, true) => Source::None,
-        (None, false) => Source::Lookup(&c.path),
+        (None, false) => Source::Lookup(start),
     })?;
     if let Some(file) = &c.config {
         warn_if_patterns_miss(&config, file, &c.path);
@@ -500,7 +505,7 @@ fn check(
         (None, Some(file)) => Against::File(file),
         (None, None) => Against::Rev("HEAD".into()),
     };
-    let config = config(common)?;
+    let config = config_for(common, &against.config_root(&common.path)?)?;
     let min_new = config.check_min_tokens(check_min_tokens);
     let opts = config.options(requested(common))?;
     let result = engine.check(&common.path, &against, &opts, min_new)?;
@@ -564,8 +569,7 @@ fn write_baseline(
     let baseline = if prune {
         engine.prune(&common.path, &path, &requested)?
     } else {
-        let opts = anchored(requested, common, &path)?;
-        Baseline::from_analysis(&engine.scan(&common.path, &opts)?, &opts)
+        engine.baseline(&common.path, &path, &requested)?
     };
     baseline.save(&path)?;
     let _ = writeln!(
@@ -593,14 +597,6 @@ fn note_partial_prune(scanned: &Path, file: &Path) -> anyhow::Result<()> {
         );
     }
     Ok(())
-}
-
-/// Baseline places are relative to the baseline file's directory.
-fn anchored(opts: ScanOptions, common: &Common, file: &Path) -> anyhow::Result<ScanOptions> {
-    Ok(ScanOptions {
-        display_base: Some(anchor(&common.path, file)?),
-        ..opts
-    })
 }
 
 fn near(
