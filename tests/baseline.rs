@@ -265,6 +265,27 @@ fn a_shrunk_entry_forgets_a_removed_copy() {
     assert_eq!(entries[0].places.len(), 2, "{:?}", entries[0].places);
 }
 
+// Catches pruning by the same-fingerprint group alone: the smaller clone
+// through c.ts is excused only by c.ts's place, so dropping that place turns
+// a green check red with no code change.
+#[test]
+fn pruning_keeps_a_place_only_a_shrunk_group_holds() {
+    let dir = repo("prune-union");
+    let shrunk =
+        renamed(SUM_TOTALS, 3).replace("return Math.round(total * 100) / 100;", "return total;");
+    std::fs::write(dir.join("src/c.ts"), renamed(SUM_TOTALS, 3)).unwrap();
+    assert_eq!(doppelscan(&dir, &["baseline"]).0, 0);
+    std::fs::write(dir.join("src/c.ts"), shrunk).unwrap();
+    assert_eq!(doppelscan(&dir, &["check"]).0, 0);
+
+    assert_eq!(doppelscan(&dir, &["baseline", "--prune"]).0, 0);
+    let entries = written_entries(&dir);
+    assert_eq!(entries[0].occurrences, 3);
+    assert_eq!(entries[0].places.len(), 3, "{:?}", entries[0].places);
+    let (code, out) = doppelscan(&dir, &["check"]);
+    assert_eq!(code, 0, "{out}");
+}
+
 // Catches keeping a place because any copy matches it: of two copies
 // in one function, one is gone, so its place must go too.
 #[test]
@@ -374,16 +395,55 @@ fn entries_outside_a_scanned_directory_are_not_resolved() {
     assert_eq!(code, 0, "{out}");
 }
 
-// Catches scoping prunes away altogether: an entry wholly inside the
-// scanned directory is the scan's to resolve, whatever lies outside.
+// Catches a partial scan judging an entry by its recorded places, stale once
+// a copy moves: the copy looks deleted from inside, so dropping the entry
+// fails the next root check on code that still exists.
 #[test]
-fn entries_inside_a_scanned_directory_can_still_be_resolved() {
-    let dir = repo_with_sibling("scope-inside");
+fn a_copy_moved_out_of_a_scanned_directory_keeps_its_entry() {
+    let dir = repo("scope-moved-out");
+    assert_eq!(doppelscan(&dir, &["baseline"]).0, 0);
+    write_all(&dir, &[("lib/b.ts", renamed(SUM_TOTALS, 2))]);
     std::fs::remove_file(dir.join("src/b.ts")).unwrap();
     let (_, out) = doppelscan(&dir, &["check", "src"]);
-    assert!(out.contains("1 baseline entry no longer match"), "{out}");
+    assert!(!out.contains("no longer match"), "{out}");
+
+    let (code, out) = doppelscan(&dir, &["baseline", "--prune", "src"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("nothing was pruned"), "{out}");
+    assert_eq!(written_entries(&dir).len(), 1);
+    let (code, out) = doppelscan(&dir, &["check"]);
+    assert_eq!(code, 0, "{out}");
+}
+
+// Catches a partial prune still lowering counts: two copies in view of three
+// reads as one gone when it moved outside, and the root check then counts
+// three against the two left.
+#[test]
+fn a_copy_moved_out_of_a_scanned_directory_keeps_its_count() {
+    let dir = repo("scope-moved-count");
+    write_all(&dir, &[("src/c.ts", renamed(SUM_TOTALS, 3))]);
+    assert_eq!(doppelscan(&dir, &["baseline"]).0, 0);
+    write_all(&dir, &[("lib/c.ts", renamed(SUM_TOTALS, 3))]);
+    std::fs::remove_file(dir.join("src/c.ts")).unwrap();
 
     assert_eq!(doppelscan(&dir, &["baseline", "--prune", "src"]).0, 0);
+    assert_eq!(written_entries(&dir)[0].occurrences, 3);
+    let (code, out) = doppelscan(&dir, &["check"]);
+    assert_eq!(code, 0, "{out}");
+}
+
+// Catches the rule stopping pruning altogether: code that really is gone
+// still goes, once a scan of the whole directory can say so.
+#[test]
+fn a_root_scan_resolves_what_a_partial_scan_left() {
+    let dir = repo_with_sibling("scope-root");
+    std::fs::remove_file(dir.join("src/b.ts")).unwrap();
+    let (_, out) = doppelscan(&dir, &["check", "src"]);
+    assert!(!out.contains("no longer match"), "{out}");
+    let (_, out) = doppelscan(&dir, &["check"]);
+    assert!(out.contains("1 baseline entry no longer match"), "{out}");
+
+    assert_eq!(doppelscan(&dir, &["baseline", "--prune"]).0, 0);
     let entries = written_entries(&dir);
     assert_eq!(entries.len(), 1);
     assert!(entries[0].places[0].starts_with("src-old/"), "{entries:?}");
@@ -432,20 +492,6 @@ fn an_entry_with_an_unrecorded_copy_survives_a_partial_prune() {
     assert_eq!(doppelscan(&dir, &["baseline", "--prune", "src"]).0, 0);
     let (code, out) = doppelscan(&dir, &["check"]);
     assert_eq!(code, 0, "{out}");
-}
-
-// Catches treating a scanned file like a directory: places name it
-// directly, so nothing would ever look inside it and its entries could
-// never resolve.
-#[test]
-fn a_scanned_file_can_resolve_its_own_entries() {
-    let dir = repo("scope-file");
-    let two = renamed(PARSE_ROWS, 1) + &renamed(PARSE_ROWS, 2);
-    write_all(&dir, &[("src/c.ts", two)]);
-    assert_eq!(doppelscan(&dir, &["baseline"]).0, 0);
-    write_all(&dir, &[("src/c.ts", renamed(PARSE_ROWS, 1))]);
-    let (_, out) = doppelscan(&dir, &["check", "src/c.ts"]);
-    assert!(out.contains("1 baseline entry no longer match"), "{out}");
 }
 
 // Catches errors exiting 1, which a CI gate would read as "new
@@ -585,6 +631,28 @@ fn check_compares_language_lists_as_sets() {
     let dir = repo("set-settings");
     assert_eq!(doppelscan(&dir, &["baseline", "--only", "ts,js"]).0, 0);
     let (code, out) = doppelscan(&dir, &["check", "--only", "js,ts,ts"]);
+    assert_eq!(code, 0, "{out}");
+}
+
+// Catches an old file being compared at all: fingerprints changed since it
+// was written, so its entries match nothing and unchanged code fails the
+// check as new instead of saying what to do.
+#[test]
+fn a_baseline_from_an_older_format_asks_to_be_written_again() {
+    let dir = repo("old-format");
+    assert_eq!(doppelscan(&dir, &["baseline"]).0, 0);
+    let file = dir.join(".doppelscan-baseline.json");
+    let current = std::fs::read_to_string(&file).unwrap();
+    let mut old: serde_json::Value = serde_json::from_str(&current).unwrap();
+    for version in [1, 2] {
+        old["version"] = version.into();
+        std::fs::write(&file, old.to_string()).unwrap();
+        let (code, out) = doppelscan(&dir, &["check"]);
+        assert_eq!(code, 2, "{out}");
+        assert!(out.contains("doppelscan baseline"), "{out}");
+    }
+    assert_eq!(doppelscan(&dir, &["baseline"]).0, 0);
+    let (code, out) = doppelscan(&dir, &["check"]);
     assert_eq!(code, 0, "{out}");
 }
 
@@ -771,6 +839,64 @@ fn check_skips_a_generated_file_under_crlf_too() {
     ];
     let (code, out) = commit_lf_then_check_crlf("generated", &files);
     assert_eq!(code, 0, "{out}");
+}
+
+const SIZE_CAP: usize = 1 << 20;
+
+/// A third copy padded to `size` bytes with lines CRLF grows by a third.
+fn padded_copy(size: usize) -> String {
+    let code = renamed(SUM_TOTALS, 3);
+    let padding = size.saturating_sub(code.len()) / 3;
+    code + &"//\n".repeat(padding)
+}
+
+fn with_crlf(text: &str) -> String {
+    text.replace('\n', "\r\n")
+}
+
+// Catches the revision side capping raw blob bytes: a file committed with
+// CRLF drops out there but not from its LF checkout, so its unchanged clone
+// reads as new on a clean tree.
+#[test]
+fn the_size_cap_judges_a_blob_by_its_normalised_size() {
+    let dir = repo("cap-blob");
+    let copy = padded_copy(SIZE_CAP * 9 / 10);
+    write_all(&dir, &[("src/big.ts", with_crlf(&copy))]);
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-qm", "crlf copy"]);
+    write_all(&dir, &[("src/big.ts", copy)]);
+    let (code, out) = doppelscan(&dir, &["check", "--base", "HEAD"]);
+    assert_eq!(code, 0, "{out}");
+}
+
+// Catches the working tree capping raw checkout bytes: the same file would
+// be scanned or not depending on the platform's line endings.
+#[test]
+fn the_size_cap_judges_a_checkout_by_its_normalised_size() {
+    let dir = repo("cap-file");
+    let copy = with_crlf(&padded_copy(SIZE_CAP * 9 / 10));
+    write_all(&dir, &[("src/big.ts", copy)]);
+    let (code, out) = doppelscan(&dir, &["."]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("src/big.ts"), "{out}");
+}
+
+// Catches loosening the cap to the raw limit: a file past it after
+// normalising must stay out on both sides, or the revision would excuse a
+// copy by one no scan of the tree reads.
+#[test]
+fn a_file_over_the_cap_once_normalised_stays_out_on_both_sides() {
+    let dir = repo("cap-over");
+    std::fs::remove_file(dir.join("src/b.ts")).unwrap();
+    write_all(&dir, &[("src/big.ts", padded_copy(SIZE_CAP * 3 / 2))]);
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-qm", "big copy"]);
+    let (_, out) = doppelscan(&dir, &["."]);
+    assert!(!out.contains("src/big.ts"), "{out}");
+
+    write_all(&dir, &[("src/b.ts", renamed(SUM_TOTALS, 2))]);
+    let (code, out) = doppelscan(&dir, &["check", "--base", "HEAD"]);
+    assert_eq!(code, 1, "{out}");
 }
 
 // Catches `--exclude` being judged on the revision side with the scan root's

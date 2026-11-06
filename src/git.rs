@@ -10,8 +10,7 @@ use rustc_hash::FxHashSet;
 
 use crate::engine::{ScanOptions, Source};
 use crate::filter::PathFilter;
-use crate::index::normalize_line_endings;
-use crate::walk::{MAX_FILE_BYTES, accept_listed, discover, looks_generated};
+use crate::walk::{MAX_RAW_BYTES, accept_listed, discover, looks_generated, scannable_text};
 
 pub struct Revision {
     pub sources: Vec<Source>,
@@ -68,7 +67,7 @@ pub fn read_revision(
         .into_iter()
         .zip(contents)
         .filter_map(|((l, lang), bytes)| {
-            let text = normalize_line_endings(String::from_utf8(bytes?).ok()?);
+            let text = scannable_text(bytes?)?;
             let included = filter.includes(Path::new(&l.path));
             (!looks_generated(&text, included)).then(|| Source {
                 path: format!("{display_prefix}{}", l.path),
@@ -208,5 +207,5 @@ fn read_one(reader: &mut impl BufRead) -> anyhow::Result<Option<Vec<u8>>> {
     let mut body = vec![0; size as usize + 1];
     reader.read_exact(&mut body)?;
     body.pop();
-    Ok((size <= MAX_FILE_BYTES).then_some(body))
+    Ok((size <= MAX_RAW_BYTES).then_some(body))
 }
