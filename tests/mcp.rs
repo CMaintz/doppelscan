@@ -21,6 +21,7 @@ export function sumTotals(orders: Order[], config: Config): number {
 
 fn fixture(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("doppelscan-mcp-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("src")).unwrap();
     std::fs::write(dir.join("src/a.ts"), CLONE).unwrap();
     std::fs::write(
