@@ -136,6 +136,11 @@ const KEYWORDS: &[&str] = &[
     "yield",
 ];
 
+/// Longest scope label that still gets its parents prepended, in bytes. Far
+/// past real code, and it keeps label memory linear in the file: each label
+/// repeats its parents', so nesting alone would make the total quadratic.
+const MAX_QUALIFIED_SCOPE: usize = 1024;
+
 /// Directives after `#` (C's `#include`) or `@` (SCSS's `@use`) that
 /// import; `@include` in SCSS calls a mixin, so it is not one of them.
 const DIRECTIVE_NOISE: &[(&str, &str)] = &[
@@ -523,6 +528,10 @@ struct Block {
     depth: u32,
     braced: bool,
     scope: Option<u32>,
+    /// The nearest scope at or above this block. Kept here because every
+    /// statement asks, and walking the stack each time is quadratic in
+    /// nesting depth.
+    enclosing: Option<u32>,
 }
 
 struct Builder<'a> {
@@ -550,7 +559,7 @@ impl<'a> Builder<'a> {
             seqs: Seqs::default(),
             scopes: Vec::new(),
             scope_spans: Vec::new(),
-            blocks: vec![Block::new(false, None, lang_seed)],
+            blocks: vec![Block::new(false, None, None, lang_seed)],
         }
     }
 
@@ -655,7 +664,8 @@ impl<'a> Builder<'a> {
     fn open_block(&mut self, tok: &Tok) {
         let scope = self.open_scope();
         self.push_leaf(tok);
-        let block = Block::new(true, scope, self.lang_seed);
+        let enclosing = scope.or(self.top().enclosing);
+        let block = Block::new(true, scope, enclosing, self.lang_seed);
         self.blocks.push(block);
     }
 
@@ -816,9 +826,10 @@ impl<'a> Builder<'a> {
     fn open_scope(&mut self) -> Option<u32> {
         let name = self.header_name()?;
         let start = self.top().stmt.as_ref()?.start;
-        let qualified = match self.blocks.iter().rev().find_map(|b| b.scope) {
-            Some(parent) => format!("{}.{name}", self.scopes[parent as usize]),
-            None => name.to_string(),
+        let parent = self.top().enclosing.map(|p| &self.scopes[p as usize]);
+        let qualified = match parent {
+            Some(parent) if parent.len() < MAX_QUALIFIED_SCOPE => format!("{parent}.{name}"),
+            _ => name.to_string(),
         };
         self.scopes.push(qualified);
         self.scope_spans.push((start, self.source.len() as u32));
@@ -835,9 +846,8 @@ impl<'a> Builder<'a> {
             leaf_end: self.leaves.len() as u32,
             scope: self
                 .blocks
-                .iter()
-                .rev()
-                .find_map(|b| b.scope)
+                .last()
+                .and_then(|b| b.enclosing)
                 .unwrap_or(NO_SCOPE),
         }
     }
@@ -870,7 +880,7 @@ fn first_name(header: &[Leaf]) -> Option<usize> {
 }
 
 impl Block {
-    fn new(braced: bool, scope: Option<u32>, lang_seed: u64) -> Self {
+    fn new(braced: bool, scope: Option<u32>, enclosing: Option<u32>, lang_seed: u64) -> Self {
         Self {
             elems: Vec::new(),
             hash: seed(lang_seed, 1),
@@ -878,6 +888,7 @@ impl Block {
             depth: 0,
             braced,
             scope,
+            enclosing,
         }
     }
 }

@@ -901,6 +901,49 @@ fn a_block_is_labelled_with_its_whole_name() {
     }
 }
 
+// Catches a block losing the scope around it: a nested name would forget
+// its parent, and an unnamed block such as an `if` would label nothing.
+#[test]
+fn a_nested_block_keeps_the_scope_around_it() {
+    let run = "open_log(path, mode, flags);\nwrite_header(log, version, stamp);\nflush_all(log, buffers, count);\n";
+    let cases = [
+        (
+            "class Outer {\nvoid inner() {\nint x = 1;\n@\n}\n}\n",
+            "Outer.inner",
+        ),
+        (
+            "void total() {\nif (ready) {\nint x = 1;\n@\n}\n}\n",
+            "total",
+        ),
+        (
+            "class Outer {\nif (ready) {\nvoid inner() {\nint x = 1;\n@\n}\n}\n}\n",
+            "Outer.inner",
+        ),
+    ];
+    for (shell, name) in cases {
+        let one = shell.replace('@', run);
+        let two = format!("other() {{\nchar *s = name(3, 4);\n{run}}}\n");
+        let found = scan(&[("a.c", &one), ("b.c", &two)]);
+        let scope = groups(&found)[0].occurrences[0].scope.clone();
+        assert_eq!(scope.as_deref(), Some(name), "{shell}");
+    }
+}
+
+// Catches labels growing with nesting: each holds its parents' names, so
+// labels for a file of `f {` lines take memory quadratic in its size, and
+// a megabyte of them would need tens of gigabytes.
+#[test]
+fn a_deeply_nested_label_stays_short() {
+    let depth = 3000;
+    let open = "f {\n".repeat(depth);
+    let close = "}\n".repeat(depth);
+    let a = format!("{open}int x = 1;\n{CALLS}{close}");
+    let b = format!("other() {{\nchar *s = name(3, 4);\n{CALLS}}}\n");
+    let found = scan(&[("a.c", &a), ("b.c", &b)]);
+    let scope = groups(&found)[0].occurrences[0].scope.clone().unwrap();
+    assert!(scope.len() < 1100, "{} bytes", scope.len());
+}
+
 // Catches hyphen joining reaching past a name: `a->b` is an access, so the
 // block belongs to `b`, and subtraction is not a hyphen.
 #[test]
