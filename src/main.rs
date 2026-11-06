@@ -12,7 +12,9 @@ use doppelscan::near::{render_near, render_near_summary};
 use doppelscan::report::{
     Analysis, Detail, render_accepted, render_check, render_group, render_summary,
 };
-use doppelscan::settings::{check_scannable, explain, init_template, render as render_settings};
+use doppelscan::settings::{
+    check_scannable, explain, init_template, render as render_settings, shown,
+};
 use serde::Serialize;
 use serde::ser::{Error as _, SerializeSeq as _, Serializer};
 
@@ -547,6 +549,24 @@ fn write_baseline(
         path.display(),
         baseline.groups.len()
     );
+    if prune {
+        note_partial_prune(&common.path, &path)?;
+    }
+    Ok(())
+}
+
+/// A prune of part of the tree succeeds and changes nothing, which would
+/// otherwise read as there being nothing to prune.
+fn note_partial_prune(scanned: &Path, file: &Path) -> anyhow::Result<()> {
+    let whole = anchor(scanned, file)?;
+    if whole != scanned.canonicalize()? {
+        let _ = writeln!(
+            std::io::stderr(),
+            "note: nothing was pruned: a copy that left {} looks deleted from inside it. Prune {} instead.",
+            scanned.display(),
+            shown(&whole)
+        );
+    }
     Ok(())
 }
 

@@ -208,7 +208,7 @@ fn patterns(
 
 /// Without Windows' verbatim prefix (`\\?\`), which canonical paths carry
 /// and nobody types.
-pub(crate) fn shown(path: &Path) -> String {
+pub fn shown(path: &Path) -> String {
     let text = path.display().to_string();
     text.strip_prefix(r"\\?\").unwrap_or(&text).to_string()
 }

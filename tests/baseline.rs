@@ -395,16 +395,55 @@ fn entries_outside_a_scanned_directory_are_not_resolved() {
     assert_eq!(code, 0, "{out}");
 }
 
-// Catches scoping prunes away altogether: an entry wholly inside the
-// scanned directory is the scan's to resolve, whatever lies outside.
+// Catches a partial scan judging an entry by its recorded places, stale once
+// a copy moves: the copy looks deleted from inside, so dropping the entry
+// fails the next root check on code that still exists.
 #[test]
-fn entries_inside_a_scanned_directory_can_still_be_resolved() {
-    let dir = repo_with_sibling("scope-inside");
+fn a_copy_moved_out_of_a_scanned_directory_keeps_its_entry() {
+    let dir = repo("scope-moved-out");
+    assert_eq!(doppelscan(&dir, &["baseline"]).0, 0);
+    write_all(&dir, &[("lib/b.ts", renamed(SUM_TOTALS, 2))]);
     std::fs::remove_file(dir.join("src/b.ts")).unwrap();
     let (_, out) = doppelscan(&dir, &["check", "src"]);
-    assert!(out.contains("1 baseline entry no longer match"), "{out}");
+    assert!(!out.contains("no longer match"), "{out}");
+
+    let (code, out) = doppelscan(&dir, &["baseline", "--prune", "src"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("nothing was pruned"), "{out}");
+    assert_eq!(written_entries(&dir).len(), 1);
+    let (code, out) = doppelscan(&dir, &["check"]);
+    assert_eq!(code, 0, "{out}");
+}
+
+// Catches a partial prune still lowering counts: two copies in view of three
+// reads as one gone when it moved outside, and the root check then counts
+// three against the two left.
+#[test]
+fn a_copy_moved_out_of_a_scanned_directory_keeps_its_count() {
+    let dir = repo("scope-moved-count");
+    write_all(&dir, &[("src/c.ts", renamed(SUM_TOTALS, 3))]);
+    assert_eq!(doppelscan(&dir, &["baseline"]).0, 0);
+    write_all(&dir, &[("lib/c.ts", renamed(SUM_TOTALS, 3))]);
+    std::fs::remove_file(dir.join("src/c.ts")).unwrap();
 
     assert_eq!(doppelscan(&dir, &["baseline", "--prune", "src"]).0, 0);
+    assert_eq!(written_entries(&dir)[0].occurrences, 3);
+    let (code, out) = doppelscan(&dir, &["check"]);
+    assert_eq!(code, 0, "{out}");
+}
+
+// Catches the rule stopping pruning altogether: code that really is gone
+// still goes, once a scan of the whole directory can say so.
+#[test]
+fn a_root_scan_resolves_what_a_partial_scan_left() {
+    let dir = repo_with_sibling("scope-root");
+    std::fs::remove_file(dir.join("src/b.ts")).unwrap();
+    let (_, out) = doppelscan(&dir, &["check", "src"]);
+    assert!(!out.contains("no longer match"), "{out}");
+    let (_, out) = doppelscan(&dir, &["check"]);
+    assert!(out.contains("1 baseline entry no longer match"), "{out}");
+
+    assert_eq!(doppelscan(&dir, &["baseline", "--prune"]).0, 0);
     let entries = written_entries(&dir);
     assert_eq!(entries.len(), 1);
     assert!(entries[0].places[0].starts_with("src-old/"), "{entries:?}");
@@ -453,20 +492,6 @@ fn an_entry_with_an_unrecorded_copy_survives_a_partial_prune() {
     assert_eq!(doppelscan(&dir, &["baseline", "--prune", "src"]).0, 0);
     let (code, out) = doppelscan(&dir, &["check"]);
     assert_eq!(code, 0, "{out}");
-}
-
-// Catches treating a scanned file like a directory: places name it
-// directly, so nothing would ever look inside it and its entries could
-// never resolve.
-#[test]
-fn a_scanned_file_can_resolve_its_own_entries() {
-    let dir = repo("scope-file");
-    let two = renamed(PARSE_ROWS, 1) + &renamed(PARSE_ROWS, 2);
-    write_all(&dir, &[("src/c.ts", two)]);
-    assert_eq!(doppelscan(&dir, &["baseline"]).0, 0);
-    write_all(&dir, &[("src/c.ts", renamed(PARSE_ROWS, 1))]);
-    let (_, out) = doppelscan(&dir, &["check", "src/c.ts"]);
-    assert!(out.contains("1 baseline entry no longer match"), "{out}");
 }
 
 // Catches errors exiting 1, which a CI gate would read as "new

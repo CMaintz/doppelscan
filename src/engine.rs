@@ -463,8 +463,8 @@ fn prefix_of(root: &Path, base: &Path) -> String {
 }
 
 /// Places in a baseline are relative to the file's own directory, so the
-/// scan is shown from there whatever subdirectory is being checked, and
-/// covers only that subdirectory of what the baseline describes.
+/// scan is shown from there whatever subdirectory is being checked. The
+/// scope says whether that was all of what the baseline describes.
 fn against_file(
     root: &Path,
     path: &Path,

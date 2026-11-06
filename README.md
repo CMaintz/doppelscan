@@ -234,9 +234,10 @@ functions it sits in, not line numbers. Moving or renaming known duplication
 passes, and so does shrinking it within the same functions; another copy, a
 clone that grew, or a new top-level clone does not. `--prune` only drops
 entries and forgets copies that are gone, so it cannot accept new
-duplication. Checking or pruning a subdirectory only judges entries with
-every copy inside it; the others stay as they are until a scan of the whole
-directory the baseline describes.
+duplication. Only a scan of the whole directory the baseline describes can
+tell that code is gone: from a subdirectory, a copy that moved out looks
+deleted. So `check` on a subdirectory reports no entries as resolved, and
+`--prune` on one changes nothing and says so.
 
 `check` reads the working tree, staged or not, so as a pre-commit hook it
 also sees unstaged edits. Commit the baseline with LF line endings

@@ -178,11 +178,11 @@ impl Baseline {
     /// The entries still needed to excuse `now`, with counts lowered and
     /// places cut to what remains. Never adds an entry, a place or a copy,
     /// so pruning cannot accept new duplication. `now` is a scan of `scope`;
-    /// entries it cannot see all of are kept as they are.
+    /// a partial one keeps every entry as it is.
     pub fn pruned(&self, now: &Analysis, scope: &Scope) -> Self {
         let found = now.groups.iter().chain(&now.accepted);
         let current: Vec<Entry> = found.map(|group| entry(now, group)).collect();
-        let judged = |e: &Entry| match scope.sees_all_of(e) {
+        let judged = |e: &Entry| match scope.sees_all() {
             true => e.pruned(&current),
             false => Some(e.clone()),
         };
@@ -206,34 +206,27 @@ impl Baseline {
     }
 }
 
-/// The part of a baseline's directory one scan covers. The default is all
+/// How much of a baseline's directory one scan covers. The default is all
 /// of it.
 #[derive(Debug, Clone, Default)]
 pub struct Scope {
-    within: String,
+    partial: bool,
 }
 
 impl Scope {
-    /// `path` is a directory or file, relative to the baseline's directory.
+    /// `path` is a directory or file relative to the baseline's directory,
+    /// empty for the directory itself.
     pub fn of(path: &str) -> Self {
         Self {
-            within: path.trim_end_matches('/').to_string(),
+            partial: !path.is_empty(),
         }
     }
 
-    /// A partial scan has to see every copy to judge an entry: a copy left
-    /// alone inside it forms no group there, so it would look deleted while
-    /// its twin outside lives on. Fewer places than copies means a copy has
-    /// moved somewhere no place records, which may be outside.
-    fn sees_all_of(&self, e: &Entry) -> bool {
-        self.within.is_empty()
-            || (e.places.len() >= e.occurrences && e.places.iter().all(|p| self.holds(p)))
-    }
-
-    fn holds(&self, place: &str) -> bool {
-        place
-            .strip_prefix(&self.within)
-            .is_some_and(|rest| rest.is_empty() || rest.starts_with(['/', '#']))
+    /// Only a scan of everything can judge an entry. Recorded places go
+    /// stale as soon as a copy moves, so from inside part of the tree a
+    /// copy that moved out looks exactly like one that was deleted.
+    fn sees_all(&self) -> bool {
+        !self.partial
     }
 }
 
