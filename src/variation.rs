@@ -93,18 +93,29 @@ pub fn analyze(group: &RawGroup, files: &[impl AsRef<FileIndex>]) -> Variations 
         let leaf = leaf_at(*offset);
         let owner = owner(&bindings, texts, columns[0][*offset], leaf.role);
         let key = slot_key(texts, folds && leaf.class != LeafClass::Literal);
-        let slot = slots.entry((key, owner)).or_insert(Slot {
-            first: *offset,
-            texts: texts.clone(),
+        let slot = slots.entry((key, owner));
+        slot.or_insert_with(|| Slot::new(*offset, texts))
+            .add(*offset, leaf);
+    }
+    split(slots)
+}
+
+impl<'f> Slot<'f> {
+    fn new(first: usize, texts: &[&'f str]) -> Self {
+        Self {
+            first,
+            texts: texts.to_vec(),
             offsets: Vec::new(),
             roles: Vec::new(),
             literal: false,
-        });
-        slot.offsets.push(*offset);
-        slot.roles.push(leaf.role);
-        slot.literal |= leaf.class == LeafClass::Literal;
+        }
     }
-    split(slots)
+
+    fn add(&mut self, offset: usize, leaf: Leaf) {
+        self.offsets.push(offset);
+        self.roles.push(leaf.role);
+        self.literal |= leaf.class == LeafClass::Literal;
+    }
 }
 
 /// Spellings of one name share a slot in a language that ignores case, so
