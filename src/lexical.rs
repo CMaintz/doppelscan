@@ -136,10 +136,6 @@ const KEYWORDS: &[&str] = &[
     "yield",
 ];
 
-/// Punctuation that can follow a head in a real import, for the heads that
-/// have such a form (`import { a } from`, `import * as`, T-SQL's `use [db]`).
-const NOISE_OPENERS: &[(&str, &str)] = &[("import", "{"), ("import", "*"), ("use", "[")];
-
 /// Directives after `#` (C's `#include`) or `@` (SCSS's `@use`) that
 /// import; `@include` in SCSS calls a mixin, so it is not one of them.
 const DIRECTIVE_NOISE: &[(&str, &str)] = &[
@@ -664,7 +660,10 @@ impl<'a> Builder<'a> {
             let definition = stmt.closed_block && matches!(head, "library" | "package");
             return !definition && !(head == "use" && next.class == LeafClass::Other);
         }
-        NOISE_OPENERS.contains(&(head, self.leaf_text(next))) || self.is_load_call(head, leaves)
+        self.lexicon
+            .import_openers
+            .contains(&(head, self.leaf_text(next)))
+            || self.is_load_call(head, leaves)
     }
 
     /// `require("socket")` imports through a call taking only what it loads.

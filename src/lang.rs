@@ -71,6 +71,10 @@ pub struct Lexicon {
     /// own: the shared list, folded, would take SQL's `PART` column for
     /// Dart's `part`.
     pub import_heads: &'static [&'static str],
+    /// Punctuation that can follow a head in a real import, for the heads
+    /// with such a form (`import { a } from`, T-SQL's `use [db]`). `use[0]`
+    /// indexes an array everywhere else.
+    pub import_openers: &'static [(&'static str, &'static str)],
     /// Heads that import when called, whatever the arguments: R's
     /// `require(dplyr)` loads a package where Solidity's `require(ok)` is a
     /// check, and the two read the same.
@@ -100,6 +104,7 @@ const PLAIN: Lexicon = Lexicon {
     primes: false,
     nested_comments: false,
     import_heads: IMPORT_HEADS,
+    import_openers: &[("import", "{"), ("import", "*")],
     load_calls: &[],
 };
 const C_LIKE: Lexicon = Lexicon {
@@ -297,6 +302,7 @@ pub static LANGS: LazyLock<Vec<Lang>> = LazyLock::new(|| {
                 ],
                 ignore_case: true,
                 import_heads: &["use"],
+                import_openers: &[("use", "[")],
                 ..PLAIN
             },
             &["sql"],

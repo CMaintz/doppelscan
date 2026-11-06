@@ -469,6 +469,10 @@ fn a_head_word_used_as_a_name_is_not_an_import() {
             "c",
             "    library(alpha);\n    library(beta);\n    library(gamma);\n    library(delta);\n    library(epsilon);\n",
         ),
+        (
+            "c",
+            "    use[0] = one;\n    use[1] = two;\n    use[2] = three;\n    use[3] = four;\n",
+        ),
     ];
     for (ext, run) in cases {
         let (a, b) = (format!("a.{ext}"), format!("b.{ext}"));
