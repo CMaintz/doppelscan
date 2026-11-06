@@ -462,6 +462,33 @@ fn at_refuses_a_location_it_cannot_answer_for() {
     }
 }
 
+// Catches `at` normalising only the query: a file named on the command line
+// keeps the path as typed, so the same `./` spelling never matched itself.
+#[test]
+fn at_finds_a_file_scanned_by_its_own_spelling() {
+    let dir = repo_with_config("at-named", "min-tokens = 20\n");
+    for (query, scanned) in [
+        ("./src/a.ts", "./src/a.ts"),
+        ("src/a.ts", "./src/a.ts"),
+        ("./src/a.ts", "src/a.ts"),
+    ] {
+        let (code, _, err) = run(&dir, &["at", query, scanned]);
+        assert_eq!(code, 0, "{query} {scanned}: {err}");
+    }
+}
+
+// Catches the error sending the reader back to "as results show it": `check
+// src` shows paths from the baseline's directory, and those are the paths
+// that fail here, so the message has to name what does work.
+#[test]
+fn at_says_paths_are_relative_to_the_scanned_directory() {
+    let dir = repo_with_config("at-relative", "min-tokens = 20\n");
+    let (code, _, err) = run(&dir, &["at", "src/a.ts", "src"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("relative to the scanned directory"), "{err}");
+    assert_eq!(run(&dir, &["at", "a.ts", "src"]).0, 0);
+}
+
 // Catches the CLI and the MCP server drifting to different snippet minimums:
 // the same snippet is then found by one and missed by the other.
 #[test]
