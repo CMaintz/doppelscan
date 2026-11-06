@@ -265,6 +265,27 @@ fn a_shrunk_entry_forgets_a_removed_copy() {
     assert_eq!(entries[0].places.len(), 2, "{:?}", entries[0].places);
 }
 
+// Catches pruning by the same-fingerprint group alone: the smaller clone
+// through c.ts is excused only by c.ts's place, so dropping that place turns
+// a green check red with no code change.
+#[test]
+fn pruning_keeps_a_place_only_a_shrunk_group_holds() {
+    let dir = repo("prune-union");
+    let shrunk =
+        renamed(SUM_TOTALS, 3).replace("return Math.round(total * 100) / 100;", "return total;");
+    std::fs::write(dir.join("src/c.ts"), renamed(SUM_TOTALS, 3)).unwrap();
+    assert_eq!(doppelscan(&dir, &["baseline"]).0, 0);
+    std::fs::write(dir.join("src/c.ts"), shrunk).unwrap();
+    assert_eq!(doppelscan(&dir, &["check"]).0, 0);
+
+    assert_eq!(doppelscan(&dir, &["baseline", "--prune"]).0, 0);
+    let entries = written_entries(&dir);
+    assert_eq!(entries[0].occurrences, 3);
+    assert_eq!(entries[0].places.len(), 3, "{:?}", entries[0].places);
+    let (code, out) = doppelscan(&dir, &["check"]);
+    assert_eq!(code, 0, "{out}");
+}
+
 // Catches keeping a place because any copy matches it: of two copies
 // in one function, one is gone, so its place must go too.
 #[test]

@@ -241,19 +241,21 @@ impl Entry {
     /// What the groups found now still need of this entry, or `None` when
     /// they need none of it.
     fn pruned(&self, current: &[Entry]) -> Option<Self> {
-        let same: Vec<&Entry> = current
+        let is_same = |c: &Entry| c.fingerprint == self.fingerprint;
+        let excused = current
             .iter()
-            .filter(|c| c.fingerprint == self.fingerprint)
-            .collect();
-        if let Some(remaining) = same.iter().map(|c| c.occurrences).max() {
-            return Some(self.narrowed(self.places_held_by(&same), remaining));
+            .filter(|c| is_same(c) || is_shrunk_from(c, self));
+        let excused: Vec<&Entry> = excused.collect();
+        if excused.is_empty() {
+            return None;
         }
-        let shrunk: Vec<&Entry> = current.iter().filter(|c| is_shrunk_from(c, self)).collect();
-        (!shrunk.is_empty()).then(|| {
-            let places = self.places_held_by(&shrunk);
-            let remaining = places.len();
-            self.narrowed(places, remaining)
-        })
+        // Same and shrunk groups both lean on this entry at once, so what
+        // only one of them holds has to stay; moved copies hold no place,
+        // which is why the same group's own count also counts.
+        let places = self.places_held_by(&excused);
+        let copies = excused.iter().filter(|c| is_same(c)).map(|c| c.occurrences);
+        let remaining = copies.max().unwrap_or(0).max(places.len());
+        Some(self.narrowed(places, remaining))
     }
 
     fn narrowed(&self, places: Vec<String>, remaining: usize) -> Self {
