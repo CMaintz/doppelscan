@@ -337,9 +337,9 @@ skips because they cannot be extracted as one unit.
 - Token-level languages split statements by layout, so the same code
   formatted differently (a statement broken over lines outside brackets)
   can fail to match.
-- A baseline written by an older release (version 1) records only the
-  grammar languages, so `check` asks for it to be written again with
-  `doppelscan baseline` before comparing.
+- Fingerprints can change between releases, so a baseline written by an
+  older release (version 2 or below) is refused, and `check` asks for it to
+  be written again with `doppelscan baseline` before comparing.
 
 ## Contributing
 

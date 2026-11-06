@@ -374,11 +374,6 @@ fn similar_code_is_found_in_an_opt_in_language() {
 #[test]
 fn a_baseline_records_the_languages_it_covered() {
     let dir = temp_dir("baseline-langs");
-    let file = dir.join("old.json");
-    let v1 = r#"{"version":1,"settings":{"min_tokens":50,"strict":false,"max_param_density":8.0,"languages":[],"exclude":[]},"groups":[]}"#;
-    std::fs::write(&file, v1).unwrap();
-    let old = Baseline::load(&file).unwrap().settings.languages;
-    assert!(old.contains(&"java".to_string()) && !old.contains(&"c-family".to_string()));
     let empty = Engine::default()
         .scan(&dir, &ScanOptions::default())
         .unwrap();

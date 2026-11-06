@@ -634,6 +634,28 @@ fn check_compares_language_lists_as_sets() {
     assert_eq!(code, 0, "{out}");
 }
 
+// Catches an old file being compared at all: fingerprints changed since it
+// was written, so its entries match nothing and unchanged code fails the
+// check as new instead of saying what to do.
+#[test]
+fn a_baseline_from_an_older_format_asks_to_be_written_again() {
+    let dir = repo("old-format");
+    assert_eq!(doppelscan(&dir, &["baseline"]).0, 0);
+    let file = dir.join(".doppelscan-baseline.json");
+    let current = std::fs::read_to_string(&file).unwrap();
+    let mut old: serde_json::Value = serde_json::from_str(&current).unwrap();
+    for version in [1, 2] {
+        old["version"] = version.into();
+        std::fs::write(&file, old.to_string()).unwrap();
+        let (code, out) = doppelscan(&dir, &["check"]);
+        assert_eq!(code, 2, "{out}");
+        assert!(out.contains("doppelscan baseline"), "{out}");
+    }
+    assert_eq!(doppelscan(&dir, &["baseline"]).0, 0);
+    let (code, out) = doppelscan(&dir, &["check"]);
+    assert_eq!(code, 0, "{out}");
+}
+
 // Catches prune accepting a scan under other settings: it would drop
 // entries that only stopped matching because the settings changed.
 #[test]
