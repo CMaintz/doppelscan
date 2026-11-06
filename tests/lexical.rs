@@ -660,6 +660,28 @@ fn case_alone_is_not_a_parameter() {
     assert!(groups(&found)[0].parameters.is_empty());
 }
 
+// Catches parameters being keyed by exact spelling: `Total`, `TOTAL` and
+// `total` are one name to SQL, so a helper takes one parameter, not three.
+#[test]
+fn spellings_of_one_name_are_one_parameter() {
+    let a = "SELECT Total, price, qty, region, name FROM Orders WHERE TOTAL > 1 AND price > 2 AND qty > 3 AND total < 100;\n";
+    let b = "select Amount, price, qty, region, name from Orders where Amount > 1 and price > 2 and qty > 3 and Amount < 100;\n";
+    let g = &groups(&scan(&[("a.sql", a), ("b.sql", b)]))[0];
+    assert_eq!(g.parameters.len(), 1, "{:?}", g.parameters);
+    assert_eq!(g.parameters[0].uses, 3);
+    assert_eq!(g.parameters[0].values, ["Total", "Amount"]);
+}
+
+// Catches folding reaching a language where case tells names apart: in C
+// `Total` and `TOTAL` can be different variables, so they stay two.
+#[test]
+fn case_separates_parameters_where_the_language_does() {
+    let a = "void f(void) {\n    use(Total, price, qty, region, name, 1);\n    use(TOTAL, price, qty, region, name, 2);\n}\n";
+    let b = a.replace("Total", "Amount").replace("TOTAL", "Amount");
+    let g = &groups(&scan(&[("a.c", a), ("b.c", &b)]))[0];
+    assert_eq!(g.parameters.len(), 2, "{:?}", g.parameters);
+}
+
 // Catches case folding reaching literals: `'Paid'` and `'paid'` are
 // different values even in SQL, so they stay a parameter.
 #[test]
