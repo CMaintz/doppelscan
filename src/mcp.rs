@@ -21,7 +21,7 @@ use crate::near::{render_near, render_near_summary};
 use crate::report::{
     Analysis, Detail, render_accepted, render_check, render_group, render_summary,
 };
-use crate::settings::explain;
+use crate::settings::{check_scannable, explain};
 
 const MODERN: &str = "2026-07-28";
 const LEGACY: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
@@ -435,11 +435,10 @@ fn snippet_lang(args: &Value) -> anyhow::Result<usize> {
 /// The same as `doppelscan config --format json`, so an agent sees what a
 /// person does.
 fn get_settings(root: &Path, args: &Value) -> anyhow::Result<String> {
-    let effective = explain(
-        &config(root, args)?,
-        &requested(args)?,
-        similarity_arg(args)?,
-    );
+    let config = config(root, args)?;
+    let opts = config.options(requested(args)?)?;
+    check_scannable(&scan_root(root, args)?, &opts)?;
+    let effective = explain(&config, &requested(args)?, similarity_arg(args)?);
     Ok(serde_json::to_string_pretty(&effective)?)
 }
 

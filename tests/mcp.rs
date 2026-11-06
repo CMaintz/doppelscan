@@ -434,6 +434,27 @@ fn a_number_with_no_fraction_is_an_integer() {
     }
 }
 
+// Catches get_settings explaining a scan that could not run: an agent would
+// read default settings for a path that does not exist.
+#[test]
+fn get_settings_fails_where_a_scan_would() {
+    let (engine, root) = (Engine::default(), fixture("settings-fail"));
+    std::fs::create_dir_all(root.join("broken")).unwrap();
+    std::fs::write(root.join("broken/.doppelscan.toml"), "nonsense = 1\n").unwrap();
+    let cases = [
+        json!({ "path": "nonexistent" }),
+        json!({ "exclude": ["["] }),
+        json!({ "languages": ["bogus"] }),
+        json!({}),
+    ];
+    for args in cases {
+        let reply = tool(&engine, &root, "get_settings", args.clone());
+        assert_eq!(reply["result"]["isError"], true, "{args}");
+    }
+    let fine = tool(&engine, &root, "get_settings", json!({ "path": "src" }));
+    assert_eq!(fine["result"]["isError"], false, "{fine}");
+}
+
 // Catches an explicit null, how some clients spell "unset", being refused
 // now that wrong types are.
 #[test]
