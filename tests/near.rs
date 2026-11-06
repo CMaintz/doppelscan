@@ -530,6 +530,44 @@ fn a_near_pair_does_not_depend_on_which_file_sorts_first() {
     assert_eq!(wrapper_first[0].occurrences.len(), 2);
 }
 
+fn statements(range: std::ops::Range<usize>) -> String {
+    let shape = |i: usize| match i % 4 {
+        0 => format!("    for (const k of list{i}) {{ sum[k] = fn{i}(k, total); }}\n"),
+        1 => format!("    while (i{i} < n) {{ i{i} = next(i{i}, step); count++; }}\n"),
+        2 => format!("    if (a{i}.x > {i}) {{ total += a{i}.y * {i}; }}\n"),
+        _ => format!("    try {{ run{i}(v, w); }} catch (e) {{ log(e, {i}); }}\n"),
+    };
+    range.map(shape).collect()
+}
+
+// Catches a wrapper standing in for what it wraps: each copy of the
+// function brings its own lambda, so copies in two files made the two
+// classes a pair, the lambda's twin joined them, and the lambdas were then
+// dropped as nested. That listed the function beside a twin it does not
+// match, at the wrapper's score.
+#[test]
+fn a_function_does_not_stand_in_for_its_lambda() {
+    // Fingerprints count by shape, so the extras need shapes of their own
+    // or the function would really match the twin.
+    let lambda = format!("  const h = (a, b) => {{\n{}  }};\n", statements(0..40));
+    let wrapping = "  const v = obj.get(key).map(q => q + 1).filter(Boolean);\n".repeat(12);
+    let outer = |name: &str| format!("function {name}() {{\n{lambda}{wrapping}  return h;\n}}\n");
+    let own = "    switch (x) { case 1: y(); break; default: z(); }\n".repeat(4);
+    let twin = format!("function twin(a, b) {{\n{}{own}}}\n", statements(0..36));
+    for paths in [["a.ts", "b.ts", "c.ts"], ["b.ts", "c.ts", "a.ts"]] {
+        let files = [
+            (paths[0], outer("one")),
+            (paths[1], outer("two")),
+            (paths[2], twin.clone()),
+        ];
+        let gs = groups(&scan_near(&files, 0.7));
+        assert_eq!(gs.len(), 1, "{gs:?}");
+        let mut starts: Vec<u32> = gs[0].occurrences.iter().map(|o| o.start_line).collect();
+        starts.sort_unstable();
+        assert_eq!(starts, [1, 2, 2], "{gs:?}");
+    }
+}
+
 // Catches dropping nesting altogether: a function and the lambda that
 // makes up most of it are the same code, not a pair.
 #[test]
