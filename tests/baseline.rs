@@ -965,7 +965,8 @@ fn a_non_utf8_path_at_the_revision_is_skipped() {
 
 // Catches the walk scanning a file inside a directory the revision side
 // must skip: an unchanged clone there would read as new on every check.
-#[cfg(unix)]
+// Linux only: APFS and NTFS refuse a path that is not valid UTF-8.
+#[cfg(target_os = "linux")]
 #[test]
 fn a_non_utf8_directory_is_left_out_of_the_walk() {
     use std::os::unix::ffi::OsStrExt as _;
