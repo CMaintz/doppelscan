@@ -642,8 +642,12 @@ impl<'a> Builder<'a> {
         };
         let (word, next) = (self.leaf_text(first), self.leaf_text(second));
         DIRECTIVE_NOISE.contains(&(word, next))
-            || find_word(self.lexicon.import_heads, word, self.lexicon.ignore_case)
-                .is_some_and(|head| self.imports(stmt, head, leaves))
+            || find_word(
+                self.lexicon.import_heads,
+                self.hyphenated(leaves, 0),
+                self.lexicon.ignore_case,
+            )
+            .is_some_and(|head| head.contains('-') || self.imports(stmt, head, leaves))
     }
 
     /// Whether a statement opening with a head word is an import: what it

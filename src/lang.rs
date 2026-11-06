@@ -340,7 +340,7 @@ pub static LANGS: LazyLock<Vec<Lang>> = LazyLock::new(|| {
                 line_comments: &["#"],
                 block_comments: &[("<#", "#>")],
                 ignore_case: true,
-                import_heads: &["using"],
+                import_heads: &["using", "import-module"],
                 ..PLAIN
             },
             &["ps1", "psm1"],

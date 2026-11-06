@@ -504,6 +504,8 @@ fn every_import_form_stays_noise() {
         ("r", "library(purrr, quietly = TRUE)"),
         ("gradle", "include(\":a\", \":b\")"),
         ("sql", "use [shop]"),
+        ("ps1", "Import-Module Baz"),
+        ("ps1", "import-module foo"),
     ];
     for (ext, line) in cases {
         let (a, b) = (format!("a.{ext}"), format!("b.{ext}"));
@@ -687,6 +689,15 @@ fn sql_columns_named_like_import_heads_are_code() {
         let found = scan(&[("a.sql", &list), ("b.sql", &list)]);
         assert_eq!(found.groups.len(), 1, "{list}");
     }
+}
+
+// Catches `Import-Module` being matched on its first word: `Import-Csv`
+// and its kin load data, so a repeated block of them is code.
+#[test]
+fn only_import_module_is_a_powershell_import() {
+    let block = "Import-Csv $path\n".repeat(12);
+    let found = scan(&[("a.ps1", &block), ("b.ps1", &block)]);
+    assert_eq!(found.groups.len(), 1);
 }
 
 // Catches a nested block comment closing at its first closer: what is
