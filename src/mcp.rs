@@ -193,9 +193,18 @@ fn uint_arg<T: TryFrom<u64>>(args: &Value, key: &str) -> anyhow::Result<Option<T
     let Some(v) = present(args, key) else {
         return Ok(None);
     };
-    let n = v.as_u64().and_then(|n| T::try_from(n).ok());
+    let n = whole_number(v).and_then(|n| T::try_from(n).ok());
     n.map(Some)
         .ok_or_else(|| anyhow::anyhow!("{key} must be a non-negative integer in range, not {v}"))
+}
+
+/// JSON Schema counts a number with a zero fraction as an integer, and
+/// clients that hold every number as a double send 5 as 5.0.
+fn whole_number(v: &Value) -> Option<u64> {
+    const PAST_U64: f64 = 18446744073709551616.0;
+    let whole = |n: &f64| n.fract() == 0.0 && (0.0..PAST_U64).contains(n);
+    v.as_u64()
+        .or_else(|| v.as_f64().filter(whole).map(|n| n as u64))
 }
 
 fn number_arg(args: &Value, key: &str) -> anyhow::Result<Option<f32>> {

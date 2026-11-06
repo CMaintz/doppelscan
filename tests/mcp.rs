@@ -357,6 +357,9 @@ fn numeric_arguments_that_cannot_be_used_are_tool_errors() {
         ("duplicates_at", "start_line", json!(4294967297u64)),
         ("duplicates_at", "end_line", json!(4294967297u64)),
         ("duplicates_at", "end_line", json!(1.5)),
+        ("find_duplicates", "limit", json!(-1.0)),
+        ("find_duplicates", "limit", json!(1e30)),
+        ("find_duplicates", "min_tokens", json!(4294967296.0)),
         ("find_duplicates", "min_tokens", json!(4294967296u64)),
         ("find_duplicates", "min_tokens", json!("20")),
         ("find_duplicates", "limit", json!("5")),
@@ -409,6 +412,26 @@ fn a_file_that_could_not_be_read_is_read_again() {
     });
     let reply = tool(&engine, &root, "find_duplicates", args);
     assert!(tool_text(&reply).contains("src/b.ts"), "{reply}");
+}
+
+// Catches reading integers with `as_u64` alone: JSON Schema counts 5.0 as
+// an integer, and clients that hold every number as a double send it so.
+#[test]
+fn a_number_with_no_fraction_is_an_integer() {
+    let (engine, root) = (Engine::default(), fixture("zero-fraction"));
+    let cases = [
+        ("find_duplicates", "limit", json!(5.0)),
+        ("find_duplicates", "offset", json!(0.0)),
+        ("find_duplicates", "min_tokens", json!(20.0)),
+        ("duplicates_at", "start_line", json!(2.0)),
+    ];
+    for (name, key, value) in cases {
+        let mut args = json!({ "path": "src", "file": "src/a.ts", "min_tokens": 20 });
+        args[key] = value.clone();
+        let reply = tool(&engine, &root, name, args);
+        assert_eq!(reply["result"]["isError"], false, "{name} {key}={value}");
+        assert!(tool_text(&reply).contains("src/b.ts"), "{reply}");
+    }
 }
 
 // Catches an explicit null, how some clients spell "unset", being refused
