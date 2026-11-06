@@ -18,7 +18,9 @@ use crate::config::{Config, Requested, known_langs};
 use crate::engine::{Against, Engine, ScanOptions};
 use crate::lang::{lang_index_by_name, lang_index_for_path};
 use crate::near::{render_near, render_near_summary};
-use crate::report::{Analysis, Detail, render_check, render_group, render_summary};
+use crate::report::{
+    Analysis, Detail, render_accepted, render_check, render_group, render_summary,
+};
 use crate::settings::explain;
 
 const MODERN: &str = "2026-07-28";
@@ -35,19 +37,29 @@ when referring back to a group; ids depend on the scan options.";
 
 pub fn serve(engine: &Engine, root: &Path) -> anyhow::Result<()> {
     let root = root.canonicalize()?;
-    let stdin = std::io::stdin();
+    let mut stdin = std::io::stdin().lock();
     let mut stdout = std::io::stdout().lock();
-    for line in stdin.lock().lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        if stdin.read_until(b'\n', &mut line)? == 0 {
+            return Ok(());
         }
-        if let Some(reply) = handle_line(engine, &root, &line) {
+        if let Some(reply) = handle_bytes(engine, &root, &line) {
             writeln!(stdout, "{reply}")?;
             stdout.flush()?;
         }
     }
-    Ok(())
+}
+
+/// Decoded here rather than by the reader, whose UTF-8 error would end the
+/// session over one bad line.
+fn handle_bytes(engine: &Engine, root: &Path, line: &[u8]) -> Option<String> {
+    match std::str::from_utf8(line) {
+        Ok(text) if text.trim().is_empty() => None,
+        Ok(text) => handle_line(engine, root, text),
+        Err(e) => Some(error(Value::Null, -32700, &format!("parse error: {e}"), None).to_string()),
+    }
 }
 
 /// One JSON-RPC message in, at most one out (notifications get none).
@@ -60,6 +72,10 @@ pub fn handle_line(engine: &Engine, root: &Path, line: &str) -> Option<String> {
             );
         }
     };
+    if !msg.is_object() {
+        let message = "invalid request: not a JSON object";
+        return Some(error(Value::Null, -32600, message, None).to_string());
+    }
     let id = msg.get("id")?.clone();
     let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
     let params = msg.get("params").cloned().unwrap_or(json!({}));
@@ -166,8 +182,28 @@ fn str_arg<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
     args.get(key).and_then(Value::as_str)
 }
 
-fn uint_arg(args: &Value, key: &str, default: u64) -> u64 {
-    args.get(key).and_then(Value::as_u64).unwrap_or(default)
+/// An explicit null is how some clients spell "unset".
+fn present<'a>(args: &'a Value, key: &str) -> Option<&'a Value> {
+    args.get(key).filter(|v| !v.is_null())
+}
+
+/// A value that does not fit is an error rather than a default or a
+/// truncation, which would answer a different question than the one asked.
+fn uint_arg<T: TryFrom<u64>>(args: &Value, key: &str) -> anyhow::Result<Option<T>> {
+    let Some(v) = present(args, key) else {
+        return Ok(None);
+    };
+    let n = v.as_u64().and_then(|n| T::try_from(n).ok());
+    n.map(Some)
+        .ok_or_else(|| anyhow::anyhow!("{key} must be a non-negative integer in range, not {v}"))
+}
+
+fn number_arg(args: &Value, key: &str) -> anyhow::Result<Option<f32>> {
+    let Some(v) = present(args, key) else {
+        return Ok(None);
+    };
+    let n = v.as_f64().map(|n| Some(n as f32));
+    n.ok_or_else(|| anyhow::anyhow!("{key} must be a number, not {v}"))
 }
 
 fn str_list(args: &Value, key: &str) -> Vec<String> {
@@ -192,60 +228,52 @@ fn scan_root(root: &Path, args: &Value) -> anyhow::Result<PathBuf> {
 }
 
 fn options(root: &Path, args: &Value) -> anyhow::Result<ScanOptions> {
-    with_root(root, config(root, args)?.options(requested(args))?)
+    with_root(root, args, config(root, args)?.options(requested(args)?)?)
 }
 
-/// Snippets are small, so a snippet search keeps its own lower minimum
-/// unless the call sets one; the repository's is meant for whole files.
 fn snippet_options(root: &Path, args: &Value) -> anyhow::Result<ScanOptions> {
-    let asked = Requested {
-        min_tokens: requested(args).min_tokens.or(Some(SNIPPET_MIN_TOKENS)),
-        ..requested(args)
-    };
-    with_root(root, config(root, args)?.options(asked)?)
+    let asked = requested(args)?.for_snippet();
+    with_root(root, args, config(root, args)?.options(asked)?)
 }
 
-const SNIPPET_MIN_TOKENS: u32 = 20;
-
-fn with_root(root: &Path, opts: ScanOptions) -> anyhow::Result<ScanOptions> {
+fn with_root(root: &Path, args: &Value, opts: ScanOptions) -> anyhow::Result<ScanOptions> {
     Ok(ScanOptions {
-        display_base: Some(root.to_path_buf()),
+        display_base: Some(display_base(root, &scan_root(root, args)?)?),
         ..opts
     })
 }
 
-fn similarity_arg(args: &Value) -> anyhow::Result<Option<f32>> {
-    let Some(v) = args.get("similarity") else {
-        return Ok(None);
-    };
-    let similarity = v
-        .as_f64()
-        .ok_or_else(|| anyhow::anyhow!("similarity must be a number"))? as f32;
-    anyhow::ensure!(
-        (0.0..=1.0).contains(&similarity),
-        "similarity is a fraction between 0 and 1"
-    );
-    Ok(Some(similarity))
+/// Results read relative to the server root. A scan outside it shares no
+/// base with the root, so it reads relative to itself; the working tree and
+/// a git revision then show the same paths, and neither shows the verbatim
+/// prefix of a canonical Windows path.
+fn display_base(root: &Path, scan: &Path) -> anyhow::Result<PathBuf> {
+    let (root, scan) = (root.canonicalize()?, scan.canonicalize()?);
+    if scan.starts_with(&root) {
+        return Ok(root);
+    }
+    let dir = scan.parent().filter(|_| scan.is_file());
+    Ok(dir.unwrap_or(&scan).to_path_buf())
 }
 
-fn requested(args: &Value) -> Requested {
-    Requested {
-        min_tokens: args
-            .get("min_tokens")
-            .and_then(Value::as_u64)
-            .map(|n| n as u32),
+fn similarity_arg(args: &Value) -> anyhow::Result<Option<f32>> {
+    let similarity = number_arg(args, "similarity")?;
+    anyhow::ensure!(
+        similarity.is_none_or(|s| (0.0..=1.0).contains(&s)),
+        "similarity is a fraction between 0 and 1"
+    );
+    Ok(similarity)
+}
+
+fn requested(args: &Value) -> anyhow::Result<Requested> {
+    Ok(Requested {
+        min_tokens: uint_arg(args, "min_tokens")?,
         strict: args.get("strict").and_then(Value::as_bool),
         only: str_list(args, "languages"),
         exclude: str_list(args, "exclude"),
-        max_param_density: args
-            .get("max_param_density")
-            .and_then(Value::as_f64)
-            .map(|d| d as f32),
-        check_min_tokens: args
-            .get("check_min_tokens")
-            .and_then(Value::as_u64)
-            .map(|n| n as u32),
-    }
+        max_param_density: number_arg(args, "max_param_density")?,
+        check_min_tokens: uint_arg(args, "check_min_tokens")?,
+    })
 }
 
 /// The config for the scanned path; a path that does not exist is
@@ -269,8 +297,9 @@ fn render(analysis: &Analysis, ids: &[usize], template: bool) -> String {
 }
 
 fn find_duplicates(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<String> {
+    let page = Page::of(args)?;
     let analysis = engine.scan(&scan_root(root, args)?, &options(root, args)?)?;
-    let ids = page(args, analysis.groups.len());
+    let ids = page.ids(analysis.groups.len());
     let templates = args
         .get("include_templates")
         .and_then(Value::as_bool)
@@ -279,14 +308,31 @@ fn find_duplicates(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result
     Ok(out + &more_hint(&ids, analysis.groups.len()))
 }
 
-/// The ids an `offset`/`limit` page covers; a limit of 0 means the rest.
-fn page(args: &Value, total: usize) -> Vec<usize> {
-    let offset = uint_arg(args, "offset", 0) as usize;
-    let limit = match uint_arg(args, "limit", 15) as usize {
-        0 => usize::MAX,
-        n => n,
-    };
-    (offset + 1..=total).take(limit).collect()
+struct Page {
+    offset: usize,
+    limit: usize,
+}
+
+impl Page {
+    /// Read before scanning, so a bad argument does not cost a scan. A limit
+    /// of 0 means the rest.
+    fn of(args: &Value) -> anyhow::Result<Self> {
+        Ok(Self {
+            offset: uint_arg(args, "offset")?.unwrap_or(0),
+            limit: match uint_arg(args, "limit")?.unwrap_or(15) {
+                0 => usize::MAX,
+                n => n,
+            },
+        })
+    }
+
+    /// Ids start at 1, so wrapping here would ask for a group 0 that the
+    /// id-to-index subtraction cannot survive.
+    fn ids(&self, total: usize) -> Vec<usize> {
+        (self.offset.saturating_add(1)..=total)
+            .take(self.limit)
+            .collect()
+    }
 }
 
 fn more_hint(ids: &[usize], total: usize) -> String {
@@ -302,7 +348,7 @@ fn get_group(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<Strin
     let analysis = engine.scan(&scan_root(root, args)?, &options(root, args)?)?;
     let id = analysis
         .resolve(key)
-        .ok_or_else(|| anyhow::anyhow!("no clone group {key:?}; run find_duplicates again"))?;
+        .ok_or_else(|| anyhow::anyhow!("{}. {SCAN_HINT}", analysis.unresolved(key)))?;
     let mut out = render_group(&analysis.group(id, true), Detail::Full);
     if args
         .get("include_code")
@@ -313,6 +359,10 @@ fn get_group(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<Strin
     }
     Ok(out)
 }
+
+const SCAN_HINT: &str = "Groups depend on the scan: pass the path, min_tokens and languages it was \
+found with (YAML needs languages: [\"yaml\"]). A group find_similar_code listed with <snippet> \
+in it exists only in that call: read its locations instead.";
 
 fn occurrence_code(analysis: &Analysis, id: usize) -> String {
     analysis.groups[id - 1]
@@ -334,19 +384,10 @@ fn occurrence_code(analysis: &Analysis, id: usize) -> String {
 fn duplicates_at(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<String> {
     let file =
         str_arg(args, "file").ok_or_else(|| anyhow::anyhow!("missing required argument: file"))?;
-    let from = uint_arg(args, "start_line", 1) as u32;
-    let to = uint_arg(
-        args,
-        "end_line",
-        if args.get("start_line").is_some() {
-            from as u64
-        } else {
-            u32::MAX as u64
-        },
-    ) as u32;
+    let (from, to) = line_range(args)?;
     let opts = options(root, args)?.narrowed_to(lang_index_for_path(file.as_ref()));
     let analysis = engine.scan(&scan_root(root, args)?, &opts)?;
-    let ids = analysis.overlapping(file, from, to);
+    let ids = analysis.overlapping(file, from, to)?;
     if ids.is_empty() {
         return Ok(format!(
             "No clones overlap {file}:{from}-{to} (min_tokens {}).\n",
@@ -356,24 +397,30 @@ fn duplicates_at(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<S
     Ok(render(&analysis, &ids, true))
 }
 
+/// The whole file by default; a start line alone is that one line.
+fn line_range(args: &Value) -> anyhow::Result<(u32, u32)> {
+    let from = uint_arg(args, "start_line")?;
+    let to = uint_arg(args, "end_line")?;
+    Ok((from.unwrap_or(1), to.or(from).unwrap_or(u32::MAX)))
+}
+
 fn find_similar(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<String> {
     let code =
         str_arg(args, "code").ok_or_else(|| anyhow::anyhow!("missing required argument: code"))?;
-    let lang_name = str_arg(args, "language")
-        .ok_or_else(|| anyhow::anyhow!("missing required argument: language"))?;
-    let lang = lang_index_by_name(lang_name).ok_or_else(|| {
-        anyhow::anyhow!("unknown language {lang_name:?}; known: {}", known_langs())
-    })?;
-    let (analysis, ids) = engine.similar(
-        &scan_root(root, args)?,
-        code,
-        lang,
-        &snippet_options(root, args)?,
-    )?;
-    if ids.is_empty() {
+    let (lang, opts) = (snippet_lang(args)?, snippet_options(root, args)?);
+    let found = engine.similar(&scan_root(root, args)?, code, lang, &opts)?;
+    if found.hits.is_empty() && found.accepted.is_empty() {
         return Ok("No existing code matches this snippet's structure.\n".into());
     }
-    Ok(render(&analysis, &ids, false))
+    let out = render(&found.analysis, &found.hits, false);
+    Ok(out + &render_accepted(&found.analysis, &found.accepted))
+}
+
+fn snippet_lang(args: &Value) -> anyhow::Result<usize> {
+    let name = str_arg(args, "language")
+        .ok_or_else(|| anyhow::anyhow!("missing required argument: language"))?;
+    lang_index_by_name(name)
+        .ok_or_else(|| anyhow::anyhow!("unknown language {name:?}; known: {}", known_langs()))
 }
 
 /// The same as `doppelscan config --format json`, so an agent sees what a
@@ -381,51 +428,54 @@ fn find_similar(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<St
 fn get_settings(root: &Path, args: &Value) -> anyhow::Result<String> {
     let effective = explain(
         &config(root, args)?,
-        &requested(args),
+        &requested(args)?,
         similarity_arg(args)?,
     );
     Ok(serde_json::to_string_pretty(&effective)?)
 }
 
 fn find_near(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<String> {
+    let page = Page::of(args)?;
     let config = config(root, args)?;
-    let similarity = config.similarity(similarity_arg(args)?);
+    let similarity = config.similarity(similarity_arg(args)?)?;
     let analysis = engine.near(
         &scan_root(root, args)?,
-        &with_root(root, config.near_options(requested(args))?)?,
+        &with_root(root, args, config.near_options(requested(args)?)?)?,
         similarity,
     )?;
-    let ids = page(args, analysis.groups.len());
+    let ids = page.ids(analysis.groups.len());
+    let groups = ids.iter().map(|&id| analysis.group(id));
+    let shown = groups.map(|g| format!("\n{}", render_near(&g, Detail::Full)));
     let mut out = render_near_summary(&analysis, ids.len());
-    for &id in &ids {
-        out.push_str(&format!(
-            "\n{}",
-            render_near(&analysis.group(id), Detail::Brief)
-        ));
-    }
-    out.push_str(&more_hint(&ids, analysis.groups.len()));
-    Ok(out)
+    out.extend(shown);
+    Ok(out + &more_hint(&ids, analysis.groups.len()))
 }
 
 fn check_new(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<String> {
     let path = scan_root(root, args)?;
-    let file = str_arg(args, "baseline").map(|f| root.join(f));
-    let against = match (
-        str_arg(args, "base"),
-        file.or_else(|| Baseline::find(&path)),
-    ) {
-        (Some(rev), _) => Against::Rev(rev.to_string()),
-        (None, Some(file)) => Against::File(file),
-        (None, None) => Against::Rev("HEAD".into()),
-    };
-    let min_new = config(root, args)?.check_min_tokens(requested(args).check_min_tokens);
+    let against = against(root, &path, args)?;
+    let min_new = config(root, args)?.check_min_tokens(requested(args)?.check_min_tokens);
     let check = engine.check(&path, &against, &options(root, args)?, min_new)?;
     Ok(render_check(&check, &against))
 }
 
+fn against(root: &Path, path: &Path, args: &Value) -> anyhow::Result<Against> {
+    let base = str_arg(args, "base");
+    let file = str_arg(args, "baseline").map(|f| root.join(f));
+    anyhow::ensure!(
+        base.is_none() || file.is_none(),
+        "pass base or baseline, not both"
+    );
+    Ok(match (base, file.or_else(|| Baseline::find(path))) {
+        (Some(rev), _) => Against::Rev(rev.to_string()),
+        (None, Some(file)) => Against::File(file),
+        (None, None) => Against::Rev("HEAD".into()),
+    })
+}
+
 fn tool_definitions() -> Value {
     let common = json!({
-        "path": { "type": "string", "description": "Directory or file to scan, relative to the server root. Default: the root." },
+        "path": { "type": "string", "description": "Directory or file to scan, relative to the server root or absolute. Results show paths relative to the root, or to this path when it lies outside the root. Default: the root." },
         "min_tokens": { "type": "integer", "minimum": 8, "description": "Smallest clone reported, in syntax tokens. Default 50, or the repo's .doppelscan.toml." },
         "languages": { "type": "array", "items": { "type": "string" }, "description": format!("Restrict to these languages: {}. yaml is scanned only when listed here.", known_langs()) },
         "exclude": { "type": "array", "items": { "type": "string" }, "description": "Globs to skip, e.g. \"**/*.test.ts\"." },
@@ -476,7 +526,7 @@ fn tool_definitions() -> Value {
         {
             "name": "find_similar_code",
             "title": "Find code like a snippet",
-            "description": "Search the codebase for code structurally equivalent to a snippet (names and literals may differ). Use before writing a helper to find one that already exists. Only fragments of at least min_tokens (default 20 here) are matched, so pass whole statements or functions.",
+            "description": "Search the codebase for code structurally equivalent to a snippet (names and literals may differ). Use before writing a helper to find one that already exists. Only fragments of at least min_tokens (default 20 here) are matched, so pass whole statements or functions. max_param_density does not apply, and a match the repo has accepted is listed as such.",
             "inputSchema": { "type": "object", "properties": with(json!({
                 "code": { "type": "string", "description": "The snippet: whole functions or statements." },
                 "language": { "type": "string", "description": "Language name or file extension of the snippet." },

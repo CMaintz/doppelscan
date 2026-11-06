@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 
-use crate::detect::RawGroup;
+use crate::detect::{Occ, RawGroup};
 use crate::engine::{Against, Check, score};
 use crate::index::FileIndex;
 use crate::variation::{Kind, Variation, analyze, template};
@@ -91,7 +91,7 @@ impl Analysis {
         }
     }
 
-    fn location(&self, o: &crate::detect::Occ) -> Location {
+    fn location(&self, o: &Occ) -> Location {
         let file = &self.files[o.file as usize];
         Location {
             file: file.path.clone(),
@@ -101,36 +101,64 @@ impl Analysis {
         }
     }
 
-    /// Accepts a numeric id or a fingerprint (or a unique prefix of one).
+    /// Accepts a numeric id, a whole fingerprint, or a unique fingerprint
+    /// prefix. A shorter all-digit value is only ever an id: otherwise a
+    /// mistyped id would land on whichever fingerprint starts with it.
     pub fn resolve(&self, key: &str) -> Option<usize> {
-        let key = key.trim().trim_start_matches('#');
+        let key = key.trim().trim_start_matches('#').to_ascii_lowercase();
+        let digits = key.bytes().all(|b| b.is_ascii_digit());
         if let Ok(id) = key.parse::<usize>()
+            && digits
             && (1..=self.groups.len()).contains(&id)
         {
             return Some(id);
         }
-        let key = key.to_ascii_lowercase();
-        let mut hits =
-            (1..=self.groups.len()).filter(|&i| fingerprint(&self.groups[i - 1]).starts_with(&key));
+        let whole = key.len() == FINGERPRINT_CHARS;
+        let usable = whole || (!digits && key.len() >= MIN_FINGERPRINT_PREFIX);
+        usable.then(|| self.by_fingerprint(&key)).flatten()
+    }
+
+    fn by_fingerprint(&self, prefix: &str) -> Option<usize> {
+        let mut hits = (1..=self.groups.len())
+            .filter(|&i| fingerprint(&self.groups[i - 1]).starts_with(prefix));
         let first = hits.next()?;
         hits.next().is_none().then_some(first)
     }
 
+    /// Why `resolve` found nothing for `key`.
+    pub fn unresolved(&self, key: &str) -> String {
+        format!(
+            "no clone group {key:?}: ids run 1..={}, and a fingerprint prefix needs at least \
+             {MIN_FINGERPRINT_PREFIX} characters, one of them a letter, and must match one group",
+            self.groups.len()
+        )
+    }
+
     /// Groups with an occurrence overlapping `file` lines `[from, to]`.
-    pub fn overlapping(&self, file: &str, from: u32, to: u32) -> Vec<usize> {
+    /// `file` is a path as results show it, with either separator and an
+    /// optional leading `./`. Fails on an inverted range and on a file this
+    /// scan did not read, which "no clones here" would misreport.
+    pub fn overlapping(&self, file: &str, from: u32, to: u32) -> anyhow::Result<Vec<usize>> {
+        anyhow::ensure!(from <= to, "line range {from}-{to} ends before it starts");
         let file = file.replace('\\', "/");
-        (1..=self.groups.len())
-            .filter(|&id| {
-                self.groups[id - 1].occs.iter().any(|o| {
-                    let path = &self.files[o.file as usize].path;
-                    (path == &file
-                        || path.ends_with(&format!("/{file}"))
-                        || file.ends_with(&format!("/{path}")))
-                        && o.start_line <= to
-                        && from <= o.end_line
-                })
-            })
-            .collect()
+        let file = file.trim_start_matches("./");
+        self.require_scanned(file)?;
+        let covers = |o: &Occ| {
+            self.files[o.file as usize].path == file && o.start_line <= to && from <= o.end_line
+        };
+        Ok((1..=self.groups.len())
+            .filter(|&id| self.groups[id - 1].occs.iter().any(covers))
+            .collect())
+    }
+
+    fn require_scanned(&self, file: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.files.iter().any(|f| f.path == file),
+            "{file} is not among the {} files scanned: it is missing, excluded, generated or \
+             in another language; pass the path as results show it",
+            self.files.len()
+        );
+        Ok(())
     }
 
     pub fn summary(&self) -> Summary {
@@ -158,6 +186,9 @@ impl Analysis {
 pub fn fingerprint(group: &RawGroup) -> String {
     format!("{:012x}", group.hash >> 16)
 }
+
+const FINGERPRINT_CHARS: usize = 12;
+const MIN_FINGERPRINT_PREFIX: usize = 4;
 
 const MAX_VALUE_CHARS: usize = 48;
 
@@ -309,6 +340,23 @@ fn indent(text: &str) -> String {
         .map(|l| format!("    {l}"))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Snippet matches left out of the hits because the config accepts them;
+/// empty when there are none. Saying nothing would read as "no such code".
+pub fn render_accepted(analysis: &Analysis, ids: &[usize]) -> String {
+    if ids.is_empty() {
+        return String::new();
+    }
+    let mut out =
+        String::from("\nMatches accepted in the config as duplication kept on purpose:\n");
+    for &id in ids {
+        out.push_str(&format!(
+            "\n{}",
+            render_group(&analysis.group(id, false), Detail::Brief)
+        ));
+    }
+    out
 }
 
 /// New groups in full (an agent has to see every copy to decide which one
