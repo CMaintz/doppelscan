@@ -6,16 +6,19 @@
 //! Configs above the scanned path come in with the scan's settings. A
 //! config inside the scanned tree is read as the walk enters its
 //! directory, so a package's excludes hold whether the scan starts at the
-//! package or at the repository root.
+//! package or at the repository root, unless the command named its config
+//! (`--config`, `--no-config`), which then is the only one that counts.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 
+use anyhow::Context;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use ignore::overrides::{Override, OverrideBuilder};
 use rustc_hash::FxHashMap;
 
 use crate::config::{FILE, nested_rules};
+use crate::engine::ScanOptions;
 use crate::walk::is_excluded_dir;
 
 /// A config file's `exclude` and `include`, as `.gitignore` patterns
@@ -31,6 +34,8 @@ pub struct PathRules {
 pub struct PathFilter {
     /// The scanned path, canonical, to anchor config patterns against.
     root: PathBuf,
+    /// The scanned path as the walk sees it, which `overrides` is rooted at.
+    given_root: PathBuf,
     pub(crate) overrides: Override,
     rules: Arc<Vec<Compiled>>,
     nested: Arc<Nested>,
@@ -41,6 +46,7 @@ pub struct PathFilter {
 #[derive(Default)]
 struct Nested {
     near: bool,
+    skip: bool,
     found: RwLock<FxHashMap<PathBuf, Compiled>>,
     error: Mutex<Option<anyhow::Error>>,
 }
@@ -55,19 +61,18 @@ struct Compiled {
 }
 
 impl PathFilter {
-    /// `near` adds nested configs' `[near] exclude`.
-    pub fn new(
-        root: &Path,
-        exclude: &[String],
-        rules: &[PathRules],
-        near: bool,
-    ) -> anyhow::Result<Self> {
+    pub fn new(root: &Path, opts: &ScanOptions) -> anyhow::Result<Self> {
+        let rules = opts.rules.iter().map(compile);
         Ok(Self {
-            root: root.canonicalize()?,
-            overrides: exclude_overrides(root, exclude)?,
-            rules: Arc::new(rules.iter().map(compile).collect::<anyhow::Result<_>>()?),
+            root: root
+                .canonicalize()
+                .with_context(|| format!("scanning {}", root.display()))?,
+            given_root: root.to_path_buf(),
+            overrides: exclude_overrides(root, &opts.exclude)?,
+            rules: Arc::new(rules.collect::<anyhow::Result<_>>()?),
             nested: Arc::new(Nested {
-                near,
+                near: opts.near,
+                skip: opts.skip_nested,
                 ..Nested::default()
             }),
         })
@@ -78,9 +83,13 @@ impl PathFilter {
     pub fn skips_dir(&self, rel: &Path) -> bool {
         let abs = self.absolute(rel);
         let builtin = rel.components().any(|c| is_excluded_dir(c.as_os_str()));
-        let wanted = self.matches(&abs, true, |c| &c.include) || self.reaches_include(&abs);
+        let included = self.matches(&abs, true, |c| &c.include);
+        let wanted = included || self.reaches_include(&abs);
         let skipped = (builtin && !wanted) || self.matches(&abs, true, |c| &c.exclude);
-        if !skipped && !rel.as_os_str().is_empty() {
+        // A skipped directory entered only on the way to an include has no
+        // say: its config is a dependency's, and may not even load.
+        let passing_through = builtin && !included;
+        if !skipped && !passing_through && !rel.as_os_str().is_empty() {
             self.read_config_in(&abs);
         }
         skipped
@@ -95,16 +104,33 @@ impl PathFilter {
         (builtin && !included) || self.matches(&abs, false, |c| &c.exclude)
     }
 
+    /// Whether a config's `include` names the file `rel`, relative to the
+    /// scanned path.
+    pub fn includes(&self, rel: &Path) -> bool {
+        let no_nested = self.nested.found.read().unwrap().is_empty();
+        if self.rules.is_empty() && no_nested {
+            return false;
+        }
+        self.matches(&self.absolute(rel), false, |c| &c.include)
+    }
+
+    /// Whether `--exclude` matches `rel`, relative to the scanned path.
+    /// Asked with the path the walk would ask with: the matcher strips its
+    /// root as a prefix, so a bare `rel` that happens to start with a name
+    /// like the root's would lose that component too.
+    pub fn excluded_by_glob(&self, rel: &Path, is_dir: bool) -> bool {
+        let walked = joined(&self.given_root, rel);
+        self.overrides.matched(walked, is_dir).is_ignore()
+    }
+
     /// A config inside the tree that could not be read, once the walk is
     /// done.
     pub fn take_error(&self) -> Option<anyhow::Error> {
         self.nested.error.lock().unwrap().take()
     }
 
-    /// Joined part by part: a listed path uses `/`, which a verbatim
-    /// Windows root (`\\?\C:\...`) would keep as part of one name.
     fn absolute(&self, rel: &Path) -> PathBuf {
-        rel.components().fold(self.root.clone(), |p, c| p.join(c))
+        joined(&self.root, rel)
     }
 
     fn matches(&self, abs: &Path, is_dir: bool, which: impl Fn(&Compiled) -> &Gitignore) -> bool {
@@ -137,7 +163,7 @@ impl PathFilter {
 
     fn read_config_in(&self, dir: &Path) {
         let file = dir.join(FILE);
-        if !file.is_file() {
+        if self.nested.skip || !file.is_file() {
             return;
         }
         match nested_rules(&file, self.nested.near).and_then(|r| compile(&r)) {
@@ -151,6 +177,12 @@ impl PathFilter {
             }
         }
     }
+}
+
+/// Joined part by part: a listed path uses `/`, which a verbatim Windows
+/// root (`\\?\C:\...`) would keep as part of one name.
+fn joined(root: &Path, rel: &Path) -> PathBuf {
+    rel.components().fold(root.to_path_buf(), |p, c| p.join(c))
 }
 
 fn compile(rules: &PathRules) -> anyhow::Result<Compiled> {

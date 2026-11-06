@@ -117,7 +117,8 @@ server alike. `doppelscan init` writes one with every setting commented
 out at its default, the languages it found, and the test files it found
 already listed for `near` to skip. `doppelscan config` (or the MCP
 `get_settings` tool) shows the settings a scan uses, where each comes
-from, and the built-in skip list. Editors that read `#:schema` (Taplo,
+from, and the built-in skip list; it fails where a scan would, and configs
+nested inside the tree apply but are not listed. Editors that read `#:schema` (Taplo,
 Even Better TOML) complete and check the keys from
 `doppelscan.schema.json`.
 
@@ -145,13 +146,20 @@ from configs inside the scanned tree, so a package's excludes hold whether
 the scan starts at the package or at the root; that package's other
 settings only apply to a scan that starts inside it. `include` brings back
 directories the built-in list skips (dependencies, build output, generated
-code); inside one, anchor the path (`vendor/ours/`, not `ours/`). As in
+code), and what it names is scanned even when marked as generated; minified
+files stay out. Inside a skipped directory, anchor the path (`vendor/ours/`,
+not `ours/`). As in
 `.gitignore`, nothing inside an excluded directory can be re-included.
 
 A flag or tool argument overrides a setting, `--exclude` adds to the
 config's excludes, `--no-strict` turns off a configured `strict`,
-`--config FILE` reads that file instead and `--no-config` reads none. An
-unknown key is an error.
+`--config FILE` reads that file instead and `--no-config` reads none;
+neither reads configs inside the scanned tree. An unknown key is an error.
+
+Patterns in a `--config` file stay relative to that file, so they only
+match under its directory. Kept elsewhere, such as a config shared between
+repositories, its other settings still apply but its patterns match nothing,
+and doppelscan prints a warning to stderr saying so.
 
 ## Ignoring code
 
@@ -182,10 +190,12 @@ reason = "Generated from the OpenAPI spec; regenerated, never edited."
 ```
 
 An accepted group is left out of every report and never fails `check`,
-however many copies it has. Editing the code changes its fingerprint, so
-the clone comes back for another look. Its baseline entry, if it has one,
-stays until the code is gone. `near` groups have no fingerprint and are not
-affected.
+however many copies it has. A change to the code's structure changes its
+fingerprint, so the clone comes back for another look; renaming things or
+changing literals does not, unless the scan is `strict`, where they do and
+fingerprints differ from a non-strict scan's. Hex case does not matter. Its
+baseline entry, if it has one, stays until the code is gone. `near` groups
+have no fingerprint and are not affected.
 
 ## Gating new duplication
 

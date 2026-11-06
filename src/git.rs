@@ -42,10 +42,11 @@ pub fn read_revision(
         "comparing against a revision needs a directory, not {}",
         dir.display()
     );
-    let filter = PathFilter::new(dir, &opts.exclude, &opts.rules, opts.near)?;
+    let filter = PathFilter::new(dir, opts)?;
     let scanned: FxHashSet<String> = discover(dir, &filter, &opts.languages)?
         .into_iter()
-        .filter_map(|(path, _)| relative(dir, &path))
+        .filter_map(|file| relative(dir, &file.path))
+        .map(|path| case_folded(&path))
         .collect();
     let listed = list_tree(dir, rev)?;
     let submodules = listed
@@ -58,7 +59,7 @@ pub fn read_revision(
         .filter(|l| !l.submodule)
         .filter_map(|l| {
             let lang = accept_listed(Path::new(&l.path), &filter, &opts.languages)?;
-            let wanted = !dir.join(&l.path).exists() || scanned.contains(&l.path);
+            let wanted = !dir.join(&l.path).exists() || scanned.contains(&case_folded(&l.path));
             wanted.then_some((l, lang))
         })
         .collect();
@@ -68,7 +69,8 @@ pub fn read_revision(
         .zip(contents)
         .filter_map(|((l, lang), bytes)| {
             let text = normalize_line_endings(String::from_utf8(bytes?).ok()?);
-            (!looks_generated(&text)).then(|| Source {
+            let included = filter.includes(Path::new(&l.path));
+            (!looks_generated(&text, included)).then(|| Source {
                 path: format!("{display_prefix}{}", l.path),
                 lang,
                 text,
@@ -79,6 +81,17 @@ pub fn read_revision(
         sources,
         submodules,
     })
+}
+
+/// A path as these filesystems compare it. After a case-only rename the old
+/// spelling still "exists" there, and comparing it exactly would drop the
+/// file from the revision and make its unchanged clones read as new.
+fn case_folded(path: &str) -> String {
+    if cfg!(any(windows, target_os = "macos")) {
+        path.to_lowercase()
+    } else {
+        path.to_string()
+    }
 }
 
 fn relative(dir: &Path, path: &Path) -> Option<String> {
@@ -131,12 +144,14 @@ fn list_tree(dir: &Path, rev: &str) -> anyhow::Result<Vec<Listed>> {
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
-    let listing = String::from_utf8(out.stdout).context("git ls-tree output")?;
-    Ok(listing.split('\0').filter_map(parse_entry).collect())
+    let entries = out.stdout.split(|&b| b == 0);
+    Ok(entries.filter_map(parse_entry).collect())
 }
 
-fn parse_entry(line: &str) -> Option<Listed> {
-    let (meta, path) = line.split_once('\t')?;
+/// `None` also for a path that is not UTF-8: one such name must not fail
+/// the listing, and the walk leaves these out too.
+fn parse_entry(entry: &[u8]) -> Option<Listed> {
+    let (meta, path) = std::str::from_utf8(entry).ok()?.split_once('\t')?;
     let mut parts = meta.split(' ');
     let (mode, kind, oid) = (parts.next()?, parts.next()?, parts.next()?);
     // Symlinks (120000) point at text that is not code.
