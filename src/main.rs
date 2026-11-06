@@ -6,7 +6,7 @@ use anyhow::{Context, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use doppelscan::baseline::{Baseline, DEFAULT_FILE};
 use doppelscan::config::{Config, Requested, Source, known_langs};
-use doppelscan::engine::{Against, Check, Engine, ScanOptions, anchor};
+use doppelscan::engine::{Against, Check, Engine, ScanOptions, Similar, anchor};
 use doppelscan::lang::{lang_index_by_name, lang_index_for_path};
 use doppelscan::near::{render_near, render_near_summary};
 use doppelscan::report::{
@@ -448,10 +448,35 @@ fn similar(
     .with_context(|| format!("pass --lang (one of: {})", known_langs()))?;
     let opts = config(common)?.options(requested(common).for_snippet())?;
     let found = engine.similar(&common.path, &code, lang, &opts)?;
-    print_groups(&found.analysis, &found.hits, false, common.format)?;
+    print_similar(&found, common.format)?;
     let accepted = render_accepted(&found.analysis, &found.accepted);
     let _ = write!(std::io::stderr(), "{accepted}");
     Ok(())
+}
+
+fn print_similar(found: &Similar, format: Format) -> anyhow::Result<()> {
+    let analysis = &found.analysis;
+    if format != Format::Json {
+        return print_groups(analysis, &found.hits, false, format);
+    }
+    emit_json(&SimilarReport {
+        accepted: briefly(analysis, &found.accepted),
+        groups: briefly(analysis, &found.hits),
+        summary: Sorted(analysis.summary()),
+    })
+}
+
+fn briefly<'a>(analysis: &'a Analysis, ids: &'a [usize]) -> impl Serialize + 'a {
+    Each(move || ids.iter().map(move |&id| analysis.group(id, false)))
+}
+
+/// `Report` plus the matches the config accepts, which `summary.groups`
+/// counts: without them a reader sees a count over an empty list.
+#[derive(Serialize)]
+struct SimilarReport<G, S> {
+    accepted: G,
+    groups: G,
+    summary: Sorted<S>,
 }
 
 fn read_snippet(file: Option<&Path>) -> anyhow::Result<String> {

@@ -489,6 +489,24 @@ fn at_says_paths_are_relative_to_the_scanned_directory() {
     assert_eq!(run(&dir, &["at", "a.ts", "src"]).0, 0);
 }
 
+// Catches a JSON reader seeing `summary.groups: 1` over an empty `groups`
+// with nothing to say where the group went: accepted matches only reached
+// stderr, which a script does not parse.
+#[test]
+fn similar_json_lists_accepted_matches() {
+    let dir = repo_with_config("similar-json", "min-tokens = 20\n");
+    let fingerprint = only_fingerprint(&dir);
+    let config = format!("[[accept]]\nfingerprint = \"{fingerprint}\"\nreason = \"x\"\n");
+    std::fs::write(dir.join(".doppelscan.toml"), config).unwrap();
+    std::fs::write(dir.join("snippet.ts"), CLONE).unwrap();
+    let args = ["similar", "--file", "snippet.ts", "src", "--format", "json"];
+    let (code, out, err) = run(&dir, &args);
+    assert_eq!(code, 0, "{err}");
+    let report: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(report["groups"], json!([]), "{out}");
+    assert_eq!(report["accepted"][0]["fingerprint"], fingerprint, "{out}");
+}
+
 // Catches the CLI and the MCP server drifting to different snippet minimums:
 // the same snippet is then found by one and missed by the other.
 #[test]

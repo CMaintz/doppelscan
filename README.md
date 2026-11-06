@@ -195,7 +195,8 @@ fingerprint, so the clone comes back for another look; renaming things or
 changing literals does not, unless the scan is `strict`, where they do and
 fingerprints differ from a non-strict scan's. Hex case does not matter. Its
 baseline entry, if it has one, stays until the code is gone. `near` groups
-have no fingerprint and are not affected.
+have no fingerprint and are not affected, and `similar` still reports a match
+on an accepted group, under `accepted` in its JSON.
 
 ## Gating new duplication
 
