@@ -397,6 +397,43 @@ fn data_files_are_not_scanned() {
 
 const CALLS: &str = "call(alpha, beta, gamma, delta)\ncall(alpha, beta, gamma, delta, 1)\ncall(alpha, beta, gamma, delta, 2)\n";
 
+// Catches an escaped quote closing a triple-quoted string: the leftover
+// `"""` would open another one and swallow the rest of the file.
+#[test]
+fn an_escaped_quote_does_not_close_a_triple_quoted_string() {
+    for ext in ["dart", "groovy", "ex", "elm", "hs"] {
+        let (a, b) = (format!("a.{ext}"), format!("b.{ext}"));
+        let with = format!("s = \"\"\"a\\\"\"\"b\"\"\"\n{CALLS}");
+        assert_eq!(
+            start_lines(&scan(&[(&a, &with), (&b, CALLS)])),
+            [2, 1],
+            "{ext}"
+        );
+    }
+}
+
+// Catches escapes being honoured where a string has none: Scala's triple
+// quotes, Dart's `r` and Elixir's `~S` keep a backslash as text, so the
+// closing quotes after one really close it.
+#[test]
+fn a_raw_triple_quoted_string_closes_after_a_backslash() {
+    let cases = [
+        ("scala", "\"\"\"a\\\"\"\""),
+        ("dart", "r\"\"\"a\\\"\"\""),
+        ("dart", "r'''a\\'''"),
+        ("ex", "~S\"\"\"a\\\"\"\""),
+    ];
+    for (ext, string) in cases {
+        let (a, b) = (format!("a.{ext}"), format!("b.{ext}"));
+        let with = format!("s = {string}\n{CALLS}");
+        assert_eq!(
+            start_lines(&scan(&[(&a, &with), (&b, CALLS)])),
+            [2, 1],
+            "{string}"
+        );
+    }
+}
+
 // Catches `''''` opening a triple-quoted string where the language has
 // none: a quoted quote would swallow the rest of the file as one literal.
 #[test]

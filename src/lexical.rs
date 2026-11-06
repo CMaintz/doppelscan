@@ -415,9 +415,11 @@ fn punctuation(b: u8) -> Option<Shape> {
 fn string_end(bytes: &[u8], i: usize, lexicon: &Lexicon) -> usize {
     let quote = bytes[i];
     if lexicon.triple_quotes.contains(&quote) && bytes[i..].starts_with(&[quote; 3]) {
-        let body = &bytes[i + 3..];
-        let close = body.windows(3).position(|w| w == [quote; 3]);
-        return close.map_or(bytes.len(), |c| i + 3 + c + 3);
+        let raw = lexicon
+            .raw_triples
+            .iter()
+            .any(|prefix| bytes[..i].ends_with(prefix.as_bytes()));
+        return triple_end(bytes, i, raw);
     }
     let mut j = i + 1;
     while j < bytes.len() && bytes[j] != quote && bytes[j] != b'\n' {
@@ -427,6 +429,18 @@ fn string_end(bytes: &[u8], i: usize, lexicon: &Lexicon) -> usize {
         Some(&b) if b == quote => j + 1,
         _ => j.min(bytes.len()),
     }
+}
+
+fn triple_end(bytes: &[u8], i: usize, raw: bool) -> usize {
+    let close = [bytes[i]; 3];
+    let mut j = i + 3;
+    while j < bytes.len() {
+        if bytes[j..].starts_with(&close) {
+            return j + 3;
+        }
+        j += if bytes[j] == b'\\' && !raw { 2 } else { 1 };
+    }
+    bytes.len()
 }
 
 fn word_end(bytes: &[u8], i: usize, number: bool, primes: bool) -> usize {

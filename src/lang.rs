@@ -63,6 +63,10 @@ pub struct Lexicon {
     /// Quote bytes that open a multi-line string when tripled. Everywhere
     /// else `''''` is a quoted quote or adjacent empty strings.
     pub triple_quotes: &'static [u8],
+    /// What comes just before a triple quote that takes no escapes, so a
+    /// backslash cannot stop the closing quotes. An empty entry means none
+    /// of the language's triple quotes do.
+    pub raw_triples: &'static [&'static str],
     /// `'` may continue a name (`foldl'`) rather than end it.
     pub primes: bool,
     /// Block comments nest, so only the matching closer ends one.
@@ -105,6 +109,7 @@ const PLAIN: Lexicon = Lexicon {
     keywords: &[],
     ignore_case: false,
     triple_quotes: &[],
+    raw_triples: &[],
     primes: false,
     nested_comments: false,
     import_heads: IMPORT_HEADS,
@@ -260,6 +265,7 @@ pub static LANGS: LazyLock<Vec<Lang>> = LazyLock::new(|| {
             "scala",
             Lexicon {
                 triple_quotes: b"\"",
+                raw_triples: &[""],
                 nested_comments: true,
                 ..C_LIKE
             },
@@ -276,6 +282,7 @@ pub static LANGS: LazyLock<Vec<Lang>> = LazyLock::new(|| {
         Lang::tokens(
             "dart",
             Lexicon {
+                raw_triples: &["r"],
                 nested_comments: true,
                 ..C_LIKE_TRIPLE
             },
@@ -373,6 +380,7 @@ pub static LANGS: LazyLock<Vec<Lang>> = LazyLock::new(|| {
             "elixir",
             Lexicon {
                 triple_quotes: b"\"'",
+                raw_triples: &["~S", "~R"],
                 ..HASH
             },
             &["ex", "exs"],
