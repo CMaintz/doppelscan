@@ -13,7 +13,9 @@ use crate::engine::ScanOptions;
 use crate::filter::{PathFilter, PathRules};
 use crate::index::MIN_STORED_TOKENS;
 use crate::lang::LANGS;
-use crate::walk::{BUILT_IN_SKIPS, Found, discover, looks_generated};
+use crate::walk::{
+    BUILT_IN_SKIPS, Found, MAX_RAW_BYTES, discover, looks_generated, scannable_text,
+};
 
 #[derive(Debug, Serialize, PartialEq)]
 pub struct Effective {
@@ -303,7 +305,9 @@ pub fn init_template(root: &Path) -> anyhow::Result<String> {
 }
 
 fn is_scanned_text(file: &Found) -> bool {
-    std::fs::read_to_string(&file.path).is_ok_and(|text| !looks_generated(&text, false))
+    let fits = std::fs::metadata(&file.path).is_ok_and(|m| m.len() <= MAX_RAW_BYTES);
+    let text = || scannable_text(std::fs::read(&file.path).ok()?);
+    fits && text().is_some_and(|text| !looks_generated(&text, false))
 }
 
 fn present_tests<'a>(

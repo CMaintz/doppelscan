@@ -640,6 +640,34 @@ fn init_does_not_count_generated_files() {
     assert!(written.contains("(2 files)"), "{written}");
 }
 
+// Catches init counting a file past the size cap, which no scan reads.
+#[test]
+fn init_does_not_count_files_over_the_size_cap() {
+    let dir = repo_with_config("init-big", "");
+    std::fs::remove_file(dir.join(".doppelscan.toml")).unwrap();
+    write(
+        &dir,
+        "src/c.ts",
+        &format!("{CLONE}{}", "//\n".repeat(500_000)),
+    );
+    assert_eq!(run(&dir, &["init"]).0, 0);
+    let written = std::fs::read_to_string(dir.join(".doppelscan.toml")).unwrap();
+    assert!(written.contains("(2 files)"), "{written}");
+}
+
+// Catches init judging raw text: CRs push line length past the minified
+// limit, so a CRLF file a scan reads would be left out of the count.
+#[test]
+fn init_judges_a_crlf_file_as_a_scan_does() {
+    let dir = repo_with_config("init-crlf", "");
+    std::fs::remove_file(dir.join(".doppelscan.toml")).unwrap();
+    let line = format!("// {}\r\n", "x".repeat(296));
+    write(&dir, "src/c.ts", &line.repeat(20));
+    assert_eq!(run(&dir, &["init"]).0, 0);
+    let written = std::fs::read_to_string(dir.join(".doppelscan.toml")).unwrap();
+    assert!(written.contains("(3 files)"), "{written}");
+}
+
 // Catches init reading configs below it: it describes the whole tree, and
 // a broken package config should not stop it writing the root one.
 #[test]
