@@ -774,3 +774,20 @@ fn an_annotation_with_arguments_still_tells_methods_apart() {
         [("A.java".to_string(), 5), ("B.java".to_string(), 4)]
     );
 }
+
+// Catches Go's `statement_list` missing from the block kinds: a Go block has
+// that one child, so no run of statements in a function was ever found.
+#[test]
+fn a_run_of_statements_is_found_in_go() {
+    let shared = "\ta := x + 1\n\tb := a * 2\n\tc := b - 3\n\td := c + 4\n\te := d * 5\n\tf := e - 6\n\tg := f + 7\n";
+    let body = |head: &str, tail: &str| {
+        format!(
+            "package p\n\nfunc {head}(x int) int {{\n\tprintln(\"{head}\")\n{shared}\treturn {tail}\n}}\n"
+        )
+    };
+    let (one, two) = (body("first", "g"), body("second", "g * x + a"));
+    let a = scan(&[("a.go", &one), ("b.go", &two)]);
+    let best = groups(&a).remove(0);
+    let starts: Vec<u32> = best.occurrences.iter().map(|o| o.start_line).collect();
+    assert_eq!(starts, [4, 4]);
+}
