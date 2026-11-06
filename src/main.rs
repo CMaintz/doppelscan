@@ -285,9 +285,9 @@ fn warn_if_patterns_miss(config: &Config, file: &Path, scanned: &Path) {
     if config.has_patterns_outside(&scanned) {
         let _ = writeln!(
             std::io::stderr(),
-            "warning: the path patterns in {} only match under its directory, which does not contain {}; here they match nothing.",
+            "warning: the path patterns in {} only match under its directory, which does not overlap {}; here they match nothing.",
             file.display(),
-            scanned.display()
+            shown(&scanned)
         );
     }
 }

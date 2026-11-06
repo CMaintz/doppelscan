@@ -775,6 +775,7 @@ fn a_config_elsewhere_warns_that_its_patterns_do_not_reach() {
     assert_eq!(code, 0, "{err}");
     assert_eq!(err.matches("warning:").count(), 1, "{err}");
     assert!(err.contains("shared.toml"), "{err}");
+    assert!(!err.contains(r"\\?\"), "{err}");
     let args = ["check", ".", "--base", "HEAD", "--config"];
     git(&repo, &["add", "."]);
     git(&repo, &["commit", "-qm", "pair"]);
@@ -795,6 +796,19 @@ fn a_config_that_reaches_or_has_no_patterns_does_not_warn() {
     write(&repo, "gate.toml", "exclude = [\"*.ts\"]\n");
     let (_, _, err) = run(&repo, &["src", "--config", "gate.toml"]);
     assert!(!err.contains("warning:"), "{err}");
+}
+
+// Catches the warning asking only whether the config sits above the scan:
+// one below it reaches part of the tree, so "they match nothing" is false.
+#[test]
+fn a_config_inside_the_scan_does_not_warn() {
+    let repo = repo_with_config("outside-inner", "min-tokens = 20\n");
+    write(&repo, "pkg/shared.toml", "exclude = [\"b.ts\"]\n");
+    write(&repo, "pkg/b.ts", CLONE);
+    let (code, out, err) = run(&repo, &[".", "--config", "pkg/shared.toml"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!err.contains("warning:"), "{err}");
+    assert!(!out.contains("pkg/b.ts"), "{out}");
 }
 
 // Catches accepting a fingerprint only in the case doppelscan prints it,
