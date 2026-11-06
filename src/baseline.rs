@@ -176,16 +176,18 @@ impl Baseline {
 
     /// The entries still needed to excuse `now`, with counts lowered and
     /// places cut to what remains. Never adds an entry, a place or a copy,
-    /// so pruning cannot accept new duplication. `now` is a scan of `scope`;
-    /// a partial one keeps every entry as it is.
-    pub fn pruned(&self, now: &Analysis, scope: &Scope) -> Self {
+    /// so pruning cannot accept new duplication. `now` must be a scan of the
+    /// baseline's whole directory: recorded places go stale as soon as a
+    /// copy moves, so from part of the tree a copy that moved out of it looks
+    /// exactly like one that was deleted.
+    pub fn pruned(&self, now: &Analysis) -> Self {
         let found = now.groups.iter().chain(&now.accepted);
         let current: Vec<Entry> = found.map(|group| entry(now, group)).collect();
-        let judged = |e: &Entry| match scope.sees_all() {
-            true => e.pruned(&current),
-            false => Some(e.clone()),
-        };
-        let groups = self.groups.iter().filter_map(judged).collect();
+        let groups = self
+            .groups
+            .iter()
+            .filter_map(|e| e.pruned(&current))
+            .collect();
         Self {
             version: VERSION,
             settings: self.settings.clone(),
@@ -203,30 +205,6 @@ impl Baseline {
             (e.fingerprint == group.fingerprint && group.occurrences <= e.occurrences)
                 || is_shrunk_from(group, e)
         })
-    }
-}
-
-/// How much of a baseline's directory one scan covers. The default is all
-/// of it.
-#[derive(Debug, Clone, Default)]
-pub struct Scope {
-    partial: bool,
-}
-
-impl Scope {
-    /// `path` is a directory or file relative to the baseline's directory,
-    /// empty for the directory itself.
-    pub fn of(path: &str) -> Self {
-        Self {
-            partial: !path.is_empty(),
-        }
-    }
-
-    /// Only a scan of everything can judge an entry. Recorded places go
-    /// stale as soon as a copy moves, so from inside part of the tree a
-    /// copy that moved out looks exactly like one that was deleted.
-    fn sees_all(&self) -> bool {
-        !self.partial
     }
 }
 
