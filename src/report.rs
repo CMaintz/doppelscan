@@ -140,25 +140,26 @@ impl Analysis {
     /// scan did not read, which "no clones here" would misreport.
     pub fn overlapping(&self, file: &str, from: u32, to: u32) -> anyhow::Result<Vec<usize>> {
         anyhow::ensure!(from <= to, "line range {from}-{to} ends before it starts");
-        let file = file.replace('\\', "/");
-        let file = file.trim_start_matches("./");
-        self.require_scanned(file)?;
-        let covers = |o: &Occ| {
-            self.files[o.file as usize].path == file && o.start_line <= to && from <= o.end_line
-        };
+        let file = self.scanned_file(file)?;
+        let covers = |o: &Occ| o.file == file && o.start_line <= to && from <= o.end_line;
         Ok((1..=self.groups.len())
             .filter(|&id| self.groups[id - 1].occs.iter().any(covers))
             .collect())
     }
 
-    fn require_scanned(&self, file: &str) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            self.files.iter().any(|f| f.path == file),
-            "{file} is not among the {} files scanned: it is missing, excluded, generated or \
-             in another language; pass the path as results show it",
-            self.files.len()
-        );
-        Ok(())
+    /// The index of `file` among the files read. Both sides are spelled
+    /// alike first: a file named on the command line keeps the path as typed.
+    fn scanned_file(&self, file: &str) -> anyhow::Result<u32> {
+        let file = plain_path(file);
+        let found = self.files.iter().position(|f| plain_path(&f.path) == file);
+        found.map(|i| i as u32).ok_or_else(|| {
+            anyhow::anyhow!(
+                "{file} is not among the {} files scanned: it is missing, excluded, generated or \
+                 in another language; pass the path relative to the scanned directory (over MCP, \
+                 the server root), as a scan of it shows it",
+                self.files.len()
+            )
+        })
     }
 
     pub fn summary(&self) -> Summary {
@@ -180,6 +181,10 @@ impl Analysis {
             elapsed_ms: self.elapsed.as_millis(),
         }
     }
+}
+
+fn plain_path(path: &str) -> String {
+    path.replace('\\', "/").trim_start_matches("./").to_string()
 }
 
 /// Stable across runs while the duplicated code keeps its structure.

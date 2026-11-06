@@ -17,7 +17,7 @@ use crate::index::{
     FileIndex, Frag, Leaf, LeafClass, MIN_STORED_TOKENS, NO_SCOPE, Role, Seqs, line_starts,
     placeholder,
 };
-use crate::lang::{LANGS, Lexicon};
+use crate::lang::{EMBDOC, LANGS, Lexicon};
 
 /// Hashed by text rather than anonymised, so `if (a) return b` and
 /// `foo (a) bar b` stay different. One list serves every language: a
@@ -136,23 +136,10 @@ const KEYWORDS: &[&str] = &[
     "yield",
 ];
 
-/// Statements that only bring names in: never a clone, and they break a
-/// run like the grammar path's import nodes.
-const NOISE_HEADS: &[&str] = &[
-    "import",
-    "include",
-    "using",
-    "require",
-    "require_relative",
-    "use",
-    "package",
-    "library",
-    "part",
-];
-
-/// Punctuation that can follow a head in a real import, for the heads that
-/// have such a form (`import { a } from`, `import * as`, T-SQL's `use [db]`).
-const NOISE_OPENERS: &[(&str, &str)] = &[("import", "{"), ("import", "*"), ("use", "[")];
+/// Longest scope label that still gets its parents prepended, in bytes. Far
+/// past real code, and it keeps label memory linear in the file: each label
+/// repeats its parents', so nesting alone would make the total quadratic.
+const MAX_QUALIFIED_SCOPE: usize = 1024;
 
 /// Directives after `#` (C's `#include`) or `@` (SCSS's `@use`) that
 /// import; `@include` in SCSS calls a mixin, so it is not one of them.
@@ -198,7 +185,7 @@ pub fn index_tokens(
 ) -> FileIndex {
     let lang_seed = hash_bytes(LANGS[lang].name.as_bytes());
     let lines = line_starts(&source);
-    let mut builder = Builder::new(&source, strict, lexicon.ignore_case, lang_seed);
+    let mut builder = Builder::new(&source, strict, lexicon, lang_seed);
     for tok in tokenize(&source, lexicon) {
         builder.push(&tok);
     }
@@ -235,6 +222,8 @@ struct Lexer<'a> {
     /// the reported offsets slice.
     offset: u32,
     lexicon: &'a Lexicon,
+    /// Past this, a `=begin` has no `=end` to close it.
+    last_embdoc_end: usize,
     at: usize,
     line_start: bool,
     toks: Vec<Tok>,
@@ -248,6 +237,7 @@ fn tokenize(source: &str, lexicon: &Lexicon) -> Vec<Tok> {
         source: text,
         offset: (source.len() - text.len()) as u32,
         lexicon,
+        last_embdoc_end: last_embdoc_end(text, lexicon),
         at: 0,
         line_start: true,
         toks: Vec::new(),
@@ -258,6 +248,17 @@ fn tokenize(source: &str, lexicon: &Lexicon) -> Vec<Tok> {
     lexer.toks
 }
 
+/// Found once up front: asking at each `=begin` would rescan the file for
+/// every one left unclosed.
+fn last_embdoc_end(text: &str, lexicon: &Lexicon) -> usize {
+    if !lexicon.block_comments.contains(&EMBDOC) {
+        return 0;
+    }
+    text.rmatch_indices(EMBDOC.1)
+        .find(|(at, close)| ends_word(text.as_bytes(), at + close.len()))
+        .map_or(0, |(at, _)| at)
+}
+
 impl Lexer<'_> {
     fn step(&mut self) {
         let b = self.source.as_bytes()[self.at];
@@ -266,7 +267,7 @@ impl Lexer<'_> {
             self.at += 1;
         } else if b.is_ascii_whitespace() {
             self.at += 1;
-        } else if let Some(end) = comment_end(self.source, self.at, self.lexicon) {
+        } else if let Some(end) = self.comment_end() {
             self.line_start |= self.source[self.at..end].contains('\n');
             self.at = end;
         } else {
@@ -288,28 +289,83 @@ impl Lexer<'_> {
         self.line_start = false;
         self.at = end;
     }
+
+    /// Where a comment starting here ends, if one starts here.
+    fn comment_end(&self) -> Option<usize> {
+        let (source, i, lexicon) = (self.source, self.at, self.lexicon);
+        let rest = &source[i..];
+        let block = lexicon
+            .block_comments
+            .iter()
+            .find(|(open, _)| rest.starts_with(open) && self.opens_comment(open));
+        if let Some((open, close)) = block {
+            return Some(block_comment_end(source, i, open, close, lexicon));
+        }
+        let marker = lexicon
+            .line_comments
+            .iter()
+            .find(|m| rest.starts_with(**m))?;
+        self.opens_comment(marker)
+            .then(|| rest.find('\n').map_or(source.len(), |e| i + e))
+    }
+
+    /// `#` mid-word is shell's `$#` or a YAML `a#b` value, and `//` after a
+    /// colon is a URL scheme (an unquoted SCSS `url(http://...)`). Ruby's
+    /// `=begin` away from a line start is an assignment (`a =begin_at`), and
+    /// one no `=end` follows is text in a heredoc: Ruby rejects it as a
+    /// comment. None of them starts one.
+    fn opens_comment(&self, marker: &str) -> bool {
+        let (bytes, i) = (self.source.as_bytes(), self.at);
+        let before = i.checked_sub(1).map(|p| bytes[p]);
+        match marker {
+            "#" => before.is_none_or(|b| b.is_ascii_whitespace()),
+            "//" => before != Some(b':'),
+            "--" => !self.lexicon.dash_operators || !in_operator(bytes, i),
+            "=begin" => {
+                before.is_none_or(|b| b == b'\n')
+                    && ends_word(bytes, i + marker.len())
+                    && i < self.last_embdoc_end
+            }
+            _ => true,
+        }
+    }
 }
 
-/// Where a comment starting at `i` ends, if one starts there.
-fn comment_end(source: &str, i: usize, lexicon: &Lexicon) -> Option<usize> {
-    let rest = &source[i..];
+/// Whether the dashes at `i` belong to a longer symbol (`-->`, `|--`). A dash
+/// before them counts, so a long run is walked once, from its start.
+fn in_operator(bytes: &[u8], i: usize) -> bool {
+    const SYMBOLS: &[u8] = b"!#$%&*+./<=>?@\\^|~:";
+    let before = i.checked_sub(1).map(|p| bytes[p]);
+    let after = bytes[i..].iter().find(|&&b| b != b'-');
+    before.is_some_and(|b| b == b'-' || SYMBOLS.contains(&b))
+        || after.is_some_and(|b| SYMBOLS.contains(b))
+}
+
+/// Ruby's `=begin` and `=end` count only as whole words, unlike a line that
+/// merely starts with them (`=ending`).
+fn ends_word(bytes: &[u8], i: usize) -> bool {
+    bytes.get(i).is_none_or(u8::is_ascii_whitespace)
+}
+
+/// `=end` closes at a whole word and takes the rest of its line with it.
+fn embdoc_end(source: &str, body: usize) -> usize {
     let bytes = source.as_bytes();
-    let block = lexicon
-        .block_comments
-        .iter()
-        .find(|(open, _)| rest.starts_with(open) && opens_comment(bytes, i, open));
-    if let Some((open, close)) = block {
-        return Some(block_comment_end(source, i, open, close, lexicon));
-    }
-    let marker = lexicon
-        .line_comments
-        .iter()
-        .find(|m| rest.starts_with(**m))?;
-    opens_comment(bytes, i, marker).then(|| rest.find('\n').map_or(source.len(), |e| i + e))
+    let close = source[body..]
+        .match_indices(EMBDOC.1)
+        .map(|(at, close)| body + at + close.len())
+        .find(|&after| ends_word(bytes, after));
+    close.map_or(source.len(), |after| {
+        source[after..]
+            .find('\n')
+            .map_or(source.len(), |e| after + e)
+    })
 }
 
 fn block_comment_end(source: &str, i: usize, open: &str, close: &str, lexicon: &Lexicon) -> usize {
     let body = i + open.len();
+    if open == EMBDOC.0 {
+        return embdoc_end(source, body);
+    }
     if lexicon.nested_comments {
         return nested_comment_end(source.as_bytes(), body, open, close);
     }
@@ -337,20 +393,6 @@ fn nested_comment_end(bytes: &[u8], body: usize, open: &str, close: &str) -> usi
         }
     }
     bytes.len()
-}
-
-/// `#` mid-word is shell's `$#` or a YAML `a#b` value, `//` after a colon
-/// is a URL scheme (an unquoted SCSS `url(http://...)`), and Ruby's
-/// `=begin` away from a line start is an assignment (`a =begin_at`); none
-/// of them starts a comment.
-fn opens_comment(bytes: &[u8], i: usize, marker: &str) -> bool {
-    let before = i.checked_sub(1).map(|p| bytes[p]);
-    match marker {
-        "#" => before.is_none_or(|b| b.is_ascii_whitespace()),
-        "//" => before != Some(b':'),
-        "=begin" => before.is_none_or(|b| b == b'\n'),
-        _ => true,
-    }
 }
 
 fn token_at(source: &str, i: usize, lexicon: &Lexicon) -> (usize, LeafClass, Shape) {
@@ -389,9 +431,11 @@ fn punctuation(b: u8) -> Option<Shape> {
 fn string_end(bytes: &[u8], i: usize, lexicon: &Lexicon) -> usize {
     let quote = bytes[i];
     if lexicon.triple_quotes.contains(&quote) && bytes[i..].starts_with(&[quote; 3]) {
-        let body = &bytes[i + 3..];
-        let close = body.windows(3).position(|w| w == [quote; 3]);
-        return close.map_or(bytes.len(), |c| i + 3 + c + 3);
+        let raw = lexicon
+            .raw_triples
+            .iter()
+            .any(|prefix| bytes[..i].ends_with(prefix.as_bytes()));
+        return triple_end(bytes, i, raw);
     }
     let mut j = i + 1;
     while j < bytes.len() && bytes[j] != quote && bytes[j] != b'\n' {
@@ -401,6 +445,18 @@ fn string_end(bytes: &[u8], i: usize, lexicon: &Lexicon) -> usize {
         Some(&b) if b == quote => j + 1,
         _ => j.min(bytes.len()),
     }
+}
+
+fn triple_end(bytes: &[u8], i: usize, raw: bool) -> usize {
+    let close = [bytes[i]; 3];
+    let mut j = i + 3;
+    while j < bytes.len() {
+        if bytes[j..].starts_with(&close) {
+            return j + 3;
+        }
+        j += if bytes[j] == b'\\' && !raw { 2 } else { 1 };
+    }
+    bytes.len()
 }
 
 fn word_end(bytes: &[u8], i: usize, number: bool, primes: bool) -> usize {
@@ -472,12 +528,16 @@ struct Block {
     depth: u32,
     braced: bool,
     scope: Option<u32>,
+    /// The nearest scope at or above this block. Kept here because every
+    /// statement asks, and walking the stack each time is quadratic in
+    /// nesting depth.
+    enclosing: Option<u32>,
 }
 
 struct Builder<'a> {
     source: &'a str,
     strict: bool,
-    ignore_case: bool,
+    lexicon: &'a Lexicon,
     lang_seed: u64,
     leaves: Vec<Leaf>,
     nodes: Vec<Frag>,
@@ -488,18 +548,18 @@ struct Builder<'a> {
 }
 
 impl<'a> Builder<'a> {
-    fn new(source: &'a str, strict: bool, ignore_case: bool, lang_seed: u64) -> Self {
+    fn new(source: &'a str, strict: bool, lexicon: &'a Lexicon, lang_seed: u64) -> Self {
         Self {
             source,
             strict,
-            ignore_case,
+            lexicon,
             lang_seed,
             leaves: Vec::new(),
             nodes: Vec::new(),
             seqs: Seqs::default(),
             scopes: Vec::new(),
             scope_spans: Vec::new(),
-            blocks: vec![Block::new(false, None, lang_seed)],
+            blocks: vec![Block::new(false, None, None, lang_seed)],
         }
     }
 
@@ -594,7 +654,7 @@ impl<'a> Builder<'a> {
     }
 
     fn folded<'t>(&self, text: &'t [u8]) -> Cow<'t, [u8]> {
-        if self.ignore_case && text.iter().any(u8::is_ascii_uppercase) {
+        if self.lexicon.ignore_case && text.iter().any(u8::is_ascii_uppercase) {
             Cow::Owned(text.to_ascii_lowercase())
         } else {
             Cow::Borrowed(text)
@@ -604,7 +664,8 @@ impl<'a> Builder<'a> {
     fn open_block(&mut self, tok: &Tok) {
         let scope = self.open_scope();
         self.push_leaf(tok);
-        let block = Block::new(true, scope, self.lang_seed);
+        let enclosing = scope.or(self.top().enclosing);
+        let block = Block::new(true, scope, enclosing, self.lang_seed);
         self.blocks.push(block);
     }
 
@@ -656,13 +717,18 @@ impl<'a> Builder<'a> {
         };
         let (word, next) = (self.leaf_text(first), self.leaf_text(second));
         DIRECTIVE_NOISE.contains(&(word, next))
-            || find_word(NOISE_HEADS, word, self.ignore_case)
-                .is_some_and(|head| self.imports(stmt, head, leaves))
+            || find_word(
+                self.lexicon.import_heads,
+                self.hyphenated(leaves, 0),
+                self.lexicon.ignore_case,
+            )
+            .is_some_and(|head| head.contains('-') || self.imports(stmt, head, leaves))
     }
 
     /// Whether a statement opening with a head word is an import: what it
     /// brings in has to come next. `include:`, `package =`, `part->a` and
-    /// `require(a > 0, "x")` use the word as a key, a name or a function.
+    /// `require(a > 0, "x")` use the word as a key, a name or a function, and
+    /// SQL's `USE AS c` is a column: `use` never brings in a keyword.
     fn imports(&self, stmt: &Stmt, head: &str, leaves: &[Leaf]) -> bool {
         let next = &leaves[1];
         let named = next.class == LeafClass::Literal
@@ -670,22 +736,46 @@ impl<'a> Builder<'a> {
         if named {
             // `library L { ... }` and `package p { ... }` hold code; every
             // other head with braces lists names (`import a.{b, c}`).
-            return !(stmt.closed_block && matches!(head, "library" | "package"));
+            let definition = stmt.closed_block && matches!(head, "library" | "package");
+            return !definition && !(head == "use" && next.class == LeafClass::Other);
         }
-        NOISE_OPENERS.contains(&(head, self.leaf_text(next))) || self.is_load_call(head, leaves)
+        self.lexicon
+            .import_openers
+            .contains(&(head, self.leaf_text(next)))
+            || self.is_load_call(head, leaves)
     }
 
-    /// `require("socket")` and R's `library(dplyr)` import through a call
-    /// taking only what they load. A name passes for `library` alone:
-    /// Solidity's `require(ok)` is a check.
+    /// `require("socket")` imports through a call taking only what it loads.
+    /// Heads the language lists import whatever their arguments.
     fn is_load_call(&self, head: &str, leaves: &[Leaf]) -> bool {
+        if self.lexicon.load_calls.contains(&head) {
+            return self.is_whole_call(leaves);
+        }
         let [_, open, arg, close, rest @ ..] = leaves else {
             return false;
         };
         self.leaf_text(open) == "("
             && self.leaf_text(close) == ")"
             && rest.len() <= 1
-            && (arg.class == LeafClass::Literal || head == "library")
+            && arg.class == LeafClass::Literal
+    }
+
+    /// Whether the parenthesis after the head closes at the statement's end,
+    /// so `library(a)$b` stays an expression.
+    fn is_whole_call(&self, leaves: &[Leaf]) -> bool {
+        let mut depth = 0;
+        for (i, leaf) in leaves.iter().enumerate().skip(1) {
+            match self.leaf_text(leaf) {
+                "(" => depth += 1,
+                ")" => depth -= 1,
+                _ => {}
+            }
+            if depth == 0 {
+                let rest = &leaves[i + 1..];
+                return rest.is_empty() || matches!(rest, [l] if self.leaf_text(l) == ";");
+            }
+        }
+        false
     }
 
     fn leaf_text(&self, leaf: &Leaf) -> &'a str {
@@ -736,9 +826,10 @@ impl<'a> Builder<'a> {
     fn open_scope(&mut self) -> Option<u32> {
         let name = self.header_name()?;
         let start = self.top().stmt.as_ref()?.start;
-        let qualified = match self.blocks.iter().rev().find_map(|b| b.scope) {
-            Some(parent) => format!("{}.{name}", self.scopes[parent as usize]),
-            None => name.to_string(),
+        let parent = self.top().enclosing.map(|p| &self.scopes[p as usize]);
+        let qualified = match parent {
+            Some(parent) if parent.len() < MAX_QUALIFIED_SCOPE => format!("{parent}.{name}"),
+            _ => name.to_string(),
         };
         self.scopes.push(qualified);
         self.scope_spans.push((start, self.source.len() as u32));
@@ -755,9 +846,8 @@ impl<'a> Builder<'a> {
             leaf_end: self.leaves.len() as u32,
             scope: self
                 .blocks
-                .iter()
-                .rev()
-                .find_map(|b| b.scope)
+                .last()
+                .and_then(|b| b.enclosing)
                 .unwrap_or(NO_SCOPE),
         }
     }
@@ -790,7 +880,7 @@ fn first_name(header: &[Leaf]) -> Option<usize> {
 }
 
 impl Block {
-    fn new(braced: bool, scope: Option<u32>, lang_seed: u64) -> Self {
+    fn new(braced: bool, scope: Option<u32>, enclosing: Option<u32>, lang_seed: u64) -> Self {
         Self {
             elems: Vec::new(),
             hash: seed(lang_seed, 1),
@@ -798,6 +888,7 @@ impl Block {
             depth: 0,
             braced,
             scope,
+            enclosing,
         }
     }
 }

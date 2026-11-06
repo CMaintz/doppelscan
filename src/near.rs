@@ -156,13 +156,19 @@ fn similar_classes(
     pairs
 }
 
-/// Whether some copy of one class sits clear of some copy of the other.
-/// Checked after scoring, because it walks copies. First copies alone would
-/// not do: they depend on which file sorts first, and the two classes can
-/// be nested there and still be a real pair elsewhere.
+/// Whether both classes exist in their own right. One whose every copy sits
+/// inside the other is that code, however many files the pair is copied
+/// to, and pairing them would let the wrapper replace it in a group. Each
+/// copy of a wrapper brings its own inner copy, so a single nested copy
+/// proves nothing: the inner class may also stand alone, which makes a real
+/// pair. Judging all copies keeps the answer independent of file order.
+/// Checked after scoring, because it walks copies.
 fn apart(a: &[Unit], b: &[Unit]) -> bool {
-    let clear = |x: &Unit, y: &Unit| !nested(x, y) && !nested(y, x);
-    a.iter().any(|x| b.iter().any(|y| clear(x, y)))
+    !all_inside(a, b) && !all_inside(b, a)
+}
+
+fn all_inside(inner: &[Unit], outer: &[Unit]) -> bool {
+    inner.iter().all(|i| outer.iter().any(|o| nested(i, o)))
 }
 
 fn tokens(files: &[Arc<FileIndex>], unit: &Unit) -> Vec<u32> {
@@ -368,8 +374,8 @@ fn clusters(classes: &[Vec<Unit>], edges: &[(u32, u32, f32)]) -> Vec<RawNear> {
         .collect()
 }
 
-/// Two classes need only one pair of copies clear of each other to match,
-/// so another copy can sit inside a member; it is the same code twice.
+/// A class with a copy standing alone can also have one inside a member,
+/// which is the same code twice.
 fn expand(classes: &[Vec<Unit>], ids: &[u32], similarity: f32) -> RawNear {
     let all: Vec<Unit> = ids
         .iter()

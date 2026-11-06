@@ -9,15 +9,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::detect::RawGroup;
 use crate::engine::ScanOptions;
-use crate::lang::{LANGS, Syntax};
+use crate::lang::LANGS;
 use crate::report::{Analysis, fingerprint};
 
 pub const DEFAULT_FILE: &str = ".doppelscan-baseline.json";
-/// Version 2 lists the languages it covers even when none were named:
-/// version 1 stored none, which then meant every language the binary knew,
-/// so a release adding languages failed every check on their existing
-/// duplication.
-const VERSION: u32 = 2;
+/// Bumped whenever fingerprints change, since an older file's entries would
+/// then match nothing and unchanged code would read as new. Version 3 follows
+/// language and lexer changes. Version 2 lists the languages it covers even
+/// when none were named: version 1 stored none, which then meant every
+/// language the binary knew, so a release adding languages failed every check
+/// on their existing duplication.
+const VERSION: u32 = 3;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Baseline {
@@ -136,11 +138,15 @@ impl Baseline {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading baseline {}", path.display()))?;
-        let mut baseline: Self = serde_json::from_str(&text)
+        let baseline: Self = serde_json::from_str(&text)
             .with_context(|| format!("parsing baseline {}", path.display()))?;
-        if baseline.version == 1 {
-            baseline.upgrade_from_v1();
-        }
+        anyhow::ensure!(
+            baseline.version >= VERSION,
+            "baseline {} has version {}, whose fingerprints this doppelscan does not produce; \
+             write it again with `doppelscan baseline`",
+            path.display(),
+            baseline.version
+        );
         anyhow::ensure!(
             baseline.version == VERSION,
             "baseline {} has version {}; this doppelscan reads version {VERSION}",
@@ -148,19 +154,6 @@ impl Baseline {
             baseline.version
         );
         Ok(baseline)
-    }
-
-    /// Version 1 baselines predate languages read without a grammar, so
-    /// "all languages" meant the grammar ones.
-    fn upgrade_from_v1(&mut self) {
-        if self.settings.languages.is_empty() {
-            self.settings.languages = LANGS
-                .iter()
-                .filter(|l| matches!(l.syntax, Syntax::Tree(_)))
-                .map(|l| l.name.to_string())
-                .collect();
-        }
-        self.version = VERSION;
     }
 
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
@@ -178,11 +171,11 @@ impl Baseline {
     /// The entries still needed to excuse `now`, with counts lowered and
     /// places cut to what remains. Never adds an entry, a place or a copy,
     /// so pruning cannot accept new duplication. `now` is a scan of `scope`;
-    /// entries it cannot see all of are kept as they are.
+    /// a partial one keeps every entry as it is.
     pub fn pruned(&self, now: &Analysis, scope: &Scope) -> Self {
         let found = now.groups.iter().chain(&now.accepted);
         let current: Vec<Entry> = found.map(|group| entry(now, group)).collect();
-        let judged = |e: &Entry| match scope.sees_all_of(e) {
+        let judged = |e: &Entry| match scope.sees_all() {
             true => e.pruned(&current),
             false => Some(e.clone()),
         };
@@ -206,34 +199,27 @@ impl Baseline {
     }
 }
 
-/// The part of a baseline's directory one scan covers. The default is all
+/// How much of a baseline's directory one scan covers. The default is all
 /// of it.
 #[derive(Debug, Clone, Default)]
 pub struct Scope {
-    within: String,
+    partial: bool,
 }
 
 impl Scope {
-    /// `path` is a directory or file, relative to the baseline's directory.
+    /// `path` is a directory or file relative to the baseline's directory,
+    /// empty for the directory itself.
     pub fn of(path: &str) -> Self {
         Self {
-            within: path.trim_end_matches('/').to_string(),
+            partial: !path.is_empty(),
         }
     }
 
-    /// A partial scan has to see every copy to judge an entry: a copy left
-    /// alone inside it forms no group there, so it would look deleted while
-    /// its twin outside lives on. Fewer places than copies means a copy has
-    /// moved somewhere no place records, which may be outside.
-    fn sees_all_of(&self, e: &Entry) -> bool {
-        self.within.is_empty()
-            || (e.places.len() >= e.occurrences && e.places.iter().all(|p| self.holds(p)))
-    }
-
-    fn holds(&self, place: &str) -> bool {
-        place
-            .strip_prefix(&self.within)
-            .is_some_and(|rest| rest.is_empty() || rest.starts_with(['/', '#']))
+    /// Only a scan of everything can judge an entry. Recorded places go
+    /// stale as soon as a copy moves, so from inside part of the tree a
+    /// copy that moved out looks exactly like one that was deleted.
+    fn sees_all(&self) -> bool {
+        !self.partial
     }
 }
 
@@ -241,19 +227,21 @@ impl Entry {
     /// What the groups found now still need of this entry, or `None` when
     /// they need none of it.
     fn pruned(&self, current: &[Entry]) -> Option<Self> {
-        let same: Vec<&Entry> = current
+        let is_same = |c: &Entry| c.fingerprint == self.fingerprint;
+        let excused = current
             .iter()
-            .filter(|c| c.fingerprint == self.fingerprint)
-            .collect();
-        if let Some(remaining) = same.iter().map(|c| c.occurrences).max() {
-            return Some(self.narrowed(self.places_held_by(&same), remaining));
+            .filter(|c| is_same(c) || is_shrunk_from(c, self));
+        let excused: Vec<&Entry> = excused.collect();
+        if excused.is_empty() {
+            return None;
         }
-        let shrunk: Vec<&Entry> = current.iter().filter(|c| is_shrunk_from(c, self)).collect();
-        (!shrunk.is_empty()).then(|| {
-            let places = self.places_held_by(&shrunk);
-            let remaining = places.len();
-            self.narrowed(places, remaining)
-        })
+        // Same and shrunk groups both lean on this entry at once, so what
+        // only one of them holds has to stay; moved copies hold no place,
+        // which is why the same group's own count also counts.
+        let places = self.places_held_by(&excused);
+        let copies = excused.iter().filter(|c| is_same(c)).map(|c| c.occurrences);
+        let remaining = copies.max().unwrap_or(0).max(places.len());
+        Some(self.narrowed(places, remaining))
     }
 
     fn narrowed(&self, places: Vec<String>, remaining: usize) -> Self {

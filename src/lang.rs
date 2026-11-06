@@ -63,11 +63,47 @@ pub struct Lexicon {
     /// Quote bytes that open a multi-line string when tripled. Everywhere
     /// else `''''` is a quoted quote or adjacent empty strings.
     pub triple_quotes: &'static [u8],
+    /// What comes just before a triple quote that takes no escapes, so a
+    /// backslash cannot stop the closing quotes. An empty entry means none
+    /// of the language's triple quotes do.
+    pub raw_triples: &'static [&'static str],
     /// `'` may continue a name (`foldl'`) rather than end it.
     pub primes: bool,
+    /// Dashes inside a longer symbol are an operator, not a comment.
+    pub dash_operators: bool,
     /// Block comments nest, so only the matching closer ends one.
     pub nested_comments: bool,
+    /// Words that open an import. A language that ignores case lists its
+    /// own: the shared list, folded, would take SQL's `PART` column for
+    /// Dart's `part`.
+    pub import_heads: &'static [&'static str],
+    /// Punctuation that can follow a head in a real import, for the heads
+    /// with such a form (`import { a } from`, T-SQL's `use [db]`). `use[0]`
+    /// indexes an array everywhere else.
+    pub import_openers: &'static [(&'static str, &'static str)],
+    /// Heads that import when called, whatever the arguments: R's
+    /// `require(dplyr)` loads a package where Solidity's `require(ok)` is a
+    /// check, and the two read the same.
+    pub load_calls: &'static [&'static str],
 }
+
+/// Ruby's embedded document. `=end` only closes at a line start, hence its
+/// newline; `=begin` has the same rule, in the lexer's `opens_comment`.
+pub const EMBDOC: (&str, &str) = ("=begin", "\n=end");
+
+/// Statements that only bring names in: never a clone, and they break a
+/// run like the grammar path's import nodes.
+const IMPORT_HEADS: &[&str] = &[
+    "import",
+    "include",
+    "using",
+    "require",
+    "require_relative",
+    "use",
+    "package",
+    "library",
+    "part",
+];
 
 const PLAIN: Lexicon = Lexicon {
     line_comments: &[],
@@ -75,8 +111,13 @@ const PLAIN: Lexicon = Lexicon {
     keywords: &[],
     ignore_case: false,
     triple_quotes: &[],
+    raw_triples: &[],
     primes: false,
+    dash_operators: false,
     nested_comments: false,
+    import_heads: IMPORT_HEADS,
+    import_openers: &[("import", "{"), ("import", "*")],
+    load_calls: &[],
 };
 const C_LIKE: Lexicon = Lexicon {
     line_comments: &["//"],
@@ -227,21 +268,37 @@ pub static LANGS: LazyLock<Vec<Lang>> = LazyLock::new(|| {
             "scala",
             Lexicon {
                 triple_quotes: b"\"",
+                raw_triples: &[""],
                 nested_comments: true,
                 ..C_LIKE
             },
             &["scala", "sc"],
         ),
-        Lang::tokens("groovy", C_LIKE_TRIPLE, &["groovy", "gradle"]),
+        Lang::tokens(
+            "groovy",
+            Lexicon {
+                load_calls: &["include"],
+                ..C_LIKE_TRIPLE
+            },
+            &["groovy", "gradle"],
+        ),
         Lang::tokens(
             "dart",
             Lexicon {
+                raw_triples: &["r"],
                 nested_comments: true,
                 ..C_LIKE_TRIPLE
             },
             &["dart"],
         ),
-        Lang::tokens("zig", C_LIKE, &["zig"]),
+        Lang::tokens(
+            "zig",
+            Lexicon {
+                block_comments: &[],
+                ..C_LIKE
+            },
+            &["zig"],
+        ),
         Lang::tokens("solidity", C_LIKE, &["sol"]),
         Lang::tokens("protobuf", C_LIKE, &["proto"]),
         Lang::tokens("scss", C_LIKE, &["scss", "less"]),
@@ -265,6 +322,8 @@ pub static LANGS: LazyLock<Vec<Lang>> = LazyLock::new(|| {
                     "left", "right", "inner", "outer", "exists", "between", "like",
                 ],
                 ignore_case: true,
+                import_heads: &["use"],
+                import_openers: &[("use", "[")],
                 ..PLAIN
             },
             &["sql"],
@@ -285,6 +344,7 @@ pub static LANGS: LazyLock<Vec<Lang>> = LazyLock::new(|| {
                 block_comments: &[("{-", "-}")],
                 triple_quotes: b"\"",
                 primes: true,
+                dash_operators: true,
                 nested_comments: true,
                 ..PLAIN
             },
@@ -294,9 +354,7 @@ pub static LANGS: LazyLock<Vec<Lang>> = LazyLock::new(|| {
             "ruby",
             Lexicon {
                 line_comments: &["#"],
-                // `=end` only closes at a line start, hence its newline;
-                // `=begin` has the same rule, in `opens_comment`.
-                block_comments: &[("=begin", "\n=end")],
+                block_comments: &[EMBDOC],
                 ..PLAIN
             },
             &["rb", "rake"],
@@ -308,16 +366,25 @@ pub static LANGS: LazyLock<Vec<Lang>> = LazyLock::new(|| {
                 line_comments: &["#"],
                 block_comments: &[("<#", "#>")],
                 ignore_case: true,
+                import_heads: &["using", "import-module"],
                 ..PLAIN
             },
             &["ps1", "psm1"],
         ),
         Lang::tokens("perl", HASH, &["pl", "pm"]),
-        Lang::tokens("r", HASH, &["r"]),
+        Lang::tokens(
+            "r",
+            Lexicon {
+                load_calls: &["library", "require"],
+                ..HASH
+            },
+            &["r"],
+        ),
         Lang::tokens(
             "elixir",
             Lexicon {
                 triple_quotes: b"\"'",
+                raw_triples: &["~S", "~R"],
                 ..HASH
             },
             &["ex", "exs"],

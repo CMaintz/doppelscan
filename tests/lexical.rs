@@ -374,11 +374,6 @@ fn similar_code_is_found_in_an_opt_in_language() {
 #[test]
 fn a_baseline_records_the_languages_it_covered() {
     let dir = temp_dir("baseline-langs");
-    let file = dir.join("old.json");
-    let v1 = r#"{"version":1,"settings":{"min_tokens":50,"strict":false,"max_param_density":8.0,"languages":[],"exclude":[]},"groups":[]}"#;
-    std::fs::write(&file, v1).unwrap();
-    let old = Baseline::load(&file).unwrap().settings.languages;
-    assert!(old.contains(&"java".to_string()) && !old.contains(&"c-family".to_string()));
     let empty = Engine::default()
         .scan(&dir, &ScanOptions::default())
         .unwrap();
@@ -396,6 +391,74 @@ fn data_files_are_not_scanned() {
 }
 
 const CALLS: &str = "call(alpha, beta, gamma, delta)\ncall(alpha, beta, gamma, delta, 1)\ncall(alpha, beta, gamma, delta, 2)\n";
+
+// Catches `-->` hiding the code after it: dashes in a longer symbol are a
+// Haskell operator, not a comment.
+#[test]
+fn a_haskell_operator_with_dashes_is_code() {
+    let code = "go1 a b = a --> call(alpha, beta, gamma, delta, epsilon, zeta, eta, theta)\ngo2 a b = a |-- call(alpha, beta, gamma, delta, epsilon, zeta, eta, theta)\n";
+    let found = scan(&[("a.hs", code), ("b.hs", code)]);
+    assert_eq!(found.groups.len(), 1);
+}
+
+// Catches the operator rule eating real comments, in Haskell or in a
+// language where any `--` opens one: the bracket on these lines would
+// fold the code below into one statement.
+#[test]
+fn dashes_still_open_comments() {
+    let cases = [
+        ("hs", "--- heading (\n"),
+        ("hs", "--note (\n"),
+        ("sql", "--> note (\n"),
+        ("lua", "--> note (\n"),
+    ];
+    for (ext, comment) in cases {
+        let (a, b) = (format!("a.{ext}"), format!("b.{ext}"));
+        let with = format!("{comment}{CALLS}");
+        assert_eq!(
+            start_lines(&scan(&[(&a, &with), (&b, CALLS)])),
+            [2, 1],
+            "{comment}"
+        );
+    }
+}
+
+// Catches an escaped quote closing a triple-quoted string: the leftover
+// `"""` would open another one and swallow the rest of the file.
+#[test]
+fn an_escaped_quote_does_not_close_a_triple_quoted_string() {
+    for ext in ["dart", "groovy", "ex", "elm", "hs"] {
+        let (a, b) = (format!("a.{ext}"), format!("b.{ext}"));
+        let with = format!("s = \"\"\"a\\\"\"\"b\"\"\"\n{CALLS}");
+        assert_eq!(
+            start_lines(&scan(&[(&a, &with), (&b, CALLS)])),
+            [2, 1],
+            "{ext}"
+        );
+    }
+}
+
+// Catches escapes being honoured where a string has none: Scala's triple
+// quotes, Dart's `r` and Elixir's `~S` keep a backslash as text, so the
+// closing quotes after one really close it.
+#[test]
+fn a_raw_triple_quoted_string_closes_after_a_backslash() {
+    let cases = [
+        ("scala", "\"\"\"a\\\"\"\""),
+        ("dart", "r\"\"\"a\\\"\"\""),
+        ("dart", "r'''a\\'''"),
+        ("ex", "~S\"\"\"a\\\"\"\""),
+    ];
+    for (ext, string) in cases {
+        let (a, b) = (format!("a.{ext}"), format!("b.{ext}"));
+        let with = format!("s = {string}\n{CALLS}");
+        assert_eq!(
+            start_lines(&scan(&[(&a, &with), (&b, CALLS)])),
+            [2, 1],
+            "{string}"
+        );
+    }
+}
 
 // Catches `''''` opening a triple-quoted string where the language has
 // none: a quoted quote would swallow the rest of the file as one literal.
@@ -465,6 +528,14 @@ fn a_head_word_used_as_a_name_is_not_an_import() {
             "c",
             "    part[0] = one;\n    part[1] = two;\n    part[2] = three;\n    part[3] = four;\n",
         ),
+        (
+            "c",
+            "    library(alpha);\n    library(beta);\n    library(gamma);\n    library(delta);\n    library(epsilon);\n",
+        ),
+        (
+            "c",
+            "    use[0] = one;\n    use[1] = two;\n    use[2] = three;\n    use[3] = four;\n",
+        ),
     ];
     for (ext, run) in cases {
         let (a, b) = (format!("a.{ext}"), format!("b.{ext}"));
@@ -496,7 +567,12 @@ fn every_import_form_stays_noise() {
         ("cpp", "using namespace std;"),
         ("lua", "require(\"socket\")"),
         ("r", "library(dplyr)"),
+        ("r", "require(dplyr)"),
+        ("r", "library(purrr, quietly = TRUE)"),
+        ("gradle", "include(\":a\", \":b\")"),
         ("sql", "use [shop]"),
+        ("ps1", "Import-Module Baz"),
+        ("ps1", "import-module foo"),
     ];
     for (ext, line) in cases {
         let (a, b) = (format!("a.{ext}"), format!("b.{ext}"));
@@ -607,6 +683,54 @@ fn ruby_block_comments_run_from_line_start_to_line_start() {
     assert_eq!(start_lines(&found), [5, 1]);
 }
 
+// Catches `=end` closing on a prefix: `=ending` is text inside the comment,
+// so the bracket after it would become code and fold the file together.
+#[test]
+fn ruby_end_needs_a_word_boundary() {
+    let a = format!("=begin\ntext\n=ending is not end\nmore (\n=end\n{RUBY_METHOD}");
+    let found = scan(&[("a.rb", &a), ("b.rb", RUBY_METHOD)]);
+    assert_eq!(start_lines(&found), [6, 1]);
+}
+
+// Catches the rest of the `=end` line being read as code: Ruby ignores it,
+// and the bracket there would swallow the method below.
+#[test]
+fn ruby_ignores_the_rest_of_the_end_line() {
+    let a = format!("=begin\ndocs\n=end of docs (\n{RUBY_METHOD}");
+    let found = scan(&[("a.rb", &a), ("b.rb", RUBY_METHOD)]);
+    assert_eq!(start_lines(&found), [4, 1]);
+}
+
+// Catches `=begin` opening on a prefix: `=beginning` at a line start is an
+// assignment's value, and treating it as a comment hid the code up to the
+// next `=end`.
+#[test]
+fn ruby_begin_needs_a_word_boundary() {
+    let a = format!("value\n=beginning\n{RUBY_METHOD}=end\n");
+    let found = scan(&[("a.rb", &a), ("b.rb", RUBY_METHOD)]);
+    assert_eq!(start_lines(&found), [3, 1]);
+}
+
+// Catches an unclosed `=begin` running to the end of the file: Ruby rejects
+// one, so it can only be text, such as a line of a heredoc.
+#[test]
+fn an_unclosed_ruby_begin_is_not_a_comment() {
+    let a = format!("def one(x)\n  doc = <<~TXT\n=begin\n  TXT\n  x + 1\nend\n{RUBY_METHOD}");
+    let found = scan(&[("a.rb", &a), ("b.rb", RUBY_METHOD)]);
+    assert_eq!(start_lines(&found), [7, 1]);
+}
+
+const ZIG_FUNCTION: &str = "pub fn two(a: u32, b: u32) u32 {\n    const v = a + b;\n    const w = v * 2;\n    const z = w + a + b;\n    return z + v + w;\n}\n";
+
+// Catches Zig getting a block comment it does not have: `/*` in a multiline
+// string would swallow the rest of the file.
+#[test]
+fn zig_has_no_block_comments() {
+    let a = format!("const q =\n    \\\\/* a header\n;\n{ZIG_FUNCTION}");
+    let found = scan(&[("a.zig", &a), ("b.zig", ZIG_FUNCTION)]);
+    assert_eq!(start_lines(&found), [4, 1]);
+}
+
 const CASED_QUERY: &str = "SELECT Id, Total, Status\nFROM Orders\nWHERE Total > 10\nORDER BY Id DESC;\nDELETE FROM Audit WHERE Age > 30;\n";
 
 // Catches keywords being hashed with their case: SQL's `SELECT` and
@@ -647,6 +771,28 @@ fn case_alone_is_not_a_parameter() {
     assert!(groups(&found)[0].parameters.is_empty());
 }
 
+// Catches parameters being keyed by exact spelling: `Total`, `TOTAL` and
+// `total` are one name to SQL, so a helper takes one parameter, not three.
+#[test]
+fn spellings_of_one_name_are_one_parameter() {
+    let a = "SELECT Total, price, qty, region, name FROM Orders WHERE TOTAL > 1 AND price > 2 AND qty > 3 AND total < 100;\n";
+    let b = "select Amount, price, qty, region, name from Orders where Amount > 1 and price > 2 and qty > 3 and Amount < 100;\n";
+    let g = &groups(&scan(&[("a.sql", a), ("b.sql", b)]))[0];
+    assert_eq!(g.parameters.len(), 1, "{:?}", g.parameters);
+    assert_eq!(g.parameters[0].uses, 3);
+    assert_eq!(g.parameters[0].values, ["Total", "Amount"]);
+}
+
+// Catches folding reaching a language where case tells names apart: in C
+// `Total` and `TOTAL` can be different variables, so they stay two.
+#[test]
+fn case_separates_parameters_where_the_language_does() {
+    let a = "void f(void) {\n    use(Total, price, qty, region, name, 1);\n    use(TOTAL, price, qty, region, name, 2);\n}\n";
+    let b = a.replace("Total", "Amount").replace("TOTAL", "Amount");
+    let g = &groups(&scan(&[("a.c", a), ("b.c", &b)]))[0];
+    assert_eq!(g.parameters.len(), 2, "{:?}", g.parameters);
+}
+
 // Catches case folding reaching literals: `'Paid'` and `'paid'` are
 // different values even in SQL, so they stay a parameter.
 #[test]
@@ -667,6 +813,28 @@ fn imports_match_in_any_case_where_keywords_do() {
         let found = scan(&[("a.sql", &imports), ("b.sql", &imports)]);
         assert!(found.groups.is_empty(), "{line}: {:?}", found.groups);
     }
+}
+
+// Catches the shared head list folding with the language's case: `PART`
+// and `LIBRARY` are columns to SQL, which has no such statements, and
+// dropping them hid a repeated SELECT list. Lowercase spellings are no
+// different, and `use` followed by a keyword is not `USE shop`.
+#[test]
+fn sql_columns_named_like_import_heads_are_code() {
+    let upper = "SELECT\n  PART AS P1,\n  LIBRARY AS L1,\n  a AS b,\n  USE AS c,\n  d AS e,\n  f AS g\nFROM\n  t;\n";
+    for list in [upper.to_string(), upper.to_lowercase()] {
+        let found = scan(&[("a.sql", &list), ("b.sql", &list)]);
+        assert_eq!(found.groups.len(), 1, "{list}");
+    }
+}
+
+// Catches `Import-Module` being matched on its first word: `Import-Csv`
+// and its kin load data, so a repeated block of them is code.
+#[test]
+fn only_import_module_is_a_powershell_import() {
+    let block = "Import-Csv $path\n".repeat(12);
+    let found = scan(&[("a.ps1", &block), ("b.ps1", &block)]);
+    assert_eq!(found.groups.len(), 1);
 }
 
 // Catches a nested block comment closing at its first closer: what is
@@ -726,6 +894,49 @@ fn a_block_is_labelled_with_its_whole_name() {
         let scope = groups(&found)[0].occurrences[0].scope.clone();
         assert_eq!(scope.as_deref(), Some(name), "{header}");
     }
+}
+
+// Catches a block losing the scope around it: a nested name would forget
+// its parent, and an unnamed block such as an `if` would label nothing.
+#[test]
+fn a_nested_block_keeps_the_scope_around_it() {
+    let run = "open_log(path, mode, flags);\nwrite_header(log, version, stamp);\nflush_all(log, buffers, count);\n";
+    let cases = [
+        (
+            "class Outer {\nvoid inner() {\nint x = 1;\n@\n}\n}\n",
+            "Outer.inner",
+        ),
+        (
+            "void total() {\nif (ready) {\nint x = 1;\n@\n}\n}\n",
+            "total",
+        ),
+        (
+            "class Outer {\nif (ready) {\nvoid inner() {\nint x = 1;\n@\n}\n}\n}\n",
+            "Outer.inner",
+        ),
+    ];
+    for (shell, name) in cases {
+        let one = shell.replace('@', run);
+        let two = format!("other() {{\nchar *s = name(3, 4);\n{run}}}\n");
+        let found = scan(&[("a.c", &one), ("b.c", &two)]);
+        let scope = groups(&found)[0].occurrences[0].scope.clone();
+        assert_eq!(scope.as_deref(), Some(name), "{shell}");
+    }
+}
+
+// Catches labels growing with nesting: each holds its parents' names, so
+// labels for a file of `f {` lines take memory quadratic in its size, and
+// a megabyte of them would need tens of gigabytes.
+#[test]
+fn a_deeply_nested_label_stays_short() {
+    let depth = 3000;
+    let open = "f {\n".repeat(depth);
+    let close = "}\n".repeat(depth);
+    let a = format!("{open}int x = 1;\n{CALLS}{close}");
+    let b = format!("other() {{\nchar *s = name(3, 4);\n{CALLS}}}\n");
+    let found = scan(&[("a.c", &a), ("b.c", &b)]);
+    let scope = groups(&found)[0].occurrences[0].scope.clone().unwrap();
+    assert!(scope.len() < 1100, "{} bytes", scope.len());
 }
 
 // Catches hyphen joining reaching past a name: `a->b` is an access, so the

@@ -195,7 +195,8 @@ fingerprint, so the clone comes back for another look; renaming things or
 changing literals does not, unless the scan is `strict`, where they do and
 fingerprints differ from a non-strict scan's. Hex case does not matter. Its
 baseline entry, if it has one, stays until the code is gone. `near` groups
-have no fingerprint and are not affected.
+have no fingerprint and are not affected, and `similar` still reports a match
+on an accepted group, under `accepted` in its JSON.
 
 ## Gating new duplication
 
@@ -234,9 +235,10 @@ functions it sits in, not line numbers. Moving or renaming known duplication
 passes, and so does shrinking it within the same functions; another copy, a
 clone that grew, or a new top-level clone does not. `--prune` only drops
 entries and forgets copies that are gone, so it cannot accept new
-duplication. Checking or pruning a subdirectory only judges entries with
-every copy inside it; the others stay as they are until a scan of the whole
-directory the baseline describes.
+duplication. Only a scan of the whole directory the baseline describes can
+tell that code is gone: from a subdirectory, a copy that moved out looks
+deleted. So `check` on a subdirectory reports no entries as resolved, and
+`--prune` on one changes nothing and says so.
 
 `check` reads the working tree, staged or not, so as a pre-commit hook it
 also sees unstaged edits. Commit the baseline with LF line endings
@@ -336,9 +338,9 @@ skips because they cannot be extracted as one unit.
 - Token-level languages split statements by layout, so the same code
   formatted differently (a statement broken over lines outside brackets)
   can fail to match.
-- A baseline written by an older release (version 1) records only the
-  grammar languages, so `check` asks for it to be written again with
-  `doppelscan baseline` before comparing.
+- Fingerprints can change between releases, so a baseline written by an
+  older release (version 2 or below) is refused, and `check` asks for it to
+  be written again with `doppelscan baseline` before comparing.
 
 ## Contributing
 

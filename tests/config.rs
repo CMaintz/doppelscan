@@ -462,6 +462,51 @@ fn at_refuses_a_location_it_cannot_answer_for() {
     }
 }
 
+// Catches `at` normalising only the query: a file named on the command line
+// keeps the path as typed, so the same `./` spelling never matched itself.
+#[test]
+fn at_finds_a_file_scanned_by_its_own_spelling() {
+    let dir = repo_with_config("at-named", "min-tokens = 20\n");
+    for (query, scanned) in [
+        ("./src/a.ts", "./src/a.ts"),
+        ("src/a.ts", "./src/a.ts"),
+        ("./src/a.ts", "src/a.ts"),
+    ] {
+        let (code, _, err) = run(&dir, &["at", query, scanned]);
+        assert_eq!(code, 0, "{query} {scanned}: {err}");
+    }
+}
+
+// Catches the error sending the reader back to "as results show it": `check
+// src` shows paths from the baseline's directory, and those are the paths
+// that fail here, so the message has to name what does work.
+#[test]
+fn at_says_paths_are_relative_to_the_scanned_directory() {
+    let dir = repo_with_config("at-relative", "min-tokens = 20\n");
+    let (code, _, err) = run(&dir, &["at", "src/a.ts", "src"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("relative to the scanned directory"), "{err}");
+    assert_eq!(run(&dir, &["at", "a.ts", "src"]).0, 0);
+}
+
+// Catches a JSON reader seeing `summary.groups: 1` over an empty `groups`
+// with nothing to say where the group went: accepted matches only reached
+// stderr, which a script does not parse.
+#[test]
+fn similar_json_lists_accepted_matches() {
+    let dir = repo_with_config("similar-json", "min-tokens = 20\n");
+    let fingerprint = only_fingerprint(&dir);
+    let config = format!("[[accept]]\nfingerprint = \"{fingerprint}\"\nreason = \"x\"\n");
+    std::fs::write(dir.join(".doppelscan.toml"), config).unwrap();
+    std::fs::write(dir.join("snippet.ts"), CLONE).unwrap();
+    let args = ["similar", "--file", "snippet.ts", "src", "--format", "json"];
+    let (code, out, err) = run(&dir, &args);
+    assert_eq!(code, 0, "{err}");
+    let report: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(report["groups"], json!([]), "{out}");
+    assert_eq!(report["accepted"][0]["fingerprint"], fingerprint, "{out}");
+}
+
 // Catches the CLI and the MCP server drifting to different snippet minimums:
 // the same snippet is then found by one and missed by the other.
 #[test]
@@ -611,6 +656,34 @@ fn init_does_not_count_generated_files() {
     assert_eq!(run(&dir, &["init"]).0, 0);
     let written = std::fs::read_to_string(dir.join(".doppelscan.toml")).unwrap();
     assert!(written.contains("(2 files)"), "{written}");
+}
+
+// Catches init counting a file past the size cap, which no scan reads.
+#[test]
+fn init_does_not_count_files_over_the_size_cap() {
+    let dir = repo_with_config("init-big", "");
+    std::fs::remove_file(dir.join(".doppelscan.toml")).unwrap();
+    write(
+        &dir,
+        "src/c.ts",
+        &format!("{CLONE}{}", "//\n".repeat(500_000)),
+    );
+    assert_eq!(run(&dir, &["init"]).0, 0);
+    let written = std::fs::read_to_string(dir.join(".doppelscan.toml")).unwrap();
+    assert!(written.contains("(2 files)"), "{written}");
+}
+
+// Catches init judging raw text: CRs push line length past the minified
+// limit, so a CRLF file a scan reads would be left out of the count.
+#[test]
+fn init_judges_a_crlf_file_as_a_scan_does() {
+    let dir = repo_with_config("init-crlf", "");
+    std::fs::remove_file(dir.join(".doppelscan.toml")).unwrap();
+    let line = format!("// {}\r\n", "x".repeat(296));
+    write(&dir, "src/c.ts", &line.repeat(20));
+    assert_eq!(run(&dir, &["init"]).0, 0);
+    let written = std::fs::read_to_string(dir.join(".doppelscan.toml")).unwrap();
+    assert!(written.contains("(3 files)"), "{written}");
 }
 
 // Catches init reading configs below it: it describes the whole tree, and
@@ -775,6 +848,7 @@ fn a_config_elsewhere_warns_that_its_patterns_do_not_reach() {
     assert_eq!(code, 0, "{err}");
     assert_eq!(err.matches("warning:").count(), 1, "{err}");
     assert!(err.contains("shared.toml"), "{err}");
+    assert!(!err.contains(r"\\?\"), "{err}");
     let args = ["check", ".", "--base", "HEAD", "--config"];
     git(&repo, &["add", "."]);
     git(&repo, &["commit", "-qm", "pair"]);
@@ -795,6 +869,19 @@ fn a_config_that_reaches_or_has_no_patterns_does_not_warn() {
     write(&repo, "gate.toml", "exclude = [\"*.ts\"]\n");
     let (_, _, err) = run(&repo, &["src", "--config", "gate.toml"]);
     assert!(!err.contains("warning:"), "{err}");
+}
+
+// Catches the warning asking only whether the config sits above the scan:
+// one below it reaches part of the tree, so "they match nothing" is false.
+#[test]
+fn a_config_inside_the_scan_does_not_warn() {
+    let repo = repo_with_config("outside-inner", "min-tokens = 20\n");
+    write(&repo, "pkg/shared.toml", "exclude = [\"b.ts\"]\n");
+    write(&repo, "pkg/b.ts", CLONE);
+    let (code, out, err) = run(&repo, &[".", "--config", "pkg/shared.toml"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!err.contains("warning:"), "{err}");
+    assert!(!out.contains("pkg/b.ts"), "{out}");
 }
 
 // Catches accepting a fingerprint only in the case doppelscan prints it,

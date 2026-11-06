@@ -357,6 +357,9 @@ fn numeric_arguments_that_cannot_be_used_are_tool_errors() {
         ("duplicates_at", "start_line", json!(4294967297u64)),
         ("duplicates_at", "end_line", json!(4294967297u64)),
         ("duplicates_at", "end_line", json!(1.5)),
+        ("find_duplicates", "limit", json!(-1.0)),
+        ("find_duplicates", "limit", json!(1e30)),
+        ("find_duplicates", "min_tokens", json!(4294967296.0)),
         ("find_duplicates", "min_tokens", json!(4294967296u64)),
         ("find_duplicates", "min_tokens", json!("20")),
         ("find_duplicates", "limit", json!("5")),
@@ -377,6 +380,79 @@ fn numeric_arguments_that_cannot_be_used_are_tool_errors() {
         assert_eq!(reply["result"]["isError"], true, "{name} {key}={value}");
         assert!(tool_text(&reply).contains(key), "{reply}");
     }
+}
+
+/// Runs `during` while reading `path` fails, leaving its mtime and size alone.
+#[cfg(windows)]
+fn while_unreadable(path: &Path, during: impl FnOnce()) {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    let mut open = std::fs::OpenOptions::new();
+    let _lock = open.read(true).share_mode(0).open(path).unwrap();
+    during();
+}
+
+#[cfg(unix)]
+fn while_unreadable(path: &Path, during: impl FnOnce()) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let original = std::fs::metadata(path).unwrap().permissions();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    during();
+    std::fs::set_permissions(path, original).unwrap();
+}
+
+// Catches caching a failed read under the file's stamp: the server would
+// keep a file that was only locked for a moment missing until its mtime
+// changed.
+#[test]
+fn a_file_that_could_not_be_read_is_read_again() {
+    let (engine, root) = (Engine::default(), fixture("locked"));
+    let args = json!({ "path": "src", "min_tokens": 20 });
+    while_unreadable(&root.join("src/b.ts"), || {
+        tool(&engine, &root, "find_duplicates", args.clone());
+    });
+    let reply = tool(&engine, &root, "find_duplicates", args);
+    assert!(tool_text(&reply).contains("src/b.ts"), "{reply}");
+}
+
+// Catches reading integers with `as_u64` alone: JSON Schema counts 5.0 as
+// an integer, and clients that hold every number as a double send it so.
+#[test]
+fn a_number_with_no_fraction_is_an_integer() {
+    let (engine, root) = (Engine::default(), fixture("zero-fraction"));
+    let cases = [
+        ("find_duplicates", "limit", json!(5.0)),
+        ("find_duplicates", "offset", json!(0.0)),
+        ("find_duplicates", "min_tokens", json!(20.0)),
+        ("duplicates_at", "start_line", json!(2.0)),
+    ];
+    for (name, key, value) in cases {
+        let mut args = json!({ "path": "src", "file": "src/a.ts", "min_tokens": 20 });
+        args[key] = value.clone();
+        let reply = tool(&engine, &root, name, args);
+        assert_eq!(reply["result"]["isError"], false, "{name} {key}={value}");
+        assert!(tool_text(&reply).contains("src/b.ts"), "{reply}");
+    }
+}
+
+// Catches get_settings explaining a scan that could not run: an agent would
+// read default settings for a path that does not exist.
+#[test]
+fn get_settings_fails_where_a_scan_would() {
+    let (engine, root) = (Engine::default(), fixture("settings-fail"));
+    std::fs::create_dir_all(root.join("broken")).unwrap();
+    std::fs::write(root.join("broken/.doppelscan.toml"), "nonsense = 1\n").unwrap();
+    let cases = [
+        json!({ "path": "nonexistent" }),
+        json!({ "exclude": ["["] }),
+        json!({ "languages": ["bogus"] }),
+        json!({}),
+    ];
+    for args in cases {
+        let reply = tool(&engine, &root, "get_settings", args.clone());
+        assert_eq!(reply["result"]["isError"], true, "{args}");
+    }
+    let fine = tool(&engine, &root, "get_settings", json!({ "path": "src" }));
+    assert_eq!(fine["result"]["isError"], false, "{fine}");
 }
 
 // Catches an explicit null, how some clients spell "unset", being refused

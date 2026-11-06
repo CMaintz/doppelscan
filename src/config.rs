@@ -224,13 +224,14 @@ impl Config {
         })
     }
 
-    /// Whether a config lists path patterns anchored at a directory that
-    /// does not contain `scanned` (canonical).
+    /// Whether a config lists path patterns anchored at a directory sharing
+    /// no files with `scanned` (canonical). Either may contain the other: a
+    /// directory below the scan still matches that part of it.
     pub fn has_patterns_outside(&self, scanned: &Path) -> bool {
         let rules = self.rules.iter().chain(&self.near_rules);
         rules
             .filter(|r| !r.exclude.is_empty() || !r.include.is_empty())
-            .any(|r| !scanned.starts_with(&r.dir))
+            .any(|r| !scanned.starts_with(&r.dir) && !r.dir.starts_with(scanned))
     }
 
     /// As `options`, with `[near] exclude` added.

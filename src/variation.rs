@@ -57,8 +57,10 @@ pub struct Variations {
     param_offsets: Vec<Vec<usize>>,
 }
 
-struct Slot {
+struct Slot<'f> {
     first: usize,
+    /// As first spelled: the key may be folded, and shows no real spelling.
+    texts: Vec<&'f str>,
     offsets: Vec<usize>,
     roles: Vec<Role>,
     literal: bool,
@@ -72,6 +74,7 @@ struct Binding<'a> {
 }
 
 type Differing<'f> = Vec<(usize, Vec<&'f str>)>;
+type Slots<'f> = FxHashMap<(Vec<String>, Option<usize>), Slot<'f>>;
 
 pub fn analyze(group: &RawGroup, files: &[impl AsRef<FileIndex>]) -> Variations {
     let columns: Vec<Vec<u32>> = group
@@ -84,21 +87,48 @@ pub fn analyze(group: &RawGroup, files: &[impl AsRef<FileIndex>]) -> Variations 
     let scope_at = |offset: usize| first.scope_of(columns[0][offset]);
     let differing = differing(group, files, &columns);
     let bindings = bindings(&differing, leaf_at, scope_at);
-    let mut slots: FxHashMap<(Vec<&str>, Option<usize>), Slot> = FxHashMap::default();
+    let folds = LANGS[first.lang].ignores_case();
+    let mut slots: Slots = FxHashMap::default();
     for (offset, texts) in &differing {
         let leaf = leaf_at(*offset);
         let owner = owner(&bindings, texts, columns[0][*offset], leaf.role);
-        let slot = slots.entry((texts.clone(), owner)).or_insert(Slot {
-            first: *offset,
+        let key = slot_key(texts, folds && leaf.class != LeafClass::Literal);
+        let slot = slots.entry((key, owner));
+        slot.or_insert_with(|| Slot::new(*offset, texts))
+            .add(*offset, leaf);
+    }
+    split(slots)
+}
+
+impl<'f> Slot<'f> {
+    fn new(first: usize, texts: &[&'f str]) -> Self {
+        Self {
+            first,
+            texts: texts.to_vec(),
             offsets: Vec::new(),
             roles: Vec::new(),
             literal: false,
-        });
-        slot.offsets.push(*offset);
-        slot.roles.push(leaf.role);
-        slot.literal |= leaf.class == LeafClass::Literal;
+        }
     }
-    split(slots)
+
+    fn add(&mut self, offset: usize, leaf: Leaf) {
+        self.offsets.push(offset);
+        self.roles.push(leaf.role);
+        self.literal |= leaf.class == LeafClass::Literal;
+    }
+}
+
+/// Spellings of one name share a slot in a language that ignores case, so
+/// a helper takes it once however its uses are written.
+fn slot_key(texts: &[&str], any_case: bool) -> Vec<String> {
+    let spelled = |t: &&str| {
+        if any_case {
+            t.to_ascii_lowercase()
+        } else {
+            t.to_string()
+        }
+    };
+    texts.iter().map(spelled).collect()
 }
 
 /// Offsets whose text is not the same in every occurrence, with the texts.
@@ -164,13 +194,13 @@ fn leaf_text<'f>(files: &'f [impl AsRef<FileIndex>], occ: &Occ, leaf: u32) -> &'
     file.leaf_text(&file.leaves[leaf as usize])
 }
 
-fn split(slots: FxHashMap<(Vec<&str>, Option<usize>), Slot>) -> Variations {
-    let mut ordered: Vec<_> = slots.into_iter().collect();
-    ordered.sort_by_key(|(_, s)| s.first);
+fn split(slots: Slots) -> Variations {
+    let mut ordered: Vec<_> = slots.into_values().collect();
+    ordered.sort_by_key(|s| s.first);
     let mut out = Variations::default();
-    for ((texts, _), slot) in ordered {
+    for slot in ordered {
         let variation = Variation {
-            values: texts.iter().map(|t| t.to_string()).collect(),
+            values: slot.texts.iter().map(|t| t.to_string()).collect(),
             uses: slot.offsets.len(),
             kind: kind_of(&slot),
         };
