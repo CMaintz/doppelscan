@@ -465,6 +465,10 @@ fn a_head_word_used_as_a_name_is_not_an_import() {
             "c",
             "    part[0] = one;\n    part[1] = two;\n    part[2] = three;\n    part[3] = four;\n",
         ),
+        (
+            "c",
+            "    library(alpha);\n    library(beta);\n    library(gamma);\n    library(delta);\n    library(epsilon);\n",
+        ),
     ];
     for (ext, run) in cases {
         let (a, b) = (format!("a.{ext}"), format!("b.{ext}"));
@@ -496,6 +500,9 @@ fn every_import_form_stays_noise() {
         ("cpp", "using namespace std;"),
         ("lua", "require(\"socket\")"),
         ("r", "library(dplyr)"),
+        ("r", "require(dplyr)"),
+        ("r", "library(purrr, quietly = TRUE)"),
+        ("gradle", "include(\":a\", \":b\")"),
         ("sql", "use [shop]"),
     ];
     for (ext, line) in cases {

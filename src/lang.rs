@@ -67,6 +67,10 @@ pub struct Lexicon {
     pub primes: bool,
     /// Block comments nest, so only the matching closer ends one.
     pub nested_comments: bool,
+    /// Heads that import when called, whatever the arguments: R's
+    /// `require(dplyr)` loads a package where Solidity's `require(ok)` is a
+    /// check, and the two read the same.
+    pub load_calls: &'static [&'static str],
 }
 
 const PLAIN: Lexicon = Lexicon {
@@ -77,6 +81,7 @@ const PLAIN: Lexicon = Lexicon {
     triple_quotes: &[],
     primes: false,
     nested_comments: false,
+    load_calls: &[],
 };
 const C_LIKE: Lexicon = Lexicon {
     line_comments: &["//"],
@@ -232,7 +237,14 @@ pub static LANGS: LazyLock<Vec<Lang>> = LazyLock::new(|| {
             },
             &["scala", "sc"],
         ),
-        Lang::tokens("groovy", C_LIKE_TRIPLE, &["groovy", "gradle"]),
+        Lang::tokens(
+            "groovy",
+            Lexicon {
+                load_calls: &["include"],
+                ..C_LIKE_TRIPLE
+            },
+            &["groovy", "gradle"],
+        ),
         Lang::tokens(
             "dart",
             Lexicon {
@@ -313,7 +325,14 @@ pub static LANGS: LazyLock<Vec<Lang>> = LazyLock::new(|| {
             &["ps1", "psm1"],
         ),
         Lang::tokens("perl", HASH, &["pl", "pm"]),
-        Lang::tokens("r", HASH, &["r"]),
+        Lang::tokens(
+            "r",
+            Lexicon {
+                load_calls: &["library", "require"],
+                ..HASH
+            },
+            &["r"],
+        ),
         Lang::tokens(
             "elixir",
             Lexicon {

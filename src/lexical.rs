@@ -198,7 +198,7 @@ pub fn index_tokens(
 ) -> FileIndex {
     let lang_seed = hash_bytes(LANGS[lang].name.as_bytes());
     let lines = line_starts(&source);
-    let mut builder = Builder::new(&source, strict, lexicon.ignore_case, lang_seed);
+    let mut builder = Builder::new(&source, strict, lexicon, lang_seed);
     for tok in tokenize(&source, lexicon) {
         builder.push(&tok);
     }
@@ -477,7 +477,7 @@ struct Block {
 struct Builder<'a> {
     source: &'a str,
     strict: bool,
-    ignore_case: bool,
+    lexicon: &'a Lexicon,
     lang_seed: u64,
     leaves: Vec<Leaf>,
     nodes: Vec<Frag>,
@@ -488,11 +488,11 @@ struct Builder<'a> {
 }
 
 impl<'a> Builder<'a> {
-    fn new(source: &'a str, strict: bool, ignore_case: bool, lang_seed: u64) -> Self {
+    fn new(source: &'a str, strict: bool, lexicon: &'a Lexicon, lang_seed: u64) -> Self {
         Self {
             source,
             strict,
-            ignore_case,
+            lexicon,
             lang_seed,
             leaves: Vec::new(),
             nodes: Vec::new(),
@@ -594,7 +594,7 @@ impl<'a> Builder<'a> {
     }
 
     fn folded<'t>(&self, text: &'t [u8]) -> Cow<'t, [u8]> {
-        if self.ignore_case && text.iter().any(u8::is_ascii_uppercase) {
+        if self.lexicon.ignore_case && text.iter().any(u8::is_ascii_uppercase) {
             Cow::Owned(text.to_ascii_lowercase())
         } else {
             Cow::Borrowed(text)
@@ -656,7 +656,7 @@ impl<'a> Builder<'a> {
         };
         let (word, next) = (self.leaf_text(first), self.leaf_text(second));
         DIRECTIVE_NOISE.contains(&(word, next))
-            || find_word(NOISE_HEADS, word, self.ignore_case)
+            || find_word(NOISE_HEADS, word, self.lexicon.ignore_case)
                 .is_some_and(|head| self.imports(stmt, head, leaves))
     }
 
@@ -675,17 +675,37 @@ impl<'a> Builder<'a> {
         NOISE_OPENERS.contains(&(head, self.leaf_text(next))) || self.is_load_call(head, leaves)
     }
 
-    /// `require("socket")` and R's `library(dplyr)` import through a call
-    /// taking only what they load. A name passes for `library` alone:
-    /// Solidity's `require(ok)` is a check.
+    /// `require("socket")` imports through a call taking only what it loads.
+    /// Heads the language lists import whatever their arguments.
     fn is_load_call(&self, head: &str, leaves: &[Leaf]) -> bool {
+        if self.lexicon.load_calls.contains(&head) {
+            return self.is_whole_call(leaves);
+        }
         let [_, open, arg, close, rest @ ..] = leaves else {
             return false;
         };
         self.leaf_text(open) == "("
             && self.leaf_text(close) == ")"
             && rest.len() <= 1
-            && (arg.class == LeafClass::Literal || head == "library")
+            && arg.class == LeafClass::Literal
+    }
+
+    /// Whether the parenthesis after the head closes at the statement's end,
+    /// so `library(a)$b` stays an expression.
+    fn is_whole_call(&self, leaves: &[Leaf]) -> bool {
+        let mut depth = 0;
+        for (i, leaf) in leaves.iter().enumerate().skip(1) {
+            match self.leaf_text(leaf) {
+                "(" => depth += 1,
+                ")" => depth -= 1,
+                _ => {}
+            }
+            if depth == 0 {
+                let rest = &leaves[i + 1..];
+                return rest.is_empty() || matches!(rest, [l] if self.leaf_text(l) == ";");
+            }
+        }
+        false
     }
 
     fn leaf_text(&self, leaf: &Leaf) -> &'a str {
