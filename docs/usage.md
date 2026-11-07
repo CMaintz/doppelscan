@@ -36,7 +36,7 @@ types, JSON and lock files among them, are not scanned.
 ```sh
 doppelscan                         # scan ., top 20 groups
 doppelscan src --limit 0           # every group
-doppelscan show b4a94232d76e       # one group in full, with template
+doppelscan show rink-point-city-roast   # one group in full, with template
 doppelscan at src/user.ts:40-60    # clones touching these lines
 doppelscan similar --lang ts < snippet.ts   # does this code already exist?
 doppelscan near --similarity 0.8   # functions that are copies with edits
@@ -44,6 +44,16 @@ doppelscan --format json           # machine-readable
 doppelscan init                    # write a commented .doppelscan.toml
 doppelscan config                  # the settings in use, and where each comes from
 ```
+
+Listings label a group with a four-word name derived from its fingerprint,
+the content hash that identifies it. The name needs no state and stays the
+same as long as the fingerprint does. `show` takes the name, the fingerprint
+or a unique prefix of it, or the number from a listing, and prints the
+fingerprint too. JSON has both, as `name` and `fingerprint`; baselines and
+`accept` use the fingerprint alone. Two groups can share a name, about 0.005
+pairs expected in a scan of 100,000 groups. `show` then exits with an error
+listing their fingerprints rather than picking one. `near` groups have only a
+number.
 
 `near` finds what the exact scan cannot: functions that match except for
 statements added, removed or changed. Each copy lists the lines where it
@@ -150,8 +160,8 @@ other copies still are when two or more are left. This applies to `near`,
 `check` and the MCP tools too.
 
 Where a comment can't go (vendored or generated code you don't edit), a
-clone can be accepted by its fingerprint, the hex id shown in brackets, in
-`.doppelscan.toml`:
+clone can be accepted by its fingerprint, the hex id `doppelscan show` prints,
+in `.doppelscan.toml`. The readable name in brackets does not work here:
 
 ```toml
 [[accept]]
@@ -250,7 +260,7 @@ the 2026-07-28 protocol and the older `initialize` handshake.
 | Tool | Use |
 | --- | --- |
 | `find_duplicates` | Survey a repo for extraction candidates, best first. Paginated. |
-| `get_duplicate_group` | One group's parameters, renames and helper template; optionally every occurrence's code. |
+| `get_duplicate_group` | One group by name, fingerprint or id: parameters, renames and helper template; optionally every occurrence's code. |
 | `duplicates_at` | Is the code at this file/line range duplicated elsewhere? |
 | `find_similar_code` | Before writing a helper: does equivalent code already exist? |
 | `check_new_duplicates` | After writing code: did this change duplicate anything? |

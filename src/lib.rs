@@ -17,6 +17,7 @@ pub mod index;
 pub mod lang;
 mod lexical;
 pub mod mcp;
+mod names;
 pub mod near;
 pub mod report;
 pub mod settings;

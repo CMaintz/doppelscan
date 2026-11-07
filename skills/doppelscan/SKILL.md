@@ -11,7 +11,7 @@ literals differ, and tells you what a shared helper would take as arguments.
 Use the MCP tools when available (`find_duplicates`, `get_duplicate_group`,
 `find_near_duplicates`, `duplicates_at`, `find_similar_code`,
 `check_new_duplicates`). Otherwise use the CLI: `doppelscan`,
-`doppelscan show <fingerprint>`, `doppelscan near`,
+`doppelscan show <name>`, `doppelscan near`,
 `doppelscan at <file>:<from>-<to>`, `doppelscan similar --lang <ext> < snippet`,
 `doppelscan check`.
 
@@ -38,7 +38,7 @@ Use the MCP tools when available (`find_duplicates`, `get_duplicate_group`,
 ## Extracting a helper
 
 1. `find_duplicates` (or `duplicates_at` for the code you are touching). Refer
-   back to a group by its fingerprint, with the same `path` and `min_tokens`.
+   back to a group by its name or fingerprint, with the same `path` and `min_tokens`.
 2. `get_duplicate_group` for the template. Add `include_code` if occurrences
    sit in different contexts (return values, surrounding variables) you need
    to see.
@@ -60,7 +60,7 @@ read each copy's `differs` lines (code that copy has and another lacks; a
 copy without any only lacks code), then merge the copies into one function
 and turn each difference into a parameter, an option or a callback. If the
 differences are most of the function, leave the copies alone. Near groups
-have no fingerprint and are not covered by `check_new_duplicates`.
+have no name or fingerprint and are not covered by `check_new_duplicates`.
 
 ## Before writing new code
 

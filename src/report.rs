@@ -10,6 +10,7 @@ use serde::Serialize;
 use crate::detect::{Occ, RawGroup};
 use crate::engine::{Against, Check, score};
 use crate::index::FileIndex;
+use crate::names;
 use crate::variation::{Kind, Variation, analyze, template};
 
 /// Ranked clone groups over a set of indexed files.
@@ -37,6 +38,9 @@ pub struct Group {
     pub id: usize,
     /// Stable across runs while the duplicated code is unchanged.
     pub fingerprint: String,
+    /// Readable form of the fingerprint for people. Two groups can share one,
+    /// so anything stored or compared should use the fingerprint.
+    pub name: String,
     /// "node" for one syntax node, "run" for consecutive siblings
     /// (statements, members or arguments).
     pub kind: &'static str,
@@ -78,6 +82,7 @@ impl Analysis {
         Group {
             id,
             fingerprint: fingerprint(raw),
+            name: name(raw),
             kind: if raw.run_len == 1 { "node" } else { "run" },
             elements: raw.run_len,
             tokens: raw.tokens,
@@ -101,11 +106,16 @@ impl Analysis {
         }
     }
 
-    /// Accepts a numeric id, a whole fingerprint, or a unique fingerprint
-    /// prefix. A shorter all-digit value is only ever an id: otherwise a
-    /// mistyped id would land on whichever fingerprint starts with it.
+    /// Accepts a numeric id, a group name, a whole fingerprint, or a unique
+    /// fingerprint prefix. A shorter all-digit value is only ever an id:
+    /// otherwise a mistyped id would land on whichever fingerprint starts
+    /// with it. A name shared by two groups resolves to neither; `unresolved`
+    /// then lists them.
     pub fn resolve(&self, key: &str) -> Option<usize> {
-        let key = key.trim().trim_start_matches('#').to_ascii_lowercase();
+        let key = lookup_key(key);
+        if key.contains('-') {
+            return only(self.named(&key).into_iter());
+        }
         let digits = key.bytes().all(|b| b.is_ascii_digit());
         if let Ok(id) = key.parse::<usize>()
             && digits
@@ -119,18 +129,43 @@ impl Analysis {
     }
 
     fn by_fingerprint(&self, prefix: &str) -> Option<usize> {
-        let mut hits = (1..=self.groups.len())
-            .filter(|&i| fingerprint(&self.groups[i - 1]).starts_with(prefix));
-        let first = hits.next()?;
-        hits.next().is_none().then_some(first)
+        only(
+            (1..=self.groups.len())
+                .filter(|&i| fingerprint(&self.groups[i - 1]).starts_with(prefix)),
+        )
+    }
+
+    /// Ids of the groups called exactly `key`. Done per lookup rather than
+    /// kept in an index, so scans that never look up a name pay nothing.
+    fn named(&self, key: &str) -> Vec<usize> {
+        (1..=self.groups.len())
+            .filter(|&i| name(&self.groups[i - 1]) == key)
+            .collect()
     }
 
     /// Why `resolve` found nothing for `key`.
     pub fn unresolved(&self, key: &str) -> String {
+        let shared = self.named(&lookup_key(key));
+        if shared.len() > 1 {
+            return self.shared_name(key, &shared);
+        }
         format!(
-            "no clone group {key:?}: ids run 1..={}, and a fingerprint prefix needs at least \
-             {MIN_FINGERPRINT_PREFIX} characters, one of them a letter, and must match one group",
+            "no clone group {key:?}: ids run 1..={}, a name must match exactly, and a fingerprint \
+             prefix needs at least {MIN_FINGERPRINT_PREFIX} characters, one of them a letter, and \
+             must match one group",
             self.groups.len()
+        )
+    }
+
+    fn shared_name(&self, key: &str, ids: &[usize]) -> String {
+        let candidates: Vec<String> = ids
+            .iter()
+            .map(|&id| format!("#{id} [{}]", fingerprint(&self.groups[id - 1])))
+            .collect();
+        format!(
+            "{} clone groups are named {key:?}; pick one by fingerprint: {}",
+            ids.len(),
+            candidates.join(", ")
         )
     }
 
@@ -183,13 +218,31 @@ impl Analysis {
     }
 }
 
+fn lookup_key(key: &str) -> String {
+    key.trim().trim_start_matches('#').to_ascii_lowercase()
+}
+
+/// The sole item, or None when there are none or several.
+fn only(mut hits: impl Iterator<Item = usize>) -> Option<usize> {
+    let first = hits.next()?;
+    hits.next().is_none().then_some(first)
+}
+
 fn plain_path(path: &str) -> String {
     path.replace('\\', "/").trim_start_matches("./").to_string()
 }
 
 /// Stable across runs while the duplicated code keeps its structure.
 pub fn fingerprint(group: &RawGroup) -> String {
-    format!("{:012x}", group.hash >> 16)
+    format!("{:012x}", fingerprint_bits(group))
+}
+
+pub fn name(group: &RawGroup) -> String {
+    names::name(fingerprint_bits(group))
+}
+
+fn fingerprint_bits(group: &RawGroup) -> u64 {
+    group.hash >> 16
 }
 
 const FINGERPRINT_CHARS: usize = 12;
@@ -217,23 +270,11 @@ const BRIEF_OCCURRENCES: usize = 5;
 const BRIEF_VALUES: usize = 4;
 
 pub fn render_group(g: &Group, detail: Detail) -> String {
-    let mut out = String::new();
-    let shape = if g.kind == "node" {
-        String::new()
-    } else {
-        format!(", run of {}", g.elements)
-    };
-    let _ = writeln!(
-        out,
-        "#{} [{}] x{} | {} tokens, {} lines{} | score {}",
-        g.id,
-        g.fingerprint,
-        g.occurrences.len(),
-        g.tokens,
-        g.lines,
-        shape,
-        g.score
-    );
+    let mut out = render_header(g);
+    // Listings leave it out, but `accept` and scripts need it for this group.
+    if detail == Detail::Full {
+        let _ = writeln!(out, "  fingerprint: {}", g.fingerprint);
+    }
     render_locations(&mut out, &g.occurrences, detail);
     render_variations(&mut out, "params", &g.parameters, true, detail);
     render_variations(&mut out, "renames", &g.renames, false, detail);
@@ -242,6 +283,25 @@ pub fn render_group(g: &Group, detail: Detail) -> String {
         let _ = writeln!(out, "  template:\n{}", indent(t));
     }
     out
+}
+
+fn render_header(g: &Group) -> String {
+    let shape = if g.kind == "node" {
+        String::new()
+    } else {
+        format!(", run of {}", g.elements)
+    };
+    format!(
+        "#{} [{}] x{} | {} tokens, {} lines{} | score {}
+",
+        g.id,
+        g.name,
+        g.occurrences.len(),
+        g.tokens,
+        g.lines,
+        shape,
+        g.score
+    )
 }
 
 fn render_locations(out: &mut String, locations: &[Location], detail: Detail) {
@@ -373,7 +433,7 @@ pub fn render_check(check: &Check, against: &Against) -> String {
     } else {
         format!(
             "{} new clone group(s) against {what}. Reuse or extract the existing \
-             code; `doppelscan show <fingerprint>` gives the helper template.\n",
+             code; `doppelscan show <name>` gives the helper template.\n",
             check.new.len()
         )
     };
