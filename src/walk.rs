@@ -83,15 +83,41 @@ const GENERATED_MARKERS: &[&str] = &[
 pub const MAX_FILE_BYTES: u64 = 1 << 20;
 
 /// The most a file can be on disk and still fit `MAX_FILE_BYTES` once
-/// normalised: CRLF to LF at most halves it. Larger is rejected unread.
-pub const MAX_RAW_BYTES: u64 = 2 * MAX_FILE_BYTES;
+/// normalised: UTF-16 to UTF-8 at most halves it, and CRLF to LF again.
+/// Larger is rejected unread.
+pub const MAX_RAW_BYTES: u64 = 4 * MAX_FILE_BYTES;
 
-/// Source bytes as a scan reads them, or `None` when they are not UTF-8 or
-/// too large. The cap applies after normalising because raw size depends on
-/// the checkout: an LF blob and its CRLF working copy must be judged alike.
+/// Source bytes as a scan reads them, or `None` when they are binary or too
+/// large. The cap applies after normalising because raw size depends on the
+/// checkout: an LF blob and its CRLF working copy must be judged alike.
 pub fn scannable_text(bytes: Vec<u8>) -> Option<String> {
-    let text = normalize_line_endings(String::from_utf8(bytes).ok()?);
+    let text = match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(not_utf8) => decode_other(not_utf8.as_bytes())?,
+    };
+    let text = normalize_line_endings(text);
     (text.len() as u64 <= MAX_FILE_BYTES).then_some(text)
+}
+
+/// Bytes that are not UTF-8: UTF-16 when a BOM says so, otherwise some legacy
+/// encoding, whose non-ASCII bytes matter too little to guess at. Code and
+/// line ends are ASCII in all of those, so structure and line numbers survive
+/// the replacement characters. A NUL then means binary, which is also what
+/// UTF-16 without a BOM reads as.
+fn decode_other(bytes: &[u8]) -> Option<String> {
+    let text = match bytes {
+        [0xFF, 0xFE, rest @ ..] => decode_utf16(rest, u16::from_le_bytes),
+        [0xFE, 0xFF, rest @ ..] => decode_utf16(rest, u16::from_be_bytes),
+        _ => String::from_utf8_lossy(bytes).into_owned(),
+    };
+    (!text.contains('\0')).then_some(text)
+}
+
+fn decode_utf16(bytes: &[u8], unit: fn([u8; 2]) -> u16) -> String {
+    let units = bytes.as_chunks().0.iter().map(|&pair| unit(pair));
+    char::decode_utf16(units)
+        .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER))
+        .collect()
 }
 
 /// A source file a walk turned up.

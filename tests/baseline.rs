@@ -1133,3 +1133,21 @@ fn an_uncommitted_case_only_rename_is_not_new() {
     let (code, out) = doppelscan(&dir, &["check", "--base", "HEAD"]);
     assert_eq!(code, 0, "{out}");
 }
+
+// Catches `check` not seeing what a scan sees: a new copy holding one
+// Latin-1 byte passed as "No new duplication".
+#[test]
+fn check_flags_a_new_copy_that_is_not_utf8() {
+    let dir = std::env::temp_dir().join(format!("doppelscan-latin1-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    git(&dir, &["init", "-q"]);
+    std::fs::write(dir.join("a.ts"), SUM_TOTALS).unwrap();
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-qm", "init"]);
+    let mut copy = b"// caf\xe9\n".to_vec();
+    copy.extend_from_slice(SUM_TOTALS.as_bytes());
+    std::fs::write(dir.join("b.ts"), copy).unwrap();
+    let (code, out) = doppelscan(&dir, &["check", "--base", "HEAD"]);
+    assert_eq!(code, 1, "{out}");
+}

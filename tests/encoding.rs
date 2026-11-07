@@ -86,3 +86,78 @@ fn a_stray_cr_in_an_lf_file_does_not_shift_lines() {
     );
     assert_eq!(lines_in(&found, "b.ts"), [(2, 10)]);
 }
+
+fn utf16(text: &str, unit: fn(u16) -> [u8; 2]) -> Vec<u8> {
+    let units = "\u{feff}".encode_utf16().chain(text.encode_utf16());
+    units.flat_map(unit).collect()
+}
+
+// Catches a non-UTF-8 byte dropping the whole file: its clones then pass
+// `check` as "No new duplication".
+#[test]
+fn a_file_with_a_latin1_byte_is_scanned_with_real_lines() {
+    let mut copy = b"// caf\xe9\n// second line\n".to_vec();
+    copy.extend_from_slice(CODE.as_bytes());
+    let found = scan_bytes(
+        "latin1",
+        &[("a.ts", CODE.as_bytes().to_vec()), ("b.ts", copy)],
+    );
+    assert_eq!(lines_in(&found, "b.ts"), [(3, 11)]);
+}
+
+// Catches decoding only one byte order, or keeping the BOM as a character.
+// UTF-16 is what Windows tools write, so CRLF comes with it.
+#[test]
+fn utf16_files_with_a_bom_are_scanned_with_real_lines() {
+    let crlf = format!("// one\n{CODE}").replace('\n', "\r\n");
+    let found = scan_bytes(
+        "utf16",
+        &[
+            ("a.ts", CODE.as_bytes().to_vec()),
+            ("le.ts", utf16(&crlf, u16::to_le_bytes)),
+            ("be.ts", utf16(&crlf, u16::to_be_bytes)),
+        ],
+    );
+    assert_eq!(lines_in(&found, "le.ts"), [(2, 10)]);
+    assert_eq!(lines_in(&found, "be.ts"), [(2, 10)]);
+}
+
+// Catches the lossy path swallowing binary: a file that is not UTF-8 and
+// holds a NUL is no text in any encoding read here, and that goes for a
+// UTF-32 file too, whose BOM starts like UTF-16's.
+#[test]
+fn binary_stays_skipped() {
+    let mut binary = b"\x89PNG\r\n\x1a\n\x00\x00\xff".to_vec();
+    binary.extend_from_slice(CODE.as_bytes());
+    let utf32: Vec<u8> = "\u{feff}"
+        .chars()
+        .chain(CODE.chars())
+        .flat_map(|c| (c as u32).to_le_bytes())
+        .collect();
+    let found = scan_bytes(
+        "binary",
+        &[
+            ("a.ts", CODE.as_bytes().to_vec()),
+            ("binary.ts", binary),
+            ("utf32.ts", utf32),
+        ],
+    );
+    let scanned: Vec<&str> = found.files.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(scanned, ["a.ts"]);
+}
+
+// Catches the read limit still assuming one byte per character: a UTF-16
+// CRLF file is four bytes per ASCII line end and two per character, so one
+// well under the text cap is over twice it on disk.
+#[test]
+fn the_read_limit_leaves_room_for_utf16_with_crlf() {
+    let text = format!("{CODE}{}", "//\n".repeat(300_000)).replace('\n', "\r\n");
+    let found = scan_bytes(
+        "utf16-size",
+        &[
+            ("a.ts", CODE.as_bytes().to_vec()),
+            ("b.ts", utf16(&text, u16::to_le_bytes)),
+        ],
+    );
+    assert_eq!(lines_in(&found, "b.ts"), [(1, 9)]);
+}
