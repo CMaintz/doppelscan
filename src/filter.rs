@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use anyhow::Context;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use ignore::overrides::{Override, OverrideBuilder};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::config::{FILE, nested_rules};
 use crate::engine::ScanOptions;
@@ -48,6 +48,10 @@ struct Nested {
     near: bool,
     skip: bool,
     found: RwLock<FxHashMap<PathBuf, Compiled>>,
+    /// Directories already looked in. A revision's listing asks about every
+    /// parent of every file, and on Windows the stat each ask would cost
+    /// outweighs reading the blobs.
+    visited: Mutex<FxHashSet<PathBuf>>,
     error: Mutex<Option<anyhow::Error>>,
 }
 
@@ -161,9 +165,17 @@ impl PathFilter {
                 .any(|a| found.get(a).is_some_and(&test))
     }
 
+    fn first_visit(&self, dir: &Path) -> bool {
+        let mut visited = self.nested.visited.lock().unwrap();
+        visited.insert(dir.to_path_buf())
+    }
+
     fn read_config_in(&self, dir: &Path) {
+        if self.nested.skip || !self.first_visit(dir) {
+            return;
+        }
         let file = dir.join(FILE);
-        if self.nested.skip || !file.is_file() {
+        if !file.is_file() {
             return;
         }
         match nested_rules(&file, self.nested.near).and_then(|r| compile(&r)) {

@@ -952,3 +952,71 @@ fn only_an_unspaced_hyphen_joins_a_name() {
         assert_eq!(scope.as_deref(), Some(name), "{header}");
     }
 }
+
+// Catches a hyphen chain being walked whole: every block of a statement
+// repeats the walk and stores the result as a label, so a long chain before
+// many blocks costs time and memory quadratic in the file.
+#[test]
+fn a_hyphen_chain_label_stays_short() {
+    let chain = vec!["a"; 3000].join("-");
+    let a = format!("{chain} {{\nint x = 1;\n{CALLS}}}\n");
+    let b = format!("other() {{\nchar *s = name(3, 4);\n{CALLS}}}\n");
+    let found = scan(&[("a.c", &a), ("b.c", &b)]);
+    let scope = groups(&found)[0].occurrences[0].scope.clone().unwrap();
+    assert!(scope.len() < 1100, "{} bytes", scope.len());
+}
+
+fn ruby_statements() -> String {
+    (0..12)
+        .map(|i| format!("total_{i} = compute(alpha, beta, {i}) + other(gamma)\n"))
+        .collect()
+}
+
+// Catches an opener in a regex holding the bracket depth above zero: no
+// line end splits again, so everything after it is one statement and
+// nothing below it can match.
+#[test]
+fn a_bracket_in_a_regex_does_not_blind_the_lines_below() {
+    let run = ruby_statements();
+    for line in [
+        r#"x = s.gsub(/\(/, "")"#,
+        r"y = %w(a b",
+        r"z = line =~ /\[/",
+    ] {
+        let a = format!("{line}\n{run}");
+        let b = format!("w = 1\n{}", run.replace("alpha", "delta"));
+        let found = scan(&[("a.rb", &a), ("b.rb", &b)]);
+        assert_eq!(found.groups.len(), 1, "{line}");
+        assert_eq!(start_lines(&found), [2, 2], "{line}");
+    }
+}
+
+// Catches pairing brackets across blocks, which the depth count does not
+// do: the `)` of the second sub would close the `(` of the first and leave
+// that sub one statement. The stray openers are Perl substitutions.
+#[test]
+fn half_a_bracket_stays_inside_its_block() {
+    let run: String = (0..6)
+        .map(|i| format!("    my $v{i} = compute($alpha, $beta, {i}) + other($gamma);\n"))
+        .collect();
+    let a =
+        format!("sub one {{\n    $s =~ s/\\(//;\n{run}}}\nsub two {{\n    $s =~ s/\\)//;\n}}\n");
+    let b = format!("sub three {{\n    my $w = 1;\n{run}}}\n");
+    let found = scan(&[("a.pl", &a), ("b.pl", &b)]);
+    assert_eq!(found.groups.len(), 1);
+}
+
+// Catches recovery reaching balanced brackets: a wrapped call at the same
+// indentation is one statement, here twelve calls rather than thirty-six
+// fragments.
+#[test]
+fn a_closed_bracket_keeps_its_lines_in_one_statement() {
+    let run: String = (0..12)
+        .map(|i| format!("run(alpha, {i},\nbeta,\ngamma, other(delta), third(epsilon))\n"))
+        .collect();
+    let found = scan(&[
+        ("a.rb", &format!("x = 1\n{run}")),
+        ("b.rb", &format!("y = f(1)\n{run}")),
+    ]);
+    assert_eq!(groups(&found)[0].elements, 12);
+}

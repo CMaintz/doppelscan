@@ -58,7 +58,7 @@ pub fn read_revision(
         .filter(|l| !l.submodule)
         .filter_map(|l| {
             let lang = accept_listed(Path::new(&l.path), &filter, &opts.languages)?;
-            let wanted = !dir.join(&l.path).exists() || scanned.contains(&case_folded(&l.path));
+            let wanted = scanned.contains(&case_folded(&l.path)) || !dir.join(&l.path).exists();
             wanted.then_some((l, lang))
         })
         .collect();

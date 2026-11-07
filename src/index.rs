@@ -273,15 +273,19 @@ pub(crate) fn line_starts(source: &str) -> Vec<u32> {
 }
 
 /// `source` with CRLF line ends as LF, so a checkout's line endings reach
-/// no token, hash or fingerprint. Line numbers stay the same. An LF file
-/// comes back uncopied: the scan for a CR is all it pays. `index_source`
-/// applies this to everything, and readers apply it earlier for the
-/// generated-file check.
+/// no token, hash or fingerprint. Line numbers stay the same. A file with no
+/// LF at all has CR line ends, which become LF too. Elsewhere a lone CR stays:
+/// git and grep count no line there, so neither may the reported numbers. An
+/// LF file comes back uncopied: the scan for a CR is all it pays.
+/// `index_source` applies this to everything, and readers apply it earlier
+/// for the generated-file check.
 pub(crate) fn normalize_line_endings(source: String) -> String {
-    if source.contains('\r') {
+    if !source.contains('\r') {
+        source
+    } else if source.contains('\n') {
         source.replace("\r\n", "\n")
     } else {
-        source
+        source.replace('\r', "\n")
     }
 }
 

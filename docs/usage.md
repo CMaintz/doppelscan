@@ -74,6 +74,11 @@ directories (`generated`, `generated-src`, `__generated__` and the like) are
 skipped. Other
 dot-directories, such as `.github`, are scanned.
 
+Files need not be UTF-8. UTF-16 with a BOM is decoded, and any other non-UTF-8
+text is read with its non-ASCII bytes replaced, which keeps structure and line
+numbers. A non-UTF-8 file holding a NUL byte counts as binary and is skipped,
+and so is UTF-16 without a BOM.
+
 ## Configuration
 
 A `.doppelscan.toml` sets a project's defaults for the CLI and the MCP
