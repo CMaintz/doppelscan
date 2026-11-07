@@ -376,6 +376,7 @@ fn accepted(fingerprint: &str, occurrences: usize, tokens: u32, places: &[&str])
         occurrences,
         tokens,
         places: places.iter().map(|p| p.to_string()).collect(),
+        shape: String::new(),
     }
 }
 
@@ -1276,4 +1277,424 @@ fn an_uncommitted_case_only_rename_is_not_new() {
     git(&dir, &["mv", "-f", "src/a.ts", "src/A.ts"]);
     let (code, out) = doppelscan(&dir, &["check", "--base", "HEAD"]);
     assert_eq!(code, 0, "{out}");
+}
+
+// Fields of unlike shapes: more tokens than `SUM_TOTALS` as a method, and no
+// shorter run inside that recurs and surfaces as a group of its own.
+const FIELDS: &str = r#"
+  id: string = "x";
+  count: number = 1;
+  readonly flag: boolean = true;
+  private rows?: Order[] = [];
+  static limit = 10 * 2;
+  lookup: Map<string, number> = new Map();
+  pending = new Set<Order>();
+  handler = (x: number) => x + 1;
+  range: [number, number] = [0, 1];
+  label: string | null = null;
+  meta = { a: 1, b: 2 };
+  retries: number = Math.max(1, 3);
+"#;
+
+fn method(code: &str) -> String {
+    code.replace("export function ", "")
+}
+
+// `C` and `D` share the fields, and a member that differs stops anything
+// added after it from extending that run.
+fn class_c(added: &str) -> String {
+    format!("class C {{{FIELDS}  size(): number {{ return 1; }}\n{added}}}\n")
+}
+
+fn class_d(added: &str) -> String {
+    format!("class D {{{FIELDS}  label(x: boolean) {{ if (x) {{ log(x); }} }}\n{added}}}\n")
+}
+
+// Catches excusing a group for sitting inside an accepted place: the class
+// holds an accepted clone, but the method is not part of it.
+#[test]
+fn a_new_method_in_classes_sharing_an_accepted_clone_is_new() {
+    let dir = repo("new-method");
+    let foo = method(SUM_TOTALS);
+    write_all(
+        &dir,
+        &[("src/a.ts", class_c("")), ("src/b.ts", class_d(""))],
+    );
+    assert_eq!(doppelscan(&dir, &["baseline"]).0, 0);
+    assert_eq!(
+        written_entries(&dir)[0].places,
+        ["src/a.ts#C", "src/b.ts#D"]
+    );
+    assert!(written_entries(&dir)[0].tokens > 90);
+
+    write_all(
+        &dir,
+        &[("src/a.ts", class_c(&foo)), ("src/b.ts", class_d(&foo))],
+    );
+    let (code, out) = doppelscan(&dir, &["check"]);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("sumTotals"), "{out}");
+}
+
+const AUDIT_LOOP: &str = r#"
+    for (const entry of ledger.entries()) {
+        audit.record(entry.id, entry.amount, entry.currency);
+    }
+"#;
+
+fn body_with(name: &str, differs: &str, added: &str) -> String {
+    let statements = SUM_TOTALS.lines().skip(2);
+    let statements: Vec<&str> = statements.take_while(|l| !l.starts_with('}')).collect();
+    let body = statements.join("\n");
+    format!("function {name}(orders: Order[], config: Config) {{\n{body}\n{differs}\n{added}}}\n")
+}
+
+// Catches trusting an exact place: the statements are new, though the entry
+// sits at the very same functions and is larger than they are.
+#[test]
+fn new_statements_in_functions_sharing_an_accepted_clone_are_new() {
+    let side = |added| {
+        vec![
+            ("a.ts", body_with("f", "first();", added)),
+            ("b.ts", body_with("g", "if (ready) { second(1); }", added)),
+        ]
+    };
+    let base = scan(&side(""));
+    let baseline = Baseline::from_analysis(&base, &options());
+    assert_eq!(baseline.groups[0].places, ["a.ts#f", "b.ts#g"]);
+    let now = scan(&side(AUDIT_LOOP));
+    assert_eq!(now.groups.len(), 2, "the loop is a clone of its own");
+    assert!(now.groups[1].tokens <= baseline.groups[0].tokens);
+    assert_eq!(baseline.new_groups(&now).len(), 1);
+}
+
+// Catches comparing token streams with their separators: the accepted
+// whole-class clone holds the `;` between fields, the run cut from it does
+// not, and nothing was added.
+#[test]
+fn a_whole_class_shrunk_to_a_run_of_its_fields_is_not_new() {
+    let class = |name: &str, fields: &str| format!("class {name} {{{fields}}}\n");
+    let edited = FIELDS.replace("retries: number", "declare retries");
+    let base = scan(&[("a.ts", class("C", FIELDS)), ("b.ts", class("D", FIELDS))]);
+    let now = scan(&[("a.ts", class("C", FIELDS)), ("b.ts", class("D", &edited))]);
+    assert_eq!(base.group(1, false).kind, "node");
+    assert_eq!(now.groups.len(), 1);
+    assert_eq!(now.group(1, false).kind, "run");
+    assert!(new_groups(&base, &now).is_empty());
+}
+
+fn drop_shapes(dir: &Path) {
+    let file = dir.join(".doppelscan-baseline.json");
+    let text = std::fs::read_to_string(&file).unwrap();
+    let mut baseline: serde_json::Value = serde_json::from_str(&text).unwrap();
+    for entry in baseline["groups"].as_array_mut().unwrap() {
+        entry.as_object_mut().unwrap().remove("shape");
+    }
+    std::fs::write(&file, baseline.to_string()).unwrap();
+}
+
+// Catches treating a missing shape as holding nothing: a baseline written
+// before shapes were recorded would fail on every clone that shrank.
+#[test]
+fn a_baseline_without_shapes_still_excuses_a_shrunk_clone() {
+    let dir = repo("no-shape");
+    assert_eq!(doppelscan(&dir, &["baseline"]).0, 0);
+    drop_shapes(&dir);
+    let shrunk =
+        renamed(SUM_TOTALS, 2).replace("return Math.round(total * 100) / 100;", "return total;");
+    std::fs::write(dir.join("src/b.ts"), shrunk).unwrap();
+    let (code, out) = doppelscan(&dir, &["check"]);
+    assert_eq!(code, 0, "{out}");
+}
+
+const FORMAT_ROW: &str = r#"
+export function formatRow(row: Row, width: number): string {
+    const padded = row.name.padEnd(width, " ");
+    const value = row.value.toFixed(2).padStart(10, " ");
+    return `${row.id} ${padded} ${value}`;
+}
+"#;
+
+// Three definitions: no one of them names the clone, so its place is the
+// bare file.
+fn three_definitions() -> String {
+    [SUM_TOTALS, PARSE_ROWS, FORMAT_ROW].concat()
+}
+
+fn with_edited_total() -> String {
+    three_definitions().replace("return Math.round(total * 100) / 100;", "return total;")
+}
+
+fn repo_sharing_definitions(name: &str) -> PathBuf {
+    let dir = repo(name);
+    write_all(
+        &dir,
+        &[
+            ("src/a.ts", three_definitions()),
+            ("src/b.ts", three_definitions()),
+        ],
+    );
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-qm", "definitions"]);
+    dir
+}
+
+// Catches a bare file enclosing nothing: an edit splits the top-level clone
+// into a run still at the file and a piece inside `sumTotals`, and both are
+// what the entry held. Pruning has to see that too, or the entry goes and
+// the same code fails the next check.
+#[test]
+fn a_top_level_clone_cut_in_two_by_an_edit_is_not_new() {
+    let dir = repo_sharing_definitions("top-level-split");
+    assert_eq!(doppelscan(&dir, &["baseline"]).0, 0);
+    let before = written_entries(&dir);
+    assert_eq!(before[0].places, ["src/a.ts", "src/b.ts"]);
+    std::fs::write(dir.join("src/b.ts"), with_edited_total()).unwrap();
+    let (code, out) = doppelscan(&dir, &["check"]);
+    assert_eq!(code, 0, "{out}");
+
+    assert_eq!(doppelscan(&dir, &["baseline", "--prune"]).0, 0);
+    assert_eq!(written_entries(&dir), before);
+    let (code, out) = doppelscan(&dir, &["check"]);
+    assert_eq!(code, 0, "{out}");
+}
+
+// Catches fixing only the file comparison: without a baseline the accepted
+// side comes from scanning HEAD.
+#[test]
+fn a_top_level_clone_cut_in_two_since_head_is_not_new() {
+    let dir = repo_sharing_definitions("top-level-head");
+    std::fs::write(dir.join("src/b.ts"), with_edited_total()).unwrap();
+    let (code, out) = doppelscan(&dir, &["check"]);
+    assert_eq!(code, 0, "{out}");
+}
+
+fn new_function() -> String {
+    "\nfunction added(queue: Job[], limit: number) {\n    while (queue.length > limit) {\n        handle(queue.pop(), limit);\n    }\n}\n"
+        .to_string()
+}
+
+// What differs after the definitions keeps `added` out of the run they form.
+fn sharing_definitions_with(added: &str) -> Analysis {
+    let shared = three_definitions();
+    scan(&[
+        (
+            "a.ts",
+            format!(
+                "{shared}const z = 1;
+{added}"
+            ),
+        ),
+        (
+            "b.ts",
+            format!(
+                "{shared}call();
+{added}"
+            ),
+        ),
+    ])
+}
+
+// Catches a bare file excusing whatever is inside it: the function is new,
+// and smaller than the top-level clone both files already share.
+#[test]
+fn a_new_function_in_files_sharing_a_top_level_clone_is_new() {
+    let base = sharing_definitions_with("");
+    let now = sharing_definitions_with(&new_function());
+    assert_eq!(now.groups.len(), 2, "the function is a clone of its own");
+    assert_eq!(new_groups(&base, &now).len(), 1);
+}
+
+// Catches widening the place rule for entries with no shape to narrow it:
+// there a bare file would excuse every later clone between the two files.
+#[test]
+fn a_bare_file_without_a_shape_excuses_nothing_inside_it() {
+    let base = sharing_definitions_with("");
+    let mut baseline = Baseline::from_analysis(&base, &options());
+    baseline.groups[0].shape.clear();
+    let now = sharing_definitions_with(&new_function());
+    assert_eq!(baseline.new_groups(&now).len(), 1);
+
+    let tokens = baseline.groups[0].tokens;
+    let half_named = accepted("mixed", 2, tokens, &["a.ts#added", "b.ts"]);
+    baseline.groups = vec![half_named];
+    let flagged = baseline.new_groups(&now);
+    assert_eq!(flagged.len(), 2, "both groups: {flagged:?}");
+}
+
+// Catches a prune that pairs places less widely than the check: with no
+// piece left at the bare file, only the one inside `sumTotals` holds the
+// entry, and losing its places fails the next check on the same code.
+#[test]
+fn pruning_keeps_a_bare_file_only_a_piece_inside_it_holds() {
+    let dir = repo_sharing_definitions("top-level-piece");
+    assert_eq!(doppelscan(&dir, &["baseline"]).0, 0);
+    let before = written_entries(&dir);
+    let cut = with_edited_total().replace(
+        "export function parseRows",
+        "export const parseRows = 1;
+function unused",
+    );
+    let cut = cut
+        .replace("rows.push", "rows.unshift")
+        .replace("padEnd", "trim");
+    std::fs::write(dir.join("src/b.ts"), cut).unwrap();
+    let (code, out) = doppelscan(&dir, &["check"]);
+    assert_eq!(code, 0, "{out}");
+
+    assert_eq!(doppelscan(&dir, &["baseline", "--prune"]).0, 0);
+    assert_eq!(written_entries(&dir), before);
+    let (code, out) = doppelscan(&dir, &["check"]);
+    assert_eq!(code, 0, "{out}");
+}
+
+// Statements of unlike shapes, so the function is one clone with no shorter
+// run in it that recurs.
+const SETTLE: &str = r#"
+export function settle(orders: Order[], config: Config): number {
+    const paid = orders.filter((o) => o.status === "paid");
+    const gross = paid.reduce((sum, o) => sum + o.amount, 0);
+    audit.record(paid.length, gross);
+    const fee = Math.ceil(gross * config.rate);
+    if (fee > config.cap) { throw new Error("fee"); }
+    const net = gross - fee - config.flat;
+    return Math.round(net * 100) / 100;
+}
+"#;
+
+fn settle_without(cut: &[&str]) -> String {
+    let drop_cut = |text: String, line: &&str| text.replace(*line, "");
+    cut.iter().fold(SETTLE.to_string(), drop_cut)
+}
+
+fn repo_of_settle(name: &str) -> PathBuf {
+    let dir = repo(name);
+    let code = settle_without(&[]);
+    write_all(&dir, &[("src/a.ts", code.clone()), ("src/b.ts", code)]);
+    assert_eq!(doppelscan(&dir, &["baseline"]).0, 0);
+    dir
+}
+
+const AUDIT_LINE: &str = "    audit.record(paid.length, gross);\n";
+
+// Catches a shrink rule wanting the clone contiguous in its entry: taking a
+// statement out of the middle of both copies adds no code.
+#[test]
+fn deleting_a_middle_statement_from_every_copy_is_not_new() {
+    let dir = repo_of_settle("cut-middle");
+    let code = settle_without(&[AUDIT_LINE]);
+    write_all(&dir, &[("src/a.ts", code.clone()), ("src/b.ts", code)]);
+    let (status, out) = doppelscan(&dir, &["check"]);
+    assert_eq!(status, 0, "{out}");
+}
+
+// Catches a rule that takes one cut only: each cleanup would fail the check
+// as soon as it touched a second spot.
+#[test]
+fn deleting_two_statements_apart_is_not_new() {
+    let dir = repo_of_settle("cut-twice");
+    let fee_line = "    const fee = Math.ceil(gross * config.rate);\n";
+    let code = settle_without(&[AUDIT_LINE, fee_line]).replace("- fee ", "");
+    let code = code.replace(
+        "    if (fee > config.cap) { throw new Error(\"fee\"); }\n",
+        "",
+    );
+    write_all(&dir, &[("src/a.ts", code.clone()), ("src/b.ts", code)]);
+    let (status, out) = doppelscan(&dir, &["check"]);
+    assert_eq!(status, 0, "{out}");
+}
+
+// Catches a prune that only counts contiguous groups as leaning on an entry:
+// it would drop the entry of a clone that is still there, and the next check
+// would fail on it.
+#[test]
+fn pruning_keeps_the_entry_of_a_clone_with_a_statement_deleted() {
+    let dir = repo_of_settle("cut-prune");
+    let before = written_entries(&dir);
+    let code = settle_without(&[AUDIT_LINE]);
+    write_all(&dir, &[("src/a.ts", code.clone()), ("src/b.ts", code)]);
+    assert_eq!(doppelscan(&dir, &["baseline", "--prune"]).0, 0);
+    assert_eq!(written_entries(&dir), before);
+    let (status, out) = doppelscan(&dir, &["check"]);
+    assert_eq!(status, 0, "{out}");
+}
+
+const REFUND: &str = r#"
+export function refund(orders: Order[], ledger: Ledger): string[] {
+    const due = orders.filter((o) => o.status === "returned");
+    for (const order of due) { ledger.credit(order.customer, order.amount); }
+    const ids = due.map((o) => o.id);
+    try { mailer.notify(ids); } catch (err) { log.warn(err); }
+    return ids.sort();
+}
+"#;
+
+// Opens like `SETTLE` and closes like `REFUND` with nothing between, so its
+// tokens are the clone of both with one stretch cut out of the middle.
+const RECONCILE: &str = r#"
+export function reconcile(orders: Order[], config: Config): number {
+    const open = orders.filter((o) => o.status === "open");
+    const total = open.reduce((sum, o) => sum + o.amount, 0);
+    audit.record(open.length, total);
+    try { mailer.notify(ids); } catch (err) { log.warn(err); }
+    return ids.sort();
+}
+"#;
+
+// Catches the shrink rule excusing a function that looks like what a cut
+// would leave while the clone it was cut from is still there whole.
+#[test]
+fn a_new_function_shaped_like_a_cut_of_an_accepted_clone_is_new() {
+    let dir = repo("cut-lookalike");
+    let accepted = format!("{SETTLE}{REFUND}");
+    write_all(
+        &dir,
+        &[
+            ("src/a.ts", accepted.clone()),
+            ("src/b.ts", accepted.clone()),
+        ],
+    );
+    assert_eq!(doppelscan(&dir, &["baseline"]).0, 0);
+    write_all(
+        &dir,
+        &[
+            ("src/a.ts", format!("{RECONCILE}{accepted}")),
+            ("src/b.ts", format!("{accepted}{RECONCILE}")),
+        ],
+    );
+    let (status, out) = doppelscan(&dir, &["check"]);
+    assert_eq!(status, 1, "{out}");
+}
+
+// Every other field of `FIELDS`, with other names. Its tokens all appear in
+// `FIELDS` in order, which is what a bare subsequence test would accept, yet
+// this is new code spread over the whole accepted clone.
+const SCATTERED_FIELDS: &str = r#"
+  total: number = 2;
+  active: boolean = true;
+  maximum = 20 * 4;
+  waiting = new Set<Order>();
+  window: [number, number] = [2, 9];
+  extra = { c: 3, d: 4 };
+"#;
+
+// Catches the shrink rule loosening into a subsequence test: over so few
+// token kinds, most new code is a subsequence of a long enough accepted clone.
+#[test]
+fn new_fields_scattered_through_an_accepted_clone_are_new() {
+    let dir = repo("scattered");
+    write_all(
+        &dir,
+        &[("src/a.ts", class_c("")), ("src/b.ts", class_d(""))],
+    );
+    assert_eq!(doppelscan(&dir, &["baseline"]).0, 0);
+    write_all(
+        &dir,
+        &[
+            ("src/a.ts", class_c(SCATTERED_FIELDS)),
+            ("src/b.ts", class_d(SCATTERED_FIELDS)),
+        ],
+    );
+    let (status, out) = doppelscan(&dir, &["check"]);
+    assert_eq!(status, 1, "{out}");
 }
