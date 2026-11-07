@@ -64,22 +64,40 @@ fn handle_bytes(engine: &Engine, root: &Path, line: &[u8]) -> Option<String> {
 
 /// One JSON-RPC message in, at most one out (notifications get none).
 pub fn handle_line(engine: &Engine, root: &Path, line: &str) -> Option<String> {
-    let msg: Value = match serde_json::from_str(line) {
-        Ok(v) => v,
-        Err(e) => {
-            return Some(
-                error(Value::Null, -32700, &format!("parse error: {e}"), None).to_string(),
-            );
-        }
+    let reply = match parse_message(line) {
+        Ok(msg) => handle_message(engine, root, &msg)?,
+        Err(reply) => reply,
     };
+    Some(reply.to_string())
+}
+
+fn parse_message(line: &str) -> Result<Value, Value> {
+    let msg: Value = serde_json::from_str(line)
+        .map_err(|e| error(Value::Null, -32700, &format!("parse error: {e}"), None))?;
     if !msg.is_object() {
         let message = "invalid request: not a JSON object";
-        return Some(error(Value::Null, -32600, message, None).to_string());
+        return Err(error(Value::Null, -32600, message, None));
     }
+    Ok(msg)
+}
+
+fn handle_message(engine: &Engine, root: &Path, msg: &Value) -> Option<Value> {
+    if is_response(msg) {
+        return None;
+    }
+    let Some(method) = msg.get("method").and_then(Value::as_str) else {
+        let id = msg.get("id").cloned().unwrap_or(Value::Null);
+        return Some(error(id, -32600, "invalid request: no method", None));
+    };
     let id = msg.get("id")?.clone();
-    let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
     let params = msg.get("params").cloned().unwrap_or(json!({}));
-    Some(dispatch(engine, root, id, method, &params).to_string())
+    Some(dispatch(engine, root, id, method, &params))
+}
+
+/// This server sends no requests, so a response answers nothing here, and
+/// JSON-RPC has it go unanswered whatever it holds.
+fn is_response(msg: &Value) -> bool {
+    msg.get("method").is_none() && (msg.get("result").is_some() || msg.get("error").is_some())
 }
 
 fn dispatch(engine: &Engine, root: &Path, id: Value, method: &str, params: &Value) -> Value {
@@ -159,7 +177,7 @@ type ToolResult = Result<Value, (i64, String)>;
 
 fn call_tool(engine: &Engine, root: &Path, params: &Value) -> ToolResult {
     let name = params.get("name").and_then(Value::as_str).unwrap_or("");
-    let args = params.get("arguments").cloned().unwrap_or(json!({}));
+    let args = tool_arguments(params)?;
     let outcome = match name {
         "find_duplicates" => find_duplicates(engine, root, &args),
         "get_duplicate_group" => get_group(engine, root, &args),
@@ -178,8 +196,28 @@ fn call_tool(engine: &Engine, root: &Path, params: &Value) -> ToolResult {
     })
 }
 
-fn str_arg<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
-    args.get(key).and_then(Value::as_str)
+fn tool_arguments(params: &Value) -> Result<Value, (i64, String)> {
+    match params.get("arguments") {
+        None | Some(Value::Null) => Ok(json!({})),
+        Some(args) if args.is_object() => Ok(args.clone()),
+        Some(args) => Err((-32602, format!("arguments must be an object, not {args}"))),
+    }
+}
+
+fn str_arg<'a>(args: &'a Value, key: &str) -> anyhow::Result<Option<&'a str>> {
+    let Some(v) = present(args, key) else {
+        return Ok(None);
+    };
+    let text = v.as_str().map(Some);
+    text.ok_or_else(|| anyhow::anyhow!("{key} must be a string, not {v}"))
+}
+
+fn bool_arg(args: &Value, key: &str) -> anyhow::Result<Option<bool>> {
+    let Some(v) = present(args, key) else {
+        return Ok(None);
+    };
+    let flag = v.as_bool().map(Some);
+    flag.ok_or_else(|| anyhow::anyhow!("{key} must be true or false, not {v}"))
 }
 
 /// An explicit null is how some clients spell "unset".
@@ -215,21 +253,20 @@ fn number_arg(args: &Value, key: &str) -> anyhow::Result<Option<f32>> {
     n.ok_or_else(|| anyhow::anyhow!("{key} must be a number, not {v}"))
 }
 
-fn str_list(args: &Value, key: &str) -> Vec<String> {
-    let items = args.get(key).and_then(Value::as_array);
-    items
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default()
+/// An array only: the tool schema declares no single-string shorthand.
+fn str_list(args: &Value, key: &str) -> anyhow::Result<Vec<String>> {
+    let Some(v) = present(args, key) else {
+        return Ok(Vec::new());
+    };
+    let strings = |a: &Vec<Value>| a.iter().map(|i| i.as_str().map(String::from)).collect();
+    let list: Option<Vec<String>> = v.as_array().and_then(strings);
+    list.ok_or_else(|| anyhow::anyhow!("{key} must be an array of strings, not {v}"))
 }
 
 /// Relative paths resolve against the server root, so an agent can pass
 /// paths exactly as they appear in the results.
 fn scan_root(root: &Path, args: &Value) -> anyhow::Result<PathBuf> {
-    let path = str_arg(args, "path")
+    let path = str_arg(args, "path")?
         .map(|p| root.join(p))
         .unwrap_or_else(|| root.to_path_buf());
     anyhow::ensure!(path.exists(), "path does not exist: {}", path.display());
@@ -277,9 +314,9 @@ fn similarity_arg(args: &Value) -> anyhow::Result<Option<f32>> {
 fn requested(args: &Value) -> anyhow::Result<Requested> {
     Ok(Requested {
         min_tokens: uint_arg(args, "min_tokens")?,
-        strict: args.get("strict").and_then(Value::as_bool),
-        only: str_list(args, "languages"),
-        exclude: str_list(args, "exclude"),
+        strict: bool_arg(args, "strict")?,
+        only: str_list(args, "languages")?,
+        exclude: str_list(args, "exclude")?,
         max_param_density: number_arg(args, "max_param_density")?,
         check_min_tokens: uint_arg(args, "check_min_tokens")?,
     })
@@ -309,10 +346,7 @@ fn find_duplicates(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result
     let page = Page::of(args)?;
     let analysis = engine.scan(&scan_root(root, args)?, &options(root, args)?)?;
     let ids = page.ids(analysis.groups.len());
-    let templates = args
-        .get("include_templates")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    let templates = bool_arg(args, "include_templates")?.unwrap_or(false);
     let out = render(&analysis, &ids, templates);
     Ok(out + &more_hint(&ids, analysis.groups.len()))
 }
@@ -353,17 +387,14 @@ fn more_hint(ids: &[usize], total: usize) -> String {
 
 fn get_group(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<String> {
     let key =
-        str_arg(args, "id").ok_or_else(|| anyhow::anyhow!("missing required argument: id"))?;
+        str_arg(args, "id")?.ok_or_else(|| anyhow::anyhow!("missing required argument: id"))?;
+    let include_code = bool_arg(args, "include_code")?.unwrap_or(false);
     let analysis = engine.scan(&scan_root(root, args)?, &options(root, args)?)?;
     let id = analysis
         .resolve(key)
         .ok_or_else(|| anyhow::anyhow!("{}. {SCAN_HINT}", analysis.unresolved(key)))?;
     let mut out = render_group(&analysis.group(id, true), Detail::Full);
-    if args
-        .get("include_code")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
+    if include_code {
         out.push_str(&occurrence_code(&analysis, id));
     }
     Ok(out)
@@ -392,7 +423,7 @@ fn occurrence_code(analysis: &Analysis, id: usize) -> String {
 
 fn duplicates_at(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<String> {
     let file =
-        str_arg(args, "file").ok_or_else(|| anyhow::anyhow!("missing required argument: file"))?;
+        str_arg(args, "file")?.ok_or_else(|| anyhow::anyhow!("missing required argument: file"))?;
     let (from, to) = line_range(args)?;
     let opts = options(root, args)?.narrowed_to(lang_index_for_path(file.as_ref()));
     let analysis = engine.scan(&scan_root(root, args)?, &opts)?;
@@ -415,7 +446,7 @@ fn line_range(args: &Value) -> anyhow::Result<(u32, u32)> {
 
 fn find_similar(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<String> {
     let code =
-        str_arg(args, "code").ok_or_else(|| anyhow::anyhow!("missing required argument: code"))?;
+        str_arg(args, "code")?.ok_or_else(|| anyhow::anyhow!("missing required argument: code"))?;
     let (lang, opts) = (snippet_lang(args)?, snippet_options(root, args)?);
     let found = engine.similar(&scan_root(root, args)?, code, lang, &opts)?;
     if found.hits.is_empty() && found.accepted.is_empty() {
@@ -426,7 +457,7 @@ fn find_similar(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<St
 }
 
 fn snippet_lang(args: &Value) -> anyhow::Result<usize> {
-    let name = str_arg(args, "language")
+    let name = str_arg(args, "language")?
         .ok_or_else(|| anyhow::anyhow!("missing required argument: language"))?;
     lang_index_by_name(name)
         .ok_or_else(|| anyhow::anyhow!("unknown language {name:?}; known: {}", known_langs()))
@@ -471,8 +502,8 @@ fn check_new(engine: &Engine, root: &Path, args: &Value) -> anyhow::Result<Strin
 }
 
 fn against(root: &Path, path: &Path, args: &Value) -> anyhow::Result<Against> {
-    let base = str_arg(args, "base");
-    let file = str_arg(args, "baseline").map(|f| root.join(f));
+    let base = str_arg(args, "base")?;
+    let file = str_arg(args, "baseline")?.map(|f| root.join(f));
     anyhow::ensure!(
         base.is_none() || file.is_none(),
         "pass base or baseline, not both"

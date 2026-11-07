@@ -703,3 +703,81 @@ fn find_near_duplicates_lists_every_copy() {
         assert!(text.contains(&format!("src/copy{copy}.ts:")), "{text}");
     }
 }
+
+fn tool_call(tool: &str, arguments: Value) -> Value {
+    let params = json!({ "name": tool, "arguments": arguments });
+    json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params })
+}
+
+// Catches a wrong type being dropped: `exclude: "**/*.ts"` then scans the
+// very files the caller meant to leave out, and answers as if it had not.
+// The tool schema declares arrays, so a lone string is no shorthand.
+#[test]
+fn an_argument_of_the_wrong_type_is_an_error() {
+    let (engine, root) = (Engine::default(), fixture("wrong-type"));
+    let bad = [
+        ("find_duplicates", json!({ "exclude": "**/*.ts" })),
+        ("find_duplicates", json!({ "languages": "ts" })),
+        ("find_duplicates", json!({ "exclude": ["**/*.ts", 1] })),
+        ("find_duplicates", json!({ "strict": "yes" })),
+        ("find_duplicates", json!({ "include_templates": 1 })),
+        ("find_duplicates", json!({ "path": 5 })),
+        (
+            "get_duplicate_group",
+            json!({ "id": "abc", "include_code": "yes" }),
+        ),
+        ("check_new_duplicates", json!({ "base": 5 })),
+    ];
+    for (tool, args) in bad {
+        let reply = call(&engine, &root, tool_call(tool, args.clone())).unwrap();
+        assert_eq!(reply["result"]["isError"], json!(true), "{args}");
+        let key = args.as_object().unwrap().keys().next_back().unwrap();
+        assert!(tool_text(&reply).contains(key.as_str()), "{args}");
+    }
+}
+
+// Catches strict typing rejecting the spelling some clients use for unset.
+#[test]
+fn a_null_list_or_flag_means_unset() {
+    let (engine, root) = (Engine::default(), fixture("null-args"));
+    let args = json!({ "exclude": null, "languages": null, "strict": null, "path": null });
+    let reply = call(&engine, &root, tool_call("find_duplicates", args)).unwrap();
+    assert_eq!(reply["result"]["isError"], json!(false));
+}
+
+// Catches a malformed `arguments` running the tool with its defaults, which
+// answers a question nobody asked.
+#[test]
+fn arguments_must_be_an_object() {
+    let (engine, root) = (Engine::default(), fixture("arguments"));
+    let reply = call(&engine, &root, tool_call("find_duplicates", json!("zzz"))).unwrap();
+    assert_eq!(reply["error"]["code"], -32602);
+    let reply = call(&engine, &root, tool_call("find_duplicates", Value::Null)).unwrap();
+    assert_eq!(reply["result"]["isError"], json!(false));
+}
+
+// Catches answering a client's response: to the client that is an unknown
+// id, and a server sending one back and forth never settles.
+#[test]
+fn a_client_response_gets_no_reply() {
+    let (engine, root) = (Engine::default(), fixture("response"));
+    for msg in [
+        json!({ "jsonrpc": "2.0", "id": 7, "result": {} }),
+        json!({ "jsonrpc": "2.0", "id": 7, "error": { "code": 1, "message": "no" } }),
+    ] {
+        assert!(call(&engine, &root, msg).is_none());
+    }
+}
+
+// Catches a message that is no request reading as an unknown method: the
+// caller has a malformed client to fix, not a method to look up.
+#[test]
+fn a_message_without_a_method_is_an_invalid_request() {
+    let (engine, root) = (Engine::default(), fixture("no-method"));
+    let reply = call(&engine, &root, json!({ "id": 11 })).unwrap();
+    assert_eq!(reply["error"]["code"], -32600);
+    assert_eq!(reply["id"], 11);
+    let reply = call(&engine, &root, json!({ "id": 12, "method": 5 })).unwrap();
+    assert_eq!(reply["error"]["code"], -32600);
+    assert_eq!(reply["id"], 12);
+}
