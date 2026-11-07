@@ -51,6 +51,10 @@ another copy.
 - Fields that are only assigned, never declared (Python `self.x = x`, JS
   classes without field declarations), are not known to be fields, so
   `self.x` shows as a `member` parameter beside the `x` rename.
+- A part of a repetitive wall copied elsewhere is matched by its spelling, so
+  when two walls and a copy share such a run, the part in the second wall can
+  drop out of the report. A copy of most of a table whose rows themselves
+  recur can also come with a second, overlapping group that has parameters.
 - Matches stay within one language.
 - Token-level languages split statements by layout, so the same code
   formatted differently (a statement broken over lines outside brackets)
