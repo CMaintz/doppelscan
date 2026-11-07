@@ -1406,3 +1406,144 @@ fn a_baseline_without_shapes_still_excuses_a_shrunk_clone() {
     let (code, out) = doppelscan(&dir, &["check"]);
     assert_eq!(code, 0, "{out}");
 }
+
+const FORMAT_ROW: &str = r#"
+export function formatRow(row: Row, width: number): string {
+    const padded = row.name.padEnd(width, " ");
+    const value = row.value.toFixed(2).padStart(10, " ");
+    return `${row.id} ${padded} ${value}`;
+}
+"#;
+
+// Three definitions: no one of them names the clone, so its place is the
+// bare file.
+fn three_definitions() -> String {
+    [SUM_TOTALS, PARSE_ROWS, FORMAT_ROW].concat()
+}
+
+fn with_edited_total() -> String {
+    three_definitions().replace("return Math.round(total * 100) / 100;", "return total;")
+}
+
+fn repo_sharing_definitions(name: &str) -> PathBuf {
+    let dir = repo(name);
+    write_all(
+        &dir,
+        &[
+            ("src/a.ts", three_definitions()),
+            ("src/b.ts", three_definitions()),
+        ],
+    );
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-qm", "definitions"]);
+    dir
+}
+
+// Catches a bare file enclosing nothing: an edit splits the top-level clone
+// into a run still at the file and a piece inside `sumTotals`, and both are
+// what the entry held. Pruning has to see that too, or the entry goes and
+// the same code fails the next check.
+#[test]
+fn a_top_level_clone_cut_in_two_by_an_edit_is_not_new() {
+    let dir = repo_sharing_definitions("top-level-split");
+    assert_eq!(doppelscan(&dir, &["baseline"]).0, 0);
+    let before = written_entries(&dir);
+    assert_eq!(before[0].places, ["src/a.ts", "src/b.ts"]);
+    std::fs::write(dir.join("src/b.ts"), with_edited_total()).unwrap();
+    let (code, out) = doppelscan(&dir, &["check"]);
+    assert_eq!(code, 0, "{out}");
+
+    assert_eq!(doppelscan(&dir, &["baseline", "--prune"]).0, 0);
+    assert_eq!(written_entries(&dir), before);
+    let (code, out) = doppelscan(&dir, &["check"]);
+    assert_eq!(code, 0, "{out}");
+}
+
+// Catches fixing only the file comparison: without a baseline the accepted
+// side comes from scanning HEAD.
+#[test]
+fn a_top_level_clone_cut_in_two_since_head_is_not_new() {
+    let dir = repo_sharing_definitions("top-level-head");
+    std::fs::write(dir.join("src/b.ts"), with_edited_total()).unwrap();
+    let (code, out) = doppelscan(&dir, &["check"]);
+    assert_eq!(code, 0, "{out}");
+}
+
+fn new_function() -> String {
+    "\nfunction added(queue: Job[], limit: number) {\n    while (queue.length > limit) {\n        handle(queue.pop(), limit);\n    }\n}\n"
+        .to_string()
+}
+
+// What differs after the definitions keeps `added` out of the run they form.
+fn sharing_definitions_with(added: &str) -> Analysis {
+    let shared = three_definitions();
+    scan(&[
+        (
+            "a.ts",
+            format!(
+                "{shared}const z = 1;
+{added}"
+            ),
+        ),
+        (
+            "b.ts",
+            format!(
+                "{shared}call();
+{added}"
+            ),
+        ),
+    ])
+}
+
+// Catches a bare file excusing whatever is inside it: the function is new,
+// and smaller than the top-level clone both files already share.
+#[test]
+fn a_new_function_in_files_sharing_a_top_level_clone_is_new() {
+    let base = sharing_definitions_with("");
+    let now = sharing_definitions_with(&new_function());
+    assert_eq!(now.groups.len(), 2, "the function is a clone of its own");
+    assert_eq!(new_groups(&base, &now).len(), 1);
+}
+
+// Catches widening the place rule for entries with no shape to narrow it:
+// there a bare file would excuse every later clone between the two files.
+#[test]
+fn a_bare_file_without_a_shape_excuses_nothing_inside_it() {
+    let base = sharing_definitions_with("");
+    let mut baseline = Baseline::from_analysis(&base, &options());
+    baseline.groups[0].shape.clear();
+    let now = sharing_definitions_with(&new_function());
+    assert_eq!(baseline.new_groups(&now).len(), 1);
+
+    let tokens = baseline.groups[0].tokens;
+    let half_named = accepted("mixed", 2, tokens, &["a.ts#added", "b.ts"]);
+    baseline.groups = vec![half_named];
+    let flagged = baseline.new_groups(&now);
+    assert_eq!(flagged.len(), 2, "both groups: {flagged:?}");
+}
+
+// Catches a prune that pairs places less widely than the check: with no
+// piece left at the bare file, only the one inside `sumTotals` holds the
+// entry, and losing its places fails the next check on the same code.
+#[test]
+fn pruning_keeps_a_bare_file_only_a_piece_inside_it_holds() {
+    let dir = repo_sharing_definitions("top-level-piece");
+    assert_eq!(doppelscan(&dir, &["baseline"]).0, 0);
+    let before = written_entries(&dir);
+    let cut = with_edited_total().replace(
+        "export function parseRows",
+        "export const parseRows = 1;
+function unused",
+    );
+    let cut = cut
+        .replace("rows.push", "rows.unshift")
+        .replace("padEnd", "trim");
+    std::fs::write(dir.join("src/b.ts"), cut).unwrap();
+    let (code, out) = doppelscan(&dir, &["check"]);
+    assert_eq!(code, 0, "{out}");
+
+    assert_eq!(doppelscan(&dir, &["baseline", "--prune"]).0, 0);
+    assert_eq!(written_entries(&dir), before);
+    let (code, out) = doppelscan(&dir, &["check"]);
+    assert_eq!(code, 0, "{out}");
+}

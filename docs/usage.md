@@ -197,20 +197,21 @@ the others (`smaller` in the JSON) and do not fail the check.
 A baseline stores each accepted group's fingerprint, copy count, normalized
 tokens and the functions it sits in, not line numbers. Moving or renaming
 known duplication passes, and so does shrinking it within the same functions,
-which means a clone of code the entry held, sitting where the entry sat.
-Another copy, a clone that grew, or new code beside an accepted clone does
-not, even in the same class or function. A baseline written before tokens were
-recorded goes by size and functions alone until it is written again, so there
-new code smaller than an accepted clone in the same functions passes.
-`--prune` only drops
-entries and forgets copies that are gone, so it cannot accept new
-duplication. Only a scan of the whole directory the baseline describes can
-tell that code is gone: from a subdirectory, a copy that moved out looks
-deleted. So `check` on a subdirectory scans all of that directory and reports
-the new groups with a copy under the path, using the settings from there, and
-`--prune` always covers the whole baseline, wherever it is run from. A baseline
-of one folder kept above it (`baseline src -o baseline.json`) records that
-folder, and describes nothing outside it.
+which means a clone of code the entry held, sitting where the entry sat. A
+clone over several top-level definitions sits in its files, so what an edit
+leaves of it, even inside one definition, counts as shrunk. Another copy, a
+clone that grew, or new code beside an accepted clone does not, even in the
+same class or function. A baseline written before tokens were recorded goes by
+size and functions alone until it is written again, so there new code smaller
+than an accepted clone in the same functions passes. `--prune` only drops
+entries and forgets copies that are gone, so it cannot accept new duplication.
+Only a scan of the whole directory the baseline describes can tell that code
+is gone: from a subdirectory, a copy that moved out looks deleted. So `check`
+on a subdirectory scans all of that directory and reports the new groups with
+a copy under the path, using the settings from there, and `--prune` always
+covers the whole baseline, wherever it is run from. A baseline of one folder
+kept above it (`baseline src -o baseline.json`) records that folder, and
+describes nothing outside it.
 
 `check` reads the working tree, staged or not, so as a pre-commit hook it
 also sees unstaged edits. Commit the baseline with LF line endings

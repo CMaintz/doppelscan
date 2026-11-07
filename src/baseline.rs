@@ -214,13 +214,15 @@ struct Index<'a> {
 }
 
 impl<'a> Index<'a> {
-    /// Places without a `#` are left out: the shrink rule never uses them.
+    /// Bare files are left out of entries without a shape, which the shrink
+    /// rule never lets them excuse anything for.
     fn new(entries: &'a [Entry]) -> Self {
         let mut by_fingerprint: FxHashMap<&str, Vec<usize>> = FxHashMap::default();
         let mut by_place: FxHashMap<&str, Vec<usize>> = FxHashMap::default();
         for (i, e) in entries.iter().enumerate() {
             by_fingerprint.entry(&e.fingerprint).or_default().push(i);
-            for place in e.places.iter().filter(|p| p.contains('#')) {
+            let usable = |p: &&String| !e.shape.is_empty() || p.contains('#');
+            for place in e.places.iter().filter(usable) {
                 by_place.entry(place).or_default().push(i);
             }
         }
@@ -307,7 +309,7 @@ impl Entry {
         let mut held = vec![false; self.places.len()];
         let paired = groups
             .iter()
-            .flat_map(|g| pairings(&g.places, &self.places));
+            .flat_map(|g| pairings(&g.places, &self.places, !self.shape.is_empty()));
         for i in paired.flatten() {
             held[i] = true;
         }
@@ -316,17 +318,21 @@ impl Entry {
     }
 }
 
-/// A shrunk clone is code the entry held, in places it held it. An entry
-/// without a shape can only go by places, and there only named ones count:
-/// two files sharing one top-level clone must not excuse every later
-/// top-level clone between them.
+/// A shrunk clone is code the entry held, in places it held it. A clone over
+/// several definitions sits at the bare file, and the pieces an edit leaves
+/// of it inside one of them are shrunk too. An entry without a shape can only
+/// go by places, and there only named ones count: two files sharing one
+/// top-level clone must not excuse every later clone between them.
 fn is_shrunk_from(group: &Entry, accepted: &Entry) -> bool {
-    let held = if accepted.shape.is_empty() {
-        group.places.iter().all(|p| p.contains('#'))
-    } else {
+    let has_shape = !accepted.shape.is_empty();
+    let held = if has_shape {
         accepted.shape.contains(&group.shape)
+    } else {
+        group.places.iter().all(|p| p.contains('#'))
     };
-    group.tokens <= accepted.tokens && held && is_sub_multiset(&group.places, &accepted.places)
+    group.tokens <= accepted.tokens
+        && held
+        && is_sub_multiset(&group.places, &accepted.places, has_shape)
 }
 
 fn entry(analysis: &Analysis, raw: &RawGroup) -> Entry {
@@ -366,42 +372,45 @@ fn shape(analysis: &Analysis, raw: &RawGroup) -> String {
         .collect()
 }
 
-fn is_sub_multiset(small: &[String], big: &[String]) -> bool {
-    pairings(small, big).all(|slot| slot.is_some())
+fn is_sub_multiset(small: &[String], big: &[String], by_file: bool) -> bool {
+    pairings(small, big, by_file).all(|slot| slot.is_some())
 }
 
 /// For each place in `small`, the index of a distinct place in `big` that
-/// is the same or encloses it (`a.ts#Cart` encloses `a.ts#Cart.total`).
-/// Each place takes the deepest free match, so an exact match is never
-/// spent on a place an enclosing scope could have covered.
+/// is the same or encloses it (`a.ts#Cart` encloses `a.ts#Cart.total`, and
+/// with `by_file` `a.ts` encloses both). Each place takes the deepest free
+/// match, so an exact match is never spent on a place an enclosing scope
+/// could have covered.
 fn pairings<'a>(
     small: &'a [String],
     big: &'a [String],
+    by_file: bool,
 ) -> impl Iterator<Item = Option<usize>> + 'a {
     let mut used = vec![false; big.len()];
     small.iter().map(move |s| {
         let slot = (0..big.len())
-            .filter(|&i| !used[i] && encloses(&big[i], s))
+            .filter(|&i| !used[i] && encloses(&big[i], s, by_file))
             .max_by_key(|&i| big[i].len());
         slot.inspect(|&i| used[i] = true)
     })
 }
 
-/// Every `outer` for which `encloses(outer, place)` holds. Cuts at each `.`
-/// rather than parsing out the scope, since `encloses` does not parse either
-/// and a path can hold both a `.` and a `#`.
+/// Every `outer` that can enclose `place`. Cuts at each `.` and `#` rather
+/// than parsing out the scope, since `encloses` does not parse either and a
+/// path can hold both.
 fn enclosing(place: &str) -> impl Iterator<Item = &str> {
-    let cuts = place.match_indices('.').map(|(i, _)| &place[..i]);
-    cuts.filter(|outer| outer.contains('#'))
+    let cuts = place.match_indices(['.', '#']).map(|(i, _)| &place[..i]);
+    cuts.filter(|outer| encloses(outer, place, true))
         .chain(std::iter::once(place))
 }
 
-fn encloses(outer: &str, inner: &str) -> bool {
-    inner == outer
-        || (outer.contains('#')
-            && inner
-                .strip_prefix(outer)
-                .is_some_and(|rest| rest.starts_with('.')))
+fn encloses(outer: &str, inner: &str, by_file: bool) -> bool {
+    let Some(rest) = inner.strip_prefix(outer) else {
+        return false;
+    };
+    rest.is_empty()
+        || (outer.contains('#') && rest.starts_with('.'))
+        || (by_file && rest.starts_with('#'))
 }
 
 #[cfg(test)]
@@ -417,7 +426,8 @@ mod tests {
     #[test]
     fn matching_keeps_enclosing_places_for_places_without_an_exact_match() {
         let small = places(&["a.ts#C.m", "a.ts#C.n"]);
-        assert!(is_sub_multiset(&small, &places(&["a.ts#C", "a.ts#C.m"])));
-        assert!(!is_sub_multiset(&small, &places(&["a.ts#C.m", "a.ts#D"])));
+        let holds = |big: &[&str]| is_sub_multiset(&small, &places(big), false);
+        assert!(holds(&["a.ts#C", "a.ts#C.m"]));
+        assert!(!holds(&["a.ts#C.m", "a.ts#D"]));
     }
 }
