@@ -816,11 +816,11 @@ fn a_check_of_a_path_no_scan_reaches_says_so() {
     write_all(
         &dir,
         &[
-            ("src/bin/a.ts", renamed(PARSE_ROWS, 1)),
-            ("src/bin/b.ts", renamed(PARSE_ROWS, 2)),
+            ("src/obj/a.ts", renamed(PARSE_ROWS, 1)),
+            ("src/obj/b.ts", renamed(PARSE_ROWS, 2)),
         ],
     );
-    let (code, out) = doppelscan(&dir, &["check", "src/bin"]);
+    let (code, out) = doppelscan(&dir, &["check", "src/obj"]);
     assert_eq!(code, 0, "{out}");
     assert!(out.contains("not checked"), "{out}");
 }

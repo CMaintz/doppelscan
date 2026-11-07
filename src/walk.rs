@@ -12,13 +12,15 @@ use crate::filter::PathFilter;
 use crate::index::normalize_line_endings;
 use crate::lang::{LANGS, lang_index_for_path};
 
+// `bin` stays off this list: it holds hand-written scripts and entry points
+// (`src/bin`) as often as build output, and what a compiler leaves there has
+// no scanned extension or is not UTF-8.
 const EXCLUDED_DIRS: &[&str] = &[
     "node_modules",
     "target",
     "dist",
     "build",
     "out",
-    "bin",
     "obj",
     "vendor",
     "coverage",
