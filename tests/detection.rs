@@ -1146,3 +1146,36 @@ fn a_copy_longer_than_any_stretch_of_the_wall_is_still_found() {
     let files: Vec<_> = gs[0].occurrences.iter().map(|o| o.file.as_str()).collect();
     assert_eq!(files, ["A.java", "A.java", "B.java"]);
 }
+
+// A wall in `A.java`, a verbatim part of it in `verbatim` and the same part
+// renamed in `renamed`, both alone in their blocks. The two copies are clones
+// of each other too, so this is the group that reaches the wall. Sorted as
+// the walk would.
+fn wall_group_with_two_copies(verbatim: &str, renamed: &str) -> Vec<String> {
+    let setting =
+        |names: &[&str]| -> Vec<String> { names.iter().map(|n| parsed_setting(n)).collect() };
+    let kept = settings_copy(&setting(&SETTING_NAMES[2..5]));
+    let changed = settings_copy(&setting(&["One", "Two", "Three"]));
+    let wall = settings_wall();
+    let mut files = [("A.java", &wall), (verbatim, &kept), (renamed, &changed)];
+    files.sort_by_key(|(path, _)| *path);
+    let gs = groups_of(&files.map(|(p, t)| (p, t.as_str())));
+    let in_wall = |g: &&Group| g.occurrences.iter().any(|o| o.file == "A.java");
+    let found = gs.iter().find(in_wall).expect("a group in the wall");
+    found.occurrences.iter().map(|o| o.file.clone()).collect()
+}
+
+// Catches only the first lone block being tried: which copy that is depends
+// on how the files sort. Also catches a lone copy with no twin in the wall
+// joining the group: a renamed copy is not part of it under either name.
+#[test]
+fn a_verbatim_copy_is_found_whatever_a_renamed_one_is_called() {
+    assert_eq!(
+        wall_group_with_two_copies("C.java", "D.java"),
+        ["A.java", "C.java"]
+    );
+    assert_eq!(
+        wall_group_with_two_copies("C.java", "B.java"),
+        ["A.java", "C.java"]
+    );
+}

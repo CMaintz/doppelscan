@@ -5,12 +5,12 @@
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use rayon::prelude::*;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::hash::combine;
+use crate::hash::{combine, hash_bytes};
 use crate::index::{FileIndex, Frag};
 use crate::suffix::{Repeat, maximal_repeats};
 
@@ -171,6 +171,45 @@ struct RunText {
     /// (file, seq, element) at each position; separators have file u32::MAX.
     owner: Vec<(u32, u32, u32)>,
     token_prefix: Vec<u64>,
+    spelling_prefix: OnceLock<Vec<u64>>,
+}
+
+const SPELLING_BASE: u64 = 0x9E37_79B9_7F4A_7C15;
+
+impl RunText {
+    /// The text of the `len` elements at `pos`, as a hash. Prefix sums make
+    /// this one lookup, since a tandem run compares every position of a table
+    /// with its copies, at every length. Built on first use: it reads every
+    /// leaf, and a scan with no tandem run in two places never asks.
+    fn spelling(&self, files: &[Arc<FileIndex>], pos: u32, len: usize) -> u64 {
+        let prefix = self
+            .spelling_prefix
+            .get_or_init(|| spelling_prefix(files, self));
+        let (start, end) = (prefix[pos as usize], prefix[pos as usize + len]);
+        end.wrapping_sub(start.wrapping_mul(SPELLING_BASE.wrapping_pow(len as u32)))
+    }
+}
+
+fn spelling_prefix(files: &[Arc<FileIndex>], text: &RunText) -> Vec<u64> {
+    let mut prefix = Vec::with_capacity(text.symbols.len() + 1);
+    prefix.push(0u64);
+    for &owner in &text.owner {
+        let next = prefix[prefix.len() - 1].wrapping_mul(SPELLING_BASE);
+        prefix.push(next.wrapping_add(element_spelling(files, owner)));
+    }
+    prefix
+}
+
+fn element_spelling(files: &[Arc<FileIndex>], (file, seq, element): (u32, u32, u32)) -> u64 {
+    if file == u32::MAX {
+        return 0;
+    }
+    let file = &files[file as usize];
+    let e = &file.seqs.get(seq as usize)[element as usize];
+    let leaves = &file.leaves[e.leaf_start as usize..e.leaf_end as usize];
+    leaves.iter().fold(0, |h, leaf| {
+        combine(h, hash_bytes(file.leaf_text(leaf).as_bytes()))
+    })
 }
 
 fn build_run_text(files: &[Arc<FileIndex>]) -> RunText {
@@ -179,6 +218,7 @@ fn build_run_text(files: &[Arc<FileIndex>]) -> RunText {
         symbols: Vec::new(),
         owner: Vec::new(),
         token_prefix: vec![0],
+        spelling_prefix: OnceLock::new(),
     };
     let mut separators = Vec::new();
     for (fi, f) in files.iter().enumerate() {
@@ -308,7 +348,7 @@ fn run_occ(files: &[Arc<FileIndex>], text: &RunText, pos: u32, len: usize) -> Oc
 /// Disjoint positions worth reporting, in text order. Inside a wall of
 /// near-identical members a tandem repeat fits at every multiple of its
 /// period, which is the wall's shape and no clone, so such a run counts only
-/// through a copy elsewhere, at the wall positions spelled exactly like it.
+/// through copies elsewhere, at the wall positions spelled exactly like one.
 /// Returns the positions and, for a tandem run, its copies.
 fn distinct_positions(
     files: &[Arc<FileIndex>],
@@ -324,27 +364,60 @@ fn distinct_positions(
     if !shares_a_block(&kept, text) {
         return Some((kept.clone(), kept));
     }
-    let copy = alone_in_its_block(&kept, text)?;
-    let same_text = |p| spelled_alike(files, text, p, copy, len);
-    let wall = non_overlapping(sorted, len, text, same_text).collect();
-    Some((wall, vec![copy]))
+    spelled_like_copies(files, text, sorted, &kept, len)
 }
 
-fn alone_in_its_block(sorted: &[u32], text: &RunText) -> Option<u32> {
-    sorted
-        .chunk_by(|&a, &b| same_block(a, b, text))
-        .find(|block| block.len() == 1)
+fn spelled_like_copies(
+    files: &[Arc<FileIndex>],
+    text: &RunText,
+    sorted: &[u32],
+    kept: &[u32],
+    len: usize,
+) -> Option<(Vec<u32>, Vec<u32>)> {
+    let mut copies = alone_in_their_blocks(kept, text);
+    if copies.is_empty() {
+        return None;
+    }
+    let wanted: FxHashSet<u64> = spellings(&copies, files, text, len).collect();
+    let spelled_alike = |p| wanted.contains(&text.spelling(files, p, len));
+    let taken = non_overlapping(sorted, len, text, spelled_alike).collect();
+    let positions = held_twice(taken, files, text, len);
+    copies.retain(|p| positions.binary_search(p).is_ok());
+    Some((positions, copies))
+}
+
+fn alone_in_their_blocks(sorted: &[u32], text: &RunText) -> Vec<u32> {
+    let blocks = sorted.chunk_by(|&a, &b| same_block(a, b, text));
+    blocks
+        .filter(|block| block.len() == 1)
         .map(|block| block[0])
+        .collect()
 }
 
-fn spelled_alike(files: &[Arc<FileIndex>], text: &RunText, a: u32, b: u32, len: usize) -> bool {
-    let spelling = |pos: u32| {
-        let file = &files[text.owner[pos as usize].0 as usize];
-        let elems = run_elems(files, text, pos, len).iter();
-        let leaves = elems.flat_map(|e| &file.leaves[e.leaf_start as usize..e.leaf_end as usize]);
-        leaves.map(|leaf| file.leaf_text(leaf))
-    };
-    spelling(a).eq(spelling(b))
+fn spellings<'a>(
+    positions: &'a [u32],
+    files: &'a [Arc<FileIndex>],
+    text: &'a RunText,
+    len: usize,
+) -> impl Iterator<Item = u64> + 'a {
+    let spelling = move |&p: &u32| text.spelling(files, p, len);
+    positions.iter().map(spelling)
+}
+
+/// A copy spelled unlike anything else, such as a renamed part of a wall,
+/// has nothing to be a clone of here.
+fn held_twice(
+    mut positions: Vec<u32>,
+    files: &[Arc<FileIndex>],
+    text: &RunText,
+    len: usize,
+) -> Vec<u32> {
+    let mut holders: FxHashMap<u64, u32> = FxHashMap::default();
+    for spelling in spellings(&positions, files, text, len) {
+        *holders.entry(spelling).or_default() += 1;
+    }
+    positions.retain(|&p| holders[&text.spelling(files, p, len)] >= 2);
+    positions
 }
 
 fn run_elems<'f>(files: &'f [Arc<FileIndex>], text: &RunText, pos: u32, len: usize) -> &'f [Frag] {
