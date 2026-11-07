@@ -539,10 +539,11 @@ fn touches(analysis: &Analysis, id: usize, shown: &str) -> bool {
 fn notes(analysis: &Analysis, shown: &str, small: usize, min_tokens: u32) -> Option<String> {
     let unscanned = !analysis.files.iter().any(|f| is_under(&f.path, shown));
     let unscanned = unscanned.then(|| {
-        format!(
-            "{} was not checked: the scan the baseline describes skips everything there.",
-            shown.trim_end_matches('/')
-        )
+        let place = match shown.trim_end_matches('/') {
+            "" => "The scanned path",
+            named => named,
+        };
+        format!("{place} was not checked: the scan the baseline describes skips everything there.")
     });
     let groups = if small == 1 { "group is" } else { "groups are" };
     let small = (small > 0).then(|| {

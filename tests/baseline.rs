@@ -1151,3 +1151,18 @@ fn check_flags_a_new_copy_that_is_not_utf8() {
     let (code, out) = doppelscan(&dir, &["check", "--base", "HEAD"]);
     assert_eq!(code, 1, "{out}");
 }
+
+// Catches the note naming a place that is not there: with no folder asked
+// for, an empty scan printed " was not checked: ..." with no subject.
+#[test]
+fn an_empty_scan_note_has_a_subject() {
+    let dir = std::env::temp_dir().join(format!("doppelscan-empty-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    git(&dir, &["init", "-q"]);
+    std::fs::write(dir.join("notes.txt"), "no source here\n").unwrap();
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-qm", "init"]);
+    let (_, out) = doppelscan(&dir, &["check", "--base", "HEAD"]);
+    assert!(out.contains("The scanned path was not checked"), "{out}");
+}
