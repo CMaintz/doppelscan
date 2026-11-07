@@ -347,10 +347,30 @@ fn distinct_positions(
     if !is_tandem(&text.symbols[first..first + len]) {
         return Some((kept, Vec::new()));
     }
-    if !shares_a_block(&kept, text) {
-        return Some((kept.clone(), kept));
+    if shares_a_block(&kept, text) {
+        return spelled_like_copies(files, text, sorted, &kept, len);
     }
-    spelled_like_copies(files, text, sorted, &kept, len)
+    let in_part = in_a_lone_copys_part(files, text, sorted, len);
+    Some(in_part.unwrap_or_else(|| (kept.clone(), kept)))
+}
+
+/// A run too long to fit its wall twice keeps one wall position, the first,
+/// which need not be the part a copy was taken from. Only a copy alone in its
+/// block moves it: when the copy is a wall too, wall and copy share a run of
+/// every length, and spelling each one's positions costs a sixth more time on
+/// such tables. With no part to move to, as for a renamed copy, the first fit
+/// stays a clone with parameters.
+fn in_a_lone_copys_part(
+    files: &[Arc<FileIndex>],
+    text: &RunText,
+    sorted: &[u32],
+    len: usize,
+) -> Option<(Vec<u32>, Vec<u32>)> {
+    if !shares_a_block(sorted, text) {
+        return None;
+    }
+    let found = spelled_like_copies(files, text, sorted, sorted, len)?;
+    (found.0.len() >= 2).then_some(found)
 }
 
 fn spelled_like_copies(

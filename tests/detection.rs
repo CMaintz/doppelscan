@@ -557,6 +557,93 @@ fn a_part_of_a_wall_copied_verbatim_is_a_clone_at_that_part() {
     );
 }
 
+/// Every setting of a wall a line each, and all but the first in a copy, so
+/// the run of the copy's length fits the wall at two overlapping places.
+fn one_line_wall_and_copy() -> (String, String) {
+    let line = |n: &&str| {
+        format!(
+            "    config.put(\"{n}\", source.read(\"{n}\", {n}.class).trim());
+"
+        )
+    };
+    let rows: Vec<String> = SETTING_NAMES.iter().map(line).collect();
+    let wall = format!(
+        "class A {{
+  void init() {{
+{}  }}
+}}
+",
+        rows.concat()
+    );
+    (wall, settings_copy(&rows[1..]))
+}
+
+fn ranges(g: &Group) -> Vec<(&str, u32, u32)> {
+    let occurrences = g.occurrences.iter();
+    occurrences
+        .map(|o| (o.file.as_str(), o.start_line, o.end_line))
+        .collect()
+}
+
+// Catches positions being taken before asking which of them the copy spells
+// like: a wall too short to hold the run twice leaves the first fit standing,
+// which here is the wrong setting's and fails the density limit.
+#[test]
+fn a_copy_of_nearly_a_whole_wall_is_found_at_its_own_part() {
+    let (wall, copy) = one_line_wall_and_copy();
+    let gs = scan_wall_and_copy(&wall, &copy);
+    assert_eq!(gs.len(), 1, "{gs:#?}");
+    assert_eq!(ranges(&gs[0]), [("A.java", 4, 9), ("B.java", 3, 8)]);
+}
+
+// Catches the same wrong pick where the density limit would not reveal it.
+#[test]
+fn a_copy_of_nearly_a_whole_wall_keeps_its_part_at_any_density_limit() {
+    let (wall, copy) = one_line_wall_and_copy();
+    let opts = ScanOptions {
+        max_param_density: 1000.0,
+        ..Default::default()
+    };
+    let gs = groups(&scan_with(&[("A.java", &wall), ("B.java", &copy)], opts));
+    let verbatim = gs.iter().find(|g| ranges(g).contains(&("B.java", 3, 8)));
+    assert_eq!(
+        ranges(verbatim.expect("the copy")),
+        [("A.java", 4, 9), ("B.java", 3, 8)]
+    );
+}
+
+// Catches the wall's own period deciding the part: every row recurs in the
+// wall, so the first fit has a twin of its own and would win over the part
+// the copy spells like.
+#[test]
+fn a_copy_of_most_of_a_periodic_table_is_found_at_its_part() {
+    let rows = ["0x01, 0x02, 0x03, 0x04", "0x05, 0x06, 0x07, 0x08"];
+    let row = |i: usize| {
+        format!(
+            "    {},
+",
+            rows[i % 2]
+        )
+    };
+    let body = |lines: std::ops::Range<usize>| lines.map(row).collect::<String>();
+    let wall = format!(
+        "T = [
+{}]
+",
+        body(1..41)
+    );
+    let copy = format!(
+        "C = [
+{}]
+print(C)
+",
+        body(2..32)
+    );
+    let gs = groups_of(&[("t.py", &wall), ("c.py", &copy)]);
+    let verbatim = [("t.py", 3, 32), ("c.py", 2, 31)];
+    assert!(gs.iter().any(|g| ranges(g) == verbatim), "{gs:#?}");
+}
+
 // Catches the wall's other members coming back as noise: renamed fields in a
 // second class are what every pair of data classes has in common.
 #[test]
