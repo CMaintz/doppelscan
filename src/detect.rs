@@ -320,20 +320,24 @@ fn is_covered(group: &RawGroup, accepted_by_file: &FxHashMap<u32, Vec<Occ>>) -> 
 
 /// The occurrences of `group` spelled alike, per spelling held at least
 /// twice. Copies with no difference need no parameters, so they stand
-/// whatever made the whole group fail. The spelling goes into the hash, or
-/// two subsets would share a fingerprint and `show` and `accept` could not
-/// tell them apart.
+/// whatever made the whole group fail. Each subset is numbered in scan order
+/// and the number goes into the hash, since `show` and `accept` have to tell
+/// subsets apart; hashing the spelling would, but then a rename inside the
+/// copies would bring an accepted subset back.
 fn verbatim_subsets(group: RawGroup, files: &[Arc<FileIndex>]) -> Vec<RawGroup> {
     let spelled = |o: Occ| (spelling_hash(&o, files), o);
     let mut occs: Vec<(u64, Occ)> = group.occs.into_iter().map(spelled).collect();
     occs.sort_by_key(|(spelling, _)| *spelling);
-    occs.chunk_by(|a, b| a.0 == b.0)
-        .filter(|alike| alike.len() >= 2)
-        .map(|alike| RawGroup {
-            hash: combine(group.hash, alike[0].0),
+    let alike = occs.chunk_by(|a, b| a.0 == b.0);
+    let mut subsets: Vec<_> = alike.filter(|copies| copies.len() >= 2).collect();
+    subsets.sort_by_key(|copies| (copies[0].1.file, copies[0].1.start));
+    let numbered = subsets.iter().zip(1..);
+    numbered
+        .map(|(copies, number)| RawGroup {
+            hash: combine(group.hash, number),
             tokens: group.tokens,
             run_len: group.run_len,
-            occs: alike.iter().map(|(_, o)| o.clone()).collect(),
+            occs: copies.iter().map(|(_, o)| o.clone()).collect(),
         })
         .collect()
 }

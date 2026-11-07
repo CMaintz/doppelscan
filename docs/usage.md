@@ -163,6 +163,11 @@ baseline entry, if it has one, stays until the code is gone. `near` groups
 have no fingerprint and are not affected, and `similar` still reports a match
 on an accepted group, under `accepted` in its JSON.
 
+Copies spelled alike that stand on their own because their group went over the
+density limit behave the same: a rename keeps their fingerprint. Several such
+subsets of one group are numbered in file order, so when the first goes, the
+next takes over its fingerprint and an `accept` on it.
+
 ## Gating new duplication
 
 `doppelscan check` fails (exit 1) only on duplication a change adds, so it

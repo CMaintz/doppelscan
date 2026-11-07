@@ -603,6 +603,58 @@ fn each_verbatim_subset_of_a_vetoed_group_has_its_own_fingerprint() {
     assert_ne!(gs[0].fingerprint, gs[1].fingerprint);
 }
 
+fn fingerprints_of(files: &[(&str, String)]) -> Vec<(String, Vec<String>)> {
+    let files: Vec<(&str, &str)> = files.iter().map(|(p, t)| (*p, t.as_str())).collect();
+    let gs = groups(&scan_with(&files, ScanOptions::default()));
+    let held = |g: &Group| group_files(g).iter().map(|f| f.to_string()).collect();
+    let mut found: Vec<_> = gs
+        .iter()
+        .map(|g| (g.fingerprint.clone(), held(g)))
+        .collect();
+    found.sort_by(|a: &(String, Vec<String>), b| a.1.cmp(&b.1));
+    found
+}
+
+// Catches spelling reaching a subset's fingerprint: a rename inside the
+// verbatim copies would bring an accepted group back under a new one.
+#[test]
+fn renaming_inside_a_verbatim_subset_keeps_its_fingerprint() {
+    let renamed = |t: String| t.replace("event", "evt");
+    let c = ("C.java", header_mapper("C", "Azure"));
+    let before = [
+        ("A.java", header_mapper("A", "Dapr")),
+        ("B.java", header_mapper("B", "Dapr")),
+        c.clone(),
+    ];
+    let after = [
+        ("A.java", renamed(header_mapper("A", "Dapr"))),
+        ("B.java", renamed(header_mapper("B", "Dapr"))),
+        c,
+    ];
+    let found = fingerprints_of(&before);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found, fingerprints_of(&after));
+}
+
+// Catches subsets being told apart by anything a rename touches, and subsets
+// of one group sharing a fingerprint once spelling is out of it.
+#[test]
+fn renaming_keeps_each_subset_of_a_split_group_apart() {
+    let mapper = |c, spelling, param| header_mapper(c, spelling).replace("event", param);
+    let copies = |dapr_param| {
+        [
+            ("A.java", mapper("A", "Dapr", dapr_param)),
+            ("B.java", mapper("B", "Dapr", dapr_param)),
+            ("C.java", mapper("C", "Azure", "event")),
+            ("D.java", mapper("D", "Azure", "event")),
+        ]
+    };
+    let found = fingerprints_of(&copies("event"));
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert_ne!(found[0].0, found[1].0);
+    assert_eq!(found, fingerprints_of(&copies("evt")));
+}
+
 // Catches runs being limited to statement blocks: two constructor calls
 // sharing a long argument prefix are a clone even though the calls differ.
 #[test]
