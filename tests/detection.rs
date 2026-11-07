@@ -1069,3 +1069,80 @@ fn a_tandem_run_copied_to_another_file_is_a_clone() {
         .collect();
     assert_eq!(places, [("A.java", 2), ("A.java", 4), ("B.java", 2)]);
 }
+
+fn py_table(name: &str, row: &str, rows: usize) -> String {
+    format!("{name} = [\n{}]\n", format!("    {row}\n").repeat(rows))
+}
+
+fn groups_of(files: &[(&str, &str)]) -> Vec<Group> {
+    groups(&scan_with(files, ScanOptions::default()))
+}
+
+const ZERO_ROW: &str = "0, 0, 0, 0, 0, 0, 0, 0,";
+
+// Catches every length that fits the shorter table once counting as a copy
+// of the longer: tilings at different lengths do not subsume one another, so
+// the pair floods the report with one group per length.
+#[test]
+fn a_zero_table_and_a_shorter_one_are_one_group() {
+    let (long, short) = (py_table("A", ZERO_ROW, 100), py_table("B", ZERO_ROW, 40));
+    let gs = groups_of(&[("a.py", &long), ("b.py", &short)]);
+    assert_eq!(gs.len(), 1, "{} groups", gs.len());
+    let in_short: Vec<_> = gs[0]
+        .occurrences
+        .iter()
+        .filter(|o| o.file == "b.py")
+        .map(|o| (o.start_line, o.end_line))
+        .collect();
+    assert_eq!(in_short, [(2, 41)]);
+}
+
+// The same flood with both tables in one file, where only blocks tell them
+// apart.
+#[test]
+fn two_zero_arrays_in_one_file_are_one_group() {
+    let row = "    0, 0, 0, 0, 0, 0, 0, 0,\n";
+    let text = format!(
+        "const a = [\n{}];\nconst b = [\n{}];\n",
+        row.repeat(60),
+        row.repeat(25)
+    );
+    let gs = groups_of(&[("t.ts", &text)]);
+    assert_eq!(gs.len(), 1, "{} groups", gs.len());
+}
+
+// Catches a rule that only looks at whether the copy repeats at the next
+// offset: with a period of two the run also fits at the odd phase, once.
+#[test]
+fn a_table_with_a_longer_period_is_one_group_too() {
+    let row = "0, \"a\", 0, \"a\", 0, \"a\", 0, \"a\",";
+    let (long, short) = (py_table("A", row, 100), py_table("B", row, 40));
+    let gs = groups_of(&[("a.py", &long), ("b.py", &short)]);
+    assert_eq!(gs.len(), 1, "{} groups", gs.len());
+}
+
+// Catches the longest run being the plain pair of the shorter table with the
+// start of the longer, which leaves the tiled runs below it nothing to lose
+// to: the longer table holds it less than twice.
+#[test]
+fn a_table_under_twice_as_long_is_one_group() {
+    let (long, short) = (py_table("A", ZERO_ROW, 60), py_table("B", ZERO_ROW, 40));
+    let gs = groups_of(&[("a.py", &long), ("b.py", &short)]);
+    assert_eq!(gs.len(), 1, "{} groups", gs.len());
+}
+
+// Catches a copy counting only while the run fits it exactly once: the wall
+// breaks between its two stretches and the copy runs one statement past
+// either, so its whole length is no repeat and this is the only group there
+// is to report.
+#[test]
+fn a_copy_longer_than_any_stretch_of_the_wall_is_still_found() {
+    let statement = "    r.add(p.parse(c, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11));\n";
+    let stretch = statement.repeat(4);
+    let wall = format!("void m() {{\n{stretch}    other();\n{stretch}}}\n");
+    let copy = format!("void n() {{\n{}}}\n", statement.repeat(5));
+    let gs = groups_of(&[("A.java", &wall), ("B.java", &copy)]);
+    assert_eq!(gs.len(), 1, "{gs:#?}");
+    let files: Vec<_> = gs[0].occurrences.iter().map(|o| o.file.as_str()).collect();
+    assert_eq!(files, ["A.java", "A.java", "B.java"]);
+}

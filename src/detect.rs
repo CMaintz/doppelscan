@@ -2,6 +2,8 @@
 //! maximal repeats, then subsumption so each duplication is reported once
 //! at its largest extent.
 
+use std::cmp::Reverse;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
@@ -210,11 +212,38 @@ fn run_groups(files: &[Arc<FileIndex>], min_tokens: u32) -> Vec<RawGroup> {
         positions: repeats.positions(rep),
         one_block: repeats.all_alike(rep, &block_until),
     };
-    repeats
+    let found = repeats
         .found
         .par_iter()
         .filter_map(|rep| run_group(files, &text, run_of(rep), min_tokens))
-        .collect()
+        .collect();
+    without_nested_copies(found)
+}
+
+/// A group from a run, with the positions (each the run's length long) where
+/// a tandem run sits alone in its block. Empty for any other run.
+struct RunFind {
+    group: RawGroup,
+    copies: Vec<u32>,
+}
+
+/// Drops a tandem run whose copies all sit inside a longer run's. A shorter
+/// table fits a periodic one at every length, each tiling it differently, so
+/// subsumption, which needs one occurrence inside another, keeps them all.
+/// Blocks end in separators, so positions compare across them, and what is
+/// held never nests: the longest come first and a nested copy is not added.
+fn without_nested_copies(mut found: Vec<RunFind>) -> Vec<RawGroup> {
+    found.sort_by_key(|f| Reverse(f.group.run_len));
+    let mut held: BTreeMap<u32, u32> = BTreeMap::new();
+    found.retain(|f| {
+        let len = f.group.run_len as u32;
+        let is_held =
+            |p: u32| matches!(held.range(..=p).next_back(), Some((_, &end)) if p + len <= end);
+        let fresh: Vec<u32> = f.copies.iter().copied().filter(|&p| !is_held(p)).collect();
+        held.extend(fresh.iter().map(|&p| (p, p + len)));
+        f.copies.is_empty() || !fresh.is_empty()
+    });
+    found.into_iter().map(|f| f.group).collect()
 }
 
 /// A repeat's occurrences, in suffix order and not yet sorted.
@@ -240,7 +269,7 @@ fn run_group(
     text: &RunText,
     run: Run,
     min_tokens: u32,
-) -> Option<RawGroup> {
+) -> Option<RunFind> {
     let Run { len, positions, .. } = run;
     let p0 = positions[0] as usize;
     let tokens = (text.token_prefix[p0 + len] - text.token_prefix[p0]) as u32;
@@ -249,14 +278,15 @@ fn run_group(
     }
     let mut sorted = positions.to_vec();
     sorted.sort_unstable();
-    let kept = distinct_positions(files, text, &sorted, len)?;
+    let (kept, copies) = distinct_positions(files, text, &sorted, len)?;
     let occs: Vec<Occ> = kept.iter().map(|&p| run_occ(files, text, p, len)).collect();
-    (occs.len() >= 2).then(|| RawGroup {
+    let group = (occs.len() >= 2).then(|| RawGroup {
         hash: run_hash(run_elems(files, text, p0 as u32, len)),
         tokens,
         run_len: len,
         occs,
-    })
+    })?;
+    Some(RunFind { group, copies })
 }
 
 fn run_hash(elems: &[Frag]) -> u64 {
@@ -279,20 +309,25 @@ fn run_occ(files: &[Arc<FileIndex>], text: &RunText, pos: u32, len: usize) -> Oc
 /// near-identical members a tandem repeat fits at every multiple of its
 /// period, which is the wall's shape and no clone, so such a run counts only
 /// through a copy elsewhere, at the wall positions spelled exactly like it.
+/// Returns the positions and, for a tandem run, its copies.
 fn distinct_positions(
     files: &[Arc<FileIndex>],
     text: &RunText,
     sorted: &[u32],
     len: usize,
-) -> Option<Vec<u32>> {
+) -> Option<(Vec<u32>, Vec<u32>)> {
     let kept: Vec<u32> = non_overlapping(sorted, len, text, |_| true).collect();
     let first = sorted[0] as usize;
-    if !is_tandem(&text.symbols[first..first + len]) || !shares_a_block(&kept, text) {
-        return Some(kept);
+    if !is_tandem(&text.symbols[first..first + len]) {
+        return Some((kept, Vec::new()));
+    }
+    if !shares_a_block(&kept, text) {
+        return Some((kept.clone(), kept));
     }
     let copy = alone_in_its_block(&kept, text)?;
     let same_text = |p| spelled_alike(files, text, p, copy, len);
-    Some(non_overlapping(sorted, len, text, same_text).collect())
+    let wall = non_overlapping(sorted, len, text, same_text).collect();
+    Some((wall, vec![copy]))
 }
 
 fn alone_in_its_block(sorted: &[u32], text: &RunText) -> Option<u32> {
