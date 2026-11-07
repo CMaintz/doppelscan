@@ -952,3 +952,16 @@ fn only_an_unspaced_hyphen_joins_a_name() {
         assert_eq!(scope.as_deref(), Some(name), "{header}");
     }
 }
+
+// Catches a hyphen chain being walked whole: every block of a statement
+// repeats the walk and stores the result as a label, so a long chain before
+// many blocks costs time and memory quadratic in the file.
+#[test]
+fn a_hyphen_chain_label_stays_short() {
+    let chain = vec!["a"; 3000].join("-");
+    let a = format!("{chain} {{\nint x = 1;\n{CALLS}}}\n");
+    let b = format!("other() {{\nchar *s = name(3, 4);\n{CALLS}}}\n");
+    let found = scan(&[("a.c", &a), ("b.c", &b)]);
+    let scope = groups(&found)[0].occurrences[0].scope.clone().unwrap();
+    assert!(scope.len() < 1100, "{} bytes", scope.len());
+}

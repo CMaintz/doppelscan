@@ -545,6 +545,12 @@ struct Builder<'a> {
     scopes: Vec<String>,
     scope_spans: Vec<(u32, u32)>,
     blocks: Vec<Block>,
+    /// Leaf indices of every `(` and every name, ascending. A statement can
+    /// open thousands of blocks (a long array of hashes), and each asks for
+    /// the first of these in the statement: reading its leaves every time is
+    /// quadratic, and a statement's leaves include those of closed blocks.
+    parens: Vec<u32>,
+    names: Vec<u32>,
 }
 
 impl<'a> Builder<'a> {
@@ -560,6 +566,8 @@ impl<'a> Builder<'a> {
             scopes: Vec::new(),
             scope_spans: Vec::new(),
             blocks: vec![Block::new(false, None, None, lang_seed)],
+            parens: Vec::new(),
+            names: Vec::new(),
         }
     }
 
@@ -617,6 +625,7 @@ impl<'a> Builder<'a> {
     fn push_leaf(&mut self, tok: &Tok) {
         let hash = self.leaf_hash(tok);
         let index = self.leaves.len() as u32;
+        self.note_header_leaf(tok, index);
         self.leaves.push(Leaf {
             start: tok.start,
             end: tok.end,
@@ -628,6 +637,14 @@ impl<'a> Builder<'a> {
             token: (hash ^ (hash >> 32)) as u32,
         });
         self.fold_into_stmt(tok.start, index, hash);
+    }
+
+    fn note_header_leaf(&mut self, tok: &Tok, index: u32) {
+        if tok.class == LeafClass::Identifier {
+            self.names.push(index);
+        } else if self.source.as_bytes()[tok.start as usize] == b'(' {
+            self.parens.push(index);
+        }
     }
 
     fn fold_into_stmt(&mut self, start: u32, leaf: u32, hash: u64) {
@@ -787,24 +804,27 @@ impl<'a> Builder<'a> {
     /// or its first name when it has no parentheses (`class Cart {`,
     /// `dependencies {`). Control flow (`if (x) {`) names nothing.
     fn header_name(&mut self) -> Option<&'a str> {
-        let leaf_start = self.top().stmt.as_ref()?.leaf_start as usize;
-        let header = &self.leaves[leaf_start..];
-        let at = match header.iter().position(|l| self.leaf_text(l) == "(") {
-            Some(0) => return None,
-            Some(p) => p - 1,
-            None => first_name(header)?,
+        let leaf_start = self.top().stmt.as_ref()?.leaf_start;
+        let header = &self.leaves[leaf_start as usize..];
+        let at = match first_from(&self.parens, leaf_start) {
+            Some(p) if p == leaf_start => return None,
+            Some(p) => (p - leaf_start - 1) as usize,
+            None => first_name(header, first_from(&self.names, leaf_start)? - leaf_start),
         };
         (header[at].class == LeafClass::Identifier).then(|| self.hyphenated(header, at))
     }
 
     /// The whole of a name around `header[at]`: shell's `my-task` and
-    /// PowerShell's `Get-Total` are three tokens each.
+    /// PowerShell's `Get-Total` are three tokens each. The walk stops at
+    /// `MAX_QUALIFIED_SCOPE` either way, since each block of a statement
+    /// repeats it and keeps the result as a label.
     fn hyphenated(&self, header: &[Leaf], at: usize) -> &'a str {
+        let near = |l: &Leaf| l.start.abs_diff(header[at].start) < MAX_QUALIFIED_SCOPE as u32;
         let (mut first, mut last) = (at, at);
-        while first >= 2 && self.hyphen_joins(&header[first - 2..]) {
+        while first >= 2 && near(&header[first - 2]) && self.hyphen_joins(&header[first - 2..]) {
             first -= 2;
         }
-        while self.hyphen_joins(&header[last..]) {
+        while near(&header[last]) && self.hyphen_joins(&header[last..]) {
             last += 2;
         }
         &self.source[header[first].start as usize..header[last].end as usize]
@@ -871,12 +891,20 @@ impl<'a> Builder<'a> {
     }
 }
 
+/// The first of `sorted` at or after `leaf`.
+fn first_from(sorted: &[u32], leaf: u32) -> Option<u32> {
+    sorted.get(sorted.partition_point(|&l| l < leaf)).copied()
+}
+
 /// Two names in a row are a kind word no keyword list covers and the name
-/// it introduces: `contract Cart`, `message Order`, `task build`.
-fn first_name(header: &[Leaf]) -> Option<usize> {
-    let is_name = |l: &Leaf| l.class == LeafClass::Identifier;
-    let at = header.iter().position(is_name)?;
-    Some(at + usize::from(header.get(at + 1).is_some_and(is_name)))
+/// it introduces: `contract Cart`, `message Order`, `task build`. `at` is
+/// the first name.
+fn first_name(header: &[Leaf], at: u32) -> usize {
+    let at = at as usize;
+    let next_is_name = header
+        .get(at + 1)
+        .is_some_and(|l| l.class == LeafClass::Identifier);
+    at + usize::from(next_is_name)
 }
 
 impl Block {
