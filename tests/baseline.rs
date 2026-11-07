@@ -311,6 +311,150 @@ fn pruning_one_of_two_copies_in_a_function_drops_one_place() {
     assert_eq!(pruned.groups[0].places.len(), 2);
 }
 
+// `sumTotals` and `parseRows` as two methods of one class, so the clone
+// spanning both sits at `<file>#Cart` until an edit cuts it to one method.
+fn cart(parse_rows: &str) -> String {
+    let method = |code: &str| code.replace("export function ", "");
+    let total = method(&renamed(SUM_TOTALS, 0));
+    format!(
+        "class Cart {{{total}{}}}
+",
+        method(parse_rows)
+    )
+}
+
+fn cart_in_two_files() -> Vec<(&'static str, String)> {
+    let parse_rows = renamed(PARSE_ROWS, 0);
+    vec![("a.ts", cart(&parse_rows)), ("b.ts", cart(&parse_rows))]
+}
+
+fn cart_cut_to_one_method() -> Analysis {
+    let edited = cart(
+        "flush(): void { queue.clear(); }
+",
+    );
+    scan(&[("a.ts", cart(&renamed(PARSE_ROWS, 0))), ("b.ts", edited)])
+}
+
+// Catches an index of exact places: the accepted clone sits at `a.ts#Cart`,
+// the shrunk one at `a.ts#Cart.sumTotals0`, and the two share no string.
+#[test]
+fn a_clone_shrunk_into_a_method_is_excused_by_the_enclosing_class() {
+    let baseline = Baseline::from_analysis(&scan(&cart_in_two_files()), &options());
+    assert_eq!(baseline.groups[0].places, ["a.ts#Cart", "b.ts#Cart"]);
+    let now = cart_cut_to_one_method();
+    let current = Baseline::from_analysis(&now, &options());
+    assert_eq!(
+        current.groups[0].places,
+        ["a.ts#Cart.sumTotals0", "b.ts#Cart.sumTotals0"]
+    );
+    assert!(baseline.new_groups(&now).is_empty());
+
+    let pruned = baseline.pruned(&now);
+    assert_eq!(pruned.groups, baseline.groups, "both places are still held");
+}
+
+// Catches a prune that finds entries by place alone: moved copies hold no
+// place, but their entry still has to excuse them.
+#[test]
+fn pruning_keeps_the_entry_of_a_moved_clone_without_its_places() {
+    let baseline = Baseline::from_analysis(&scan(&two_copies()), &options());
+    let moved = scan(&[
+        ("lib/x.ts", renamed(SUM_TOTALS, 7)),
+        ("lib/y.ts", renamed(SUM_TOTALS, 8)),
+    ]);
+    let pruned = baseline.pruned(&moved);
+    assert_eq!(pruned.groups.len(), 1);
+    assert_eq!(pruned.groups[0].occurrences, 2);
+    assert!(pruned.groups[0].places.is_empty());
+    assert!(pruned.new_groups(&moved).is_empty());
+}
+
+fn accepted(fingerprint: &str, occurrences: usize, tokens: u32, places: &[&str]) -> Entry {
+    Entry {
+        fingerprint: fingerprint.to_string(),
+        occurrences,
+        tokens,
+        places: places.iter().map(|p| p.to_string()).collect(),
+    }
+}
+
+fn three_copies() -> Analysis {
+    let mut files = two_copies();
+    files.push(("c.ts", renamed(SUM_TOTALS, 3)));
+    scan(&files)
+}
+
+// Catches stopping at the fingerprint: too few copies under one entry says
+// nothing about a larger entry whose places cover this group.
+#[test]
+fn a_group_with_more_copies_than_its_entry_can_still_be_shrunk_from_another() {
+    let now = three_copies();
+    let mut baseline = Baseline::from_analysis(&now, &options());
+    let tokens = baseline.groups[0].tokens;
+    let places = baseline.groups[0].places.clone();
+    let places: Vec<&str> = places.iter().map(String::as_str).collect();
+    let same = accepted(&baseline.groups[0].fingerprint, 2, tokens, &places[..2]);
+    baseline.groups = vec![same.clone()];
+    assert_eq!(
+        baseline.new_groups(&now),
+        vec![1],
+        "two copies, three found"
+    );
+
+    baseline.groups.push(accepted("larger", 3, tokens, &places));
+    assert!(baseline.new_groups(&now).is_empty());
+}
+
+// Catches one slot per fingerprint: fingerprints are truncated hashes, so two
+// entries can share one, and either may be the one with enough copies. Their
+// places are stale so that only the count can excuse the group.
+#[test]
+fn every_entry_sharing_a_fingerprint_counts() {
+    let now = three_copies();
+    let mut baseline = Baseline::from_analysis(&now, &options());
+    let found = baseline.groups[0].clone();
+    let enough = accepted(&found.fingerprint, 3, found.tokens, &["y.ts"]);
+    let short = accepted(&found.fingerprint, 2, found.tokens, &["z.ts"]);
+    baseline.groups = vec![enough.clone(), short.clone()];
+    assert!(baseline.new_groups(&now).is_empty());
+    assert_eq!(baseline.pruned(&now).groups.len(), 2);
+
+    baseline.groups = vec![short, enough];
+    assert!(baseline.new_groups(&now).is_empty());
+    assert_eq!(baseline.pruned(&now).groups.len(), 2);
+}
+
+// Catches treating a shared place as enough: both places are accepted, but
+// the second copy in `f` is one more than the entry holds.
+#[test]
+fn a_shrunk_group_with_more_copies_at_a_place_than_the_entry_is_new() {
+    let body = r#"
+    for (const row of rows) {
+        if (row.ok) { total += row.value * rate; }
+        log(row.id, row.value, total);
+    }
+    audit(total);
+"#;
+    let gap = "    try { next(); } finally { done(); }
+";
+    let host = format!(
+        "function f() {{{body}{gap}{body}}}
+"
+    );
+    let other = format!(
+        "function g(x: number) {{{body}    return x;
+}}
+"
+    );
+    let now = scan(&[("a.ts", host), ("b.ts", other)]);
+    let mut baseline = Baseline::from_analysis(&now, &options());
+    assert_eq!(baseline.groups[0].places, ["a.ts#f", "a.ts#f", "b.ts#g"]);
+    let tokens = baseline.groups[0].tokens;
+    baseline.groups = vec![accepted("larger", 2, tokens, &["a.ts#f", "b.ts#g"])];
+    assert_eq!(baseline.new_groups(&now), vec![1]);
+}
+
 fn repo_accepting_its_baseline(name: &str) -> PathBuf {
     let dir = repo(name);
     assert_eq!(doppelscan(&dir, &["baseline"]).0, 0);

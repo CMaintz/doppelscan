@@ -5,6 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::detect::RawGroup;
@@ -169,8 +170,9 @@ impl Baseline {
 
     /// Ids of the groups in `now` that this baseline does not account for.
     pub fn new_groups(&self, now: &Analysis) -> Vec<usize> {
+        let index = Index::new(&self.groups);
         (1..=now.groups.len())
-            .filter(|&id| !self.excuses(&entry(now, &now.groups[id - 1])))
+            .filter(|&id| !index.excuses(&entry(now, &now.groups[id - 1])))
             .collect()
     }
 
@@ -183,16 +185,41 @@ impl Baseline {
     pub fn pruned(&self, now: &Analysis) -> Self {
         let found = now.groups.iter().chain(&now.accepted);
         let current: Vec<Entry> = found.map(|group| entry(now, group)).collect();
-        let groups = self
-            .groups
-            .iter()
-            .filter_map(|e| e.pruned(&current))
-            .collect();
+        let excused = Index::new(&self.groups).excused_groups(&current);
+        let kept = self.groups.iter().zip(&excused);
+        let groups = kept.filter_map(|(e, by)| e.pruned(by)).collect();
         Self {
             version: VERSION,
             settings: self.settings.clone(),
             scanned: self.scanned.clone(),
             groups,
+        }
+    }
+}
+
+/// Entries by what a group has to share with them to match, so a large
+/// baseline costs a lookup per group rather than a pass over every entry.
+struct Index<'a> {
+    entries: &'a [Entry],
+    by_fingerprint: FxHashMap<&'a str, Vec<usize>>,
+    by_place: FxHashMap<&'a str, Vec<usize>>,
+}
+
+impl<'a> Index<'a> {
+    /// Places without a `#` are left out: the shrink rule never uses them.
+    fn new(entries: &'a [Entry]) -> Self {
+        let mut by_fingerprint: FxHashMap<&str, Vec<usize>> = FxHashMap::default();
+        let mut by_place: FxHashMap<&str, Vec<usize>> = FxHashMap::default();
+        for (i, e) in entries.iter().enumerate() {
+            by_fingerprint.entry(&e.fingerprint).or_default().push(i);
+            for place in e.places.iter().filter(|p| p.contains('#')) {
+                by_place.entry(place).or_default().push(i);
+            }
+        }
+        Self {
+            entries,
+            by_fingerprint,
+            by_place,
         }
     }
 
@@ -201,30 +228,59 @@ impl Baseline {
     /// or when it is a smaller clone in places one entry already covered:
     /// an edit that shrinks a clone changes its fingerprint but adds nothing.
     fn excuses(&self, group: &Entry) -> bool {
-        self.groups.iter().any(|e| {
-            (e.fingerprint == group.fingerprint && group.occurrences <= e.occurrences)
-                || is_shrunk_from(group, e)
-        })
+        let copies = |&i: &usize| self.entries[i].occurrences;
+        self.same(group)
+            .iter()
+            .any(|i| group.occurrences <= copies(i))
+            || !self.shrunk_from(group).is_empty()
+    }
+
+    /// For each entry, the groups in `current` that lean on it.
+    fn excused_groups<'g>(&self, current: &'g [Entry]) -> Vec<Vec<&'g Entry>> {
+        let mut excused = vec![Vec::new(); self.entries.len()];
+        for group in current {
+            let same = self.same(group).iter().copied();
+            for i in same.chain(self.shrunk_from(group)) {
+                excused[i].push(group);
+            }
+        }
+        excused
+    }
+
+    /// Fingerprints are truncated hashes, so several entries can share one.
+    fn same(&self, group: &Entry) -> &[usize] {
+        let found = self.by_fingerprint.get(group.fingerprint.as_str());
+        found.map_or(&[], Vec::as_slice)
+    }
+
+    /// The entries `group` is a shrunk form of. Every place of such a group
+    /// pairs with a place of the entry, so holding something that encloses
+    /// its first place narrows the candidates without missing any.
+    fn shrunk_from(&self, group: &Entry) -> Vec<usize> {
+        let first = group.places.iter().take(1);
+        let enclosed = first.flat_map(|place| enclosing(place));
+        let held = enclosed.filter_map(|place| self.by_place.get(place));
+        let mut candidates: Vec<usize> = held.flatten().copied().collect();
+        candidates.sort_unstable();
+        candidates.dedup();
+        candidates.retain(|&i| is_shrunk_from(group, &self.entries[i]));
+        candidates
     }
 }
 
 impl Entry {
-    /// What the groups found now still need of this entry, or `None` when
-    /// they need none of it.
-    fn pruned(&self, current: &[Entry]) -> Option<Self> {
-        let is_same = |c: &Entry| c.fingerprint == self.fingerprint;
-        let excused = current
-            .iter()
-            .filter(|c| is_same(c) || is_shrunk_from(c, self));
-        let excused: Vec<&Entry> = excused.collect();
+    /// What `excused`, the groups leaning on this entry, still need of it,
+    /// or `None` when there are none.
+    fn pruned(&self, excused: &[&Entry]) -> Option<Self> {
         if excused.is_empty() {
             return None;
         }
         // Same and shrunk groups both lean on this entry at once, so what
         // only one of them holds has to stay; moved copies hold no place,
         // which is why the same group's own count also counts.
-        let places = self.places_held_by(&excused);
-        let copies = excused.iter().filter(|c| is_same(c)).map(|c| c.occurrences);
+        let places = self.places_held_by(excused);
+        let same = excused.iter().filter(|c| c.fingerprint == self.fingerprint);
+        let copies = same.map(|c| c.occurrences);
         let remaining = copies.max().unwrap_or(0).max(places.len());
         Some(self.narrowed(places, remaining))
     }
@@ -300,6 +356,15 @@ fn pairings<'a>(
             .max_by_key(|&i| big[i].len());
         slot.inspect(|&i| used[i] = true)
     })
+}
+
+/// Every `outer` for which `encloses(outer, place)` holds. Cuts at each `.`
+/// rather than parsing out the scope, since `encloses` does not parse either
+/// and a path can hold both a `.` and a `#`.
+fn enclosing(place: &str) -> impl Iterator<Item = &str> {
+    let cuts = place.match_indices('.').map(|(i, _)| &place[..i]);
+    cuts.filter(|outer| outer.contains('#'))
+        .chain(std::iter::once(place))
 }
 
 fn encloses(outer: &str, inner: &str) -> bool {
