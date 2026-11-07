@@ -1040,3 +1040,32 @@ fn a_last_case_ends_before_the_closing_brace() {
     let a = scan(&[("a.go", GO_SWITCH)]);
     assert_eq!(line_spans(&a), [(5, 8), (9, 12)]);
 }
+
+// Catches a run dropped because it repeats inside one file when another file
+// holds a verbatim copy: 4 statements in A and 2 in B are 34 tokens each, so
+// only the run of two reaches the default size.
+#[test]
+fn a_tandem_run_copied_to_another_file_is_a_clone() {
+    let statement = "    r.add(p.parse(c, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11));
+";
+    let method = |count: usize| {
+        format!(
+            "void m() {{
+{}}}
+",
+            statement.repeat(count)
+        )
+    };
+    let (a, b) = (method(4), method(2));
+    let gs = groups(&scan_with(
+        &[("A.java", &a), ("B.java", &b)],
+        ScanOptions::default(),
+    ));
+    assert_eq!(gs.len(), 1, "{gs:#?}");
+    let places: Vec<_> = gs[0]
+        .occurrences
+        .iter()
+        .map(|o| (o.file.as_str(), o.start_line))
+        .collect();
+    assert_eq!(places, [("A.java", 2), ("A.java", 4), ("B.java", 2)]);
+}
