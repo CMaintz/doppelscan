@@ -164,9 +164,9 @@ have no fingerprint and are not affected, and `similar` still reports a match
 on an accepted group, under `accepted` in its JSON.
 
 Copies spelled alike that stand on their own because their group went over the
-density limit behave the same: a rename keeps their fingerprint. Several such
-subsets of one group are numbered in file order, so when the first goes, the
-next takes over its fingerprint and an `accept` on it.
+density limit are the exception. Their fingerprint holds their spelling, so
+renaming their code changes it, and an `accept` of them or a baseline entry for
+them has to be redone. Moving them does not.
 
 ## Gating new duplication
 
