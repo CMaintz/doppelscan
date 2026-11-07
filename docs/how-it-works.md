@@ -11,7 +11,8 @@
    per window.
 4. A group is dropped when every occurrence sits inside a larger accepted
    clone, when it is a tandem repeat inside one block (a wall of getters, a
-   data table), or when it needs too many parameters to be a useful helper.
+   data table; only a verbatim copy of part of the wall elsewhere is reported),
+   or when it needs too many parameters to be a useful helper.
 5. Occurrences align leaf by leaf, so differing positions become parameters or
    renames. Each binding (declaration, parameter, loop, lambda or catch
    variable, destructured name) gets a scope: its function for a local, the

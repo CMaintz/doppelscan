@@ -173,10 +173,7 @@ fn run_group(
         return None;
     }
     positions.sort_unstable();
-    let kept: Vec<u32> = non_overlapping(&positions, len, text).collect();
-    if is_tandem(&text.symbols[p0..p0 + len]) && shares_a_block(&kept, text) {
-        return None;
-    }
+    let kept = distinct_positions(files, text, &positions, len)?;
     let occs: Vec<Occ> = kept
         .iter()
         .map(|&p| {
@@ -198,16 +195,55 @@ fn run_group(
     })
 }
 
+/// Disjoint positions worth reporting, in text order. Inside a wall of
+/// near-identical members a tandem repeat fits at every multiple of its
+/// period, which is the wall's shape and no clone, so such a run counts only
+/// through a copy elsewhere, at the wall positions spelled exactly like it.
+fn distinct_positions(
+    files: &[Arc<FileIndex>],
+    text: &RunText,
+    sorted: &[u32],
+    len: usize,
+) -> Option<Vec<u32>> {
+    let kept: Vec<u32> = non_overlapping(sorted, len, text, |_| true).collect();
+    let first = sorted[0] as usize;
+    if !is_tandem(&text.symbols[first..first + len]) || !shares_a_block(&kept, text) {
+        return Some(kept);
+    }
+    let copy = alone_in_its_block(&kept, text)?;
+    let same_text = |p| spelled_alike(files, text, p, copy, len);
+    Some(non_overlapping(sorted, len, text, same_text).collect())
+}
+
+fn alone_in_its_block(sorted: &[u32], text: &RunText) -> Option<u32> {
+    sorted
+        .chunk_by(|&a, &b| same_block(a, b, text))
+        .find(|block| block.len() == 1)
+        .map(|block| block[0])
+}
+
+fn spelled_alike(files: &[Arc<FileIndex>], text: &RunText, a: u32, b: u32, len: usize) -> bool {
+    let spelling = |pos: u32| {
+        let file = &files[text.owner[pos as usize].0 as usize];
+        let elems = run_elems(files, text, pos, len).iter();
+        let leaves = elems.flat_map(|e| &file.leaves[e.leaf_start as usize..e.leaf_end as usize]);
+        leaves.map(|leaf| file.leaf_text(leaf))
+    };
+    spelling(a).eq(spelling(b))
+}
+
 fn run_elems<'f>(files: &'f [Arc<FileIndex>], text: &RunText, pos: u32, len: usize) -> &'f [Frag] {
     let (fi, si, ei) = text.owner[pos as usize];
     &files[fi as usize].seqs.get(si as usize)[ei as usize..ei as usize + len]
 }
 
 fn shares_a_block(sorted: &[u32], text: &RunText) -> bool {
-    sorted.windows(2).any(|w| {
-        let (a, b) = (text.owner[w[0] as usize], text.owner[w[1] as usize]);
-        (a.0, a.1) == (b.0, b.1)
-    })
+    sorted.windows(2).any(|w| same_block(w[0], w[1], text))
+}
+
+fn same_block(a: u32, b: u32, text: &RunText) -> bool {
+    let (a, b) = (text.owner[a as usize], text.owner[b as usize]);
+    (a.0, a.1) == (b.0, b.1)
 }
 
 fn is_tandem(run: &[u32]) -> bool {
@@ -227,21 +263,26 @@ fn is_tandem(run: &[u32]) -> bool {
 }
 
 /// A tandem repeat ("s s s s") yields occurrences that overlap within one
-/// block; keep a greedy left-to-right set of disjoint ones.
+/// block; keep a greedy left-to-right set of disjoint ones among those
+/// `wanted` allows. `wanted` is asked only about positions clear of the last
+/// one taken, which keeps a full text comparison per taken position from
+/// turning quadratic on a long table.
 fn non_overlapping<'a>(
     sorted: &'a [u32],
     len: usize,
     text: &'a RunText,
+    wanted: impl Fn(u32) -> bool + 'a,
 ) -> impl Iterator<Item = u32> + 'a {
     let mut taken_end: Option<(u32, u32, usize)> = None;
     sorted.iter().copied().filter(move |&p| {
         let (fi, si, _) = text.owner[p as usize];
         let overlaps =
             matches!(taken_end, Some((f, s, end)) if f == fi && s == si && (p as usize) < end);
-        if !overlaps {
+        let take = !overlaps && wanted(p);
+        if take {
             taken_end = Some((fi, si, p as usize + len));
         }
-        !overlaps
+        take
     })
 }
 
