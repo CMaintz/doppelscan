@@ -69,6 +69,21 @@ fn group_count(dir: &Path, args: &[&str]) -> u64 {
     report["summary"]["groups"].as_u64().unwrap()
 }
 
+// Catches `bin` joining the built-in skips: it holds hand-written scripts and
+// entry points as often as build output, and a clone in one would go unseen.
+#[test]
+fn source_under_a_bin_directory_is_scanned() {
+    let dir = repo_with_config("bin-dir", "");
+    write(
+        &dir,
+        "tools/bin/lib/c.ts",
+        &CLONE.replace("sumTotals", "sumTaxes"),
+    );
+    let (code, out, err) = run(&dir, &[".", "--format", "json"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("tools/bin/lib/c.ts"), "{out}");
+}
+
 // Catches the config file not being read at all.
 #[test]
 fn config_settings_apply_without_flags() {
