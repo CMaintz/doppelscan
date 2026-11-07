@@ -293,20 +293,26 @@ fn run_group(
     let mut sorted = positions.to_vec();
     sorted.sort_unstable();
     let (kept, copies) = distinct_positions(files, text, &sorted, len)?;
-    let occ_at = |&p: &u32| {
-        let is_copy = copies.binary_search(&p).is_ok();
-        Occ {
-            is_copy,
-            ..run_occ(files, text, p, len)
-        }
-    };
-    let occs: Vec<Occ> = kept.iter().map(occ_at).collect();
+    let occs = run_occs(files, text, (&kept, &copies), len);
     (occs.len() >= 2).then(|| RawGroup {
         hash: run_hash(run_elems(files, text, p0 as u32, len)),
         tokens,
         run_len: len,
         occs,
     })
+}
+
+fn run_occs(
+    files: &[Arc<FileIndex>],
+    text: &RunText,
+    (kept, copies): (&[u32], &[u32]),
+    len: usize,
+) -> Vec<Occ> {
+    let occ_at = |&p: &u32| Occ {
+        is_copy: copies.binary_search(&p).is_ok(),
+        ..run_occ(files, text, p, len)
+    };
+    kept.iter().map(occ_at).collect()
 }
 
 fn run_hash(elems: &[Frag]) -> u64 {
