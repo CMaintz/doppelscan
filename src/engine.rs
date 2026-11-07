@@ -39,7 +39,8 @@ pub struct ScanOptions {
     pub skip_nested: bool,
     /// Groups needing more parameters than this per 100 tokens (and more
     /// than [`FREE_PARAMS`]) are dropped: they are tables of data or mapping
-    /// boilerplate, not a helper waiting to be extracted. Which parameters
+    /// boilerplate, not a helper waiting to be extracted. Copies among them
+    /// spelled exactly alike stay as groups of their own. Which parameters
     /// count is [`counts_as_parameter`].
     pub max_param_density: f32,
     /// Result paths are shown relative to this; default is the scanned path.

@@ -391,6 +391,8 @@ fn template(langs: &[(usize, usize)], tests: &[&str]) -> String {
 # brackets: left out of every report and never failing `check`. Changing
 # the code's structure changes the fingerprint, so it comes back for another
 # look; renames and changed literals do not, unless the scan is strict.
+# Copies split off a group over the density limit are the exception: renaming
+# their code changes their fingerprint, so accept them again after it.
 # [[accept]]
 # fingerprint = \"b4a94232d76e\"
 # reason = \"Generated from the OpenAPI spec; regenerated, never edited.\"

@@ -1,5 +1,6 @@
 use std::time::{Duration, Instant};
 
+use doppelscan::baseline::Baseline;
 use doppelscan::detect::RawGroup;
 use doppelscan::engine::{ScanOptions, Source, analyze, index_sources};
 use doppelscan::lang::lang_index_for_path;
@@ -708,6 +709,112 @@ fn data_tables_are_not_reported() {
             .map(|g| (g.tokens, g.parameters.len()))
             .collect::<Vec<_>>()
     );
+}
+
+/// A class copying eight fields under names built from `spelling`, so two of
+/// these with different spellings need more parameters than the density limit
+/// allows.
+fn header_mapper(class: &str, spelling: &str) -> String {
+    let fields = [
+        "Id", "Source", "Kind", "Version", "Length", "Time", "Trace", "State",
+    ];
+    let set = |f: &&str| {
+        format!(
+            "        message.setHeader({spelling}{f}, event.read{spelling}{f}());
+"
+        )
+    };
+    let body: String = fields.iter().map(set).collect();
+    format!(
+        "class {class} {{
+    void fill(Message message, Event event) {{
+{body}        done();
+    }}
+}}
+"
+    )
+}
+
+fn group_files(g: &Group) -> Vec<&str> {
+    g.occurrences.iter().map(|o| o.file.as_str()).collect()
+}
+
+// Catches one different occurrence vetoing the verbatim copies beside it.
+#[test]
+fn a_different_occurrence_does_not_veto_verbatim_copies() {
+    let opts = ScanOptions::default();
+    let files = [
+        ("A.java", header_mapper("A", "Dapr")),
+        ("B.java", header_mapper("B", "Dapr")),
+        ("C.java", header_mapper("C", "Azure")),
+    ];
+    let files: Vec<(&str, &str)> = files.iter().map(|(p, t)| (*p, t.as_str())).collect();
+    let gs = groups(&scan_with(&files, opts));
+    assert_eq!(gs.len(), 1, "{gs:#?}");
+    assert_eq!(group_files(&gs[0]), ["A.java", "B.java"]);
+    assert!(gs[0].parameters.is_empty(), "{:?}", gs[0].parameters);
+}
+
+// Catches subsets of one vetoed group keeping its fingerprint: `show` could
+// not tell them apart and accepting one would hide the other.
+#[test]
+fn each_verbatim_subset_of_a_vetoed_group_has_its_own_fingerprint() {
+    let opts = ScanOptions::default();
+    let files = [
+        ("A.java", header_mapper("A", "Dapr")),
+        ("B.java", header_mapper("B", "Dapr")),
+        ("C.java", header_mapper("C", "Azure")),
+        ("D.java", header_mapper("D", "Azure")),
+    ];
+    let files: Vec<(&str, &str)> = files.iter().map(|(p, t)| (*p, t.as_str())).collect();
+    let gs = groups(&scan_with(&files, opts));
+    assert_eq!(gs.len(), 2, "{gs:#?}");
+    assert_ne!(gs[0].fingerprint, gs[1].fingerprint);
+}
+
+/// A scan of one mapper per class and spelling, each in `<class>.java`.
+fn scan_mappers(mappers: &[(&str, &str)]) -> Analysis {
+    let file = |&(class, spelling): &(&str, &str)| {
+        (format!("{class}.java"), header_mapper(class, spelling))
+    };
+    let files: Vec<(String, String)> = mappers.iter().map(file).collect();
+    let files: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(p, t)| (p.as_str(), t.as_str()))
+        .collect();
+    scan_with(&files, ScanOptions::default())
+}
+
+// Catches a subset's fingerprint hanging on its neighbours, such as a number
+// in file order: the new pair would take the accepted pair's number, and the
+// pair it displaced would pass as shrunk, so `check` would see nothing new.
+#[test]
+fn a_new_verbatim_pair_sorting_first_is_new() {
+    let accepted = [("M1", "Dapr"), ("M2", "Dapr"), ("N", "Azure")];
+    let opts = ScanOptions::default();
+    let baseline = Baseline::from_analysis(&scan_mappers(&accepted), &opts);
+    let added = [("A1", "Kafka"), ("A2", "Kafka")];
+    let now = scan_mappers(&[added.as_slice(), &accepted].concat());
+    let new = baseline.new_groups(&now);
+    assert_eq!(new.len(), 1, "{:#?}", groups(&now));
+    assert_eq!(
+        group_files(&now.group(new[0], true)),
+        ["A1.java", "A2.java"]
+    );
+}
+
+// Catches the same dependence the other way: a move changing which subset
+// sorts first would hand a larger subset the smaller one's fingerprint.
+#[test]
+fn moving_a_larger_verbatim_subset_to_sort_first_is_not_new() {
+    let dapr = [("M1", "Dapr"), ("M2", "Dapr")];
+    let last = [("Z1", "Azure"), ("Z2", "Azure"), ("Z3", "Azure")];
+    let first = [("A1", "Azure"), ("A2", "Azure"), ("A3", "Azure")];
+    let opts = ScanOptions::default();
+    let baseline =
+        Baseline::from_analysis(&scan_mappers(&[dapr.as_slice(), &last].concat()), &opts);
+    let now = scan_mappers(&[first.as_slice(), &dapr].concat());
+    assert_eq!(baseline.new_groups(&now), Vec::<usize>::new());
 }
 
 // Catches runs being limited to statement blocks: two constructor calls

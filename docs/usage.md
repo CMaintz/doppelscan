@@ -65,7 +65,8 @@ Useful options: `--min-tokens` (default 50; 20 for `similar`, since snippets
 are small), `--strict` (identical names and
 literals only), `--only ts,java`, `--exclude 'generated/**'`,
 `--max-param-density` (default 8 per 100 tokens; higher shows data tables and
-mapping boilerplate too; in token-level languages a name that differs in
+mapping boilerplate too; a group over the limit still keeps its copies that
+are spelled exactly alike; in token-level languages a name that differs in
 several places is taken for a renamed local and not counted).
 
 `.gitignore` is honoured, and dependency/build directories, tool caches,
@@ -166,6 +167,11 @@ fingerprints differ from a non-strict scan's. Hex case does not matter. Its
 baseline entry, if it has one, stays until the code is gone. `near` groups
 have no fingerprint and are not affected, and `similar` still reports a match
 on an accepted group, under `accepted` in its JSON.
+
+Copies spelled alike that stand on their own because their group went over the
+density limit are the exception. Their fingerprint holds their spelling, so
+renaming their code changes it, and an `accept` of them or a baseline entry for
+them has to be redone. Moving them does not.
 
 ## Gating new duplication
 

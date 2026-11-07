@@ -2,6 +2,7 @@
 //! maximal repeats, then subsumption so each duplication is reported once
 //! at its largest extent.
 
+use std::cmp::Ordering;
 use std::fmt;
 use std::sync::{Arc, OnceLock};
 
@@ -95,8 +96,9 @@ pub struct RawGroup {
     pub occs: Vec<Occ>,
 }
 
-/// `useful` vetoes a group before it is accepted; a vetoed group does not
-/// shadow the smaller clones inside it.
+/// `useful` vetoes a group before it is accepted. A vetoed group does not
+/// shadow the smaller clones inside it; what survives of it is the copies
+/// spelled exactly alike, as groups of their own.
 pub fn detect(
     files: &[Arc<FileIndex>],
     min_tokens: u32,
@@ -108,7 +110,7 @@ pub fn detect(
     );
     groups.extend(runs);
     groups.retain_mut(keep_aligned);
-    suppress_subsumed(groups, useful)
+    suppress_subsumed(groups, files, useful)
 }
 
 fn node_groups(files: &[Arc<FileIndex>], min_tokens: u32) -> Vec<RawGroup> {
@@ -508,27 +510,81 @@ fn keep_aligned(group: &mut RawGroup) -> bool {
 /// since extracting the outer clone removes the inner one too.
 fn suppress_subsumed(
     mut groups: Vec<RawGroup>,
+    files: &[Arc<FileIndex>],
     useful: impl Fn(&RawGroup) -> bool,
 ) -> Vec<RawGroup> {
-    groups.sort_by(|a, b| {
-        b.tokens
-            .cmp(&a.tokens)
-            .then(b.occs.len().cmp(&a.occs.len()))
-            .then(byte_span(a).cmp(&byte_span(b)))
-            .then(a.hash.cmp(&b.hash))
-    });
-    let mut accepted_by_file: FxHashMap<u32, Vec<Occ>> = FxHashMap::default();
-    let mut kept = Vec::new();
+    groups.sort_by(largest_first);
+    let mut accepted = Accepted::default();
     for g in groups {
-        if is_covered(&g, &accepted_by_file) || !useful(&g) {
+        if is_covered(&g, &accepted.by_file) {
             continue;
         }
-        for o in &g.occs {
-            accepted_by_file.entry(o.file).or_default().push(o.clone());
+        if useful(&g) {
+            accepted.add(g);
+        } else {
+            verbatim_subsets(g, files)
+                .into_iter()
+                .for_each(|part| accepted.add(part));
         }
-        kept.push(g);
     }
-    kept
+    accepted.groups
+}
+
+fn largest_first(a: &RawGroup, b: &RawGroup) -> Ordering {
+    b.tokens
+        .cmp(&a.tokens)
+        .then(b.occs.len().cmp(&a.occs.len()))
+        .then(byte_span(a).cmp(&byte_span(b)))
+        .then(a.hash.cmp(&b.hash))
+}
+
+#[derive(Default)]
+struct Accepted {
+    by_file: FxHashMap<u32, Vec<Occ>>,
+    groups: Vec<RawGroup>,
+}
+
+impl Accepted {
+    /// Checks coverage itself: a subset of a vetoed group can sit inside
+    /// accepted clones where the whole group did not.
+    fn add(&mut self, group: RawGroup) {
+        if is_covered(&group, &self.by_file) {
+            return;
+        }
+        for o in &group.occs {
+            self.by_file.entry(o.file).or_default().push(o.clone());
+        }
+        self.groups.push(group);
+    }
+}
+
+/// The occurrences of `group` spelled alike, per spelling held at least
+/// twice. Copies with no difference need no parameters, so they stand
+/// whatever made the whole group fail. The spelling goes into the hash, or
+/// two subsets would share a fingerprint and `show` and `accept` could not
+/// tell them apart. Numbering them would survive a rename, but a new subset
+/// sorting first would take over an accepted one's number and pass `check`.
+fn verbatim_subsets(group: RawGroup, files: &[Arc<FileIndex>]) -> Vec<RawGroup> {
+    let spelled = |o: Occ| (spelling_hash(&o, files), o);
+    let mut occs: Vec<(u64, Occ)> = group.occs.into_iter().map(spelled).collect();
+    occs.sort_by_key(|(spelling, _)| *spelling);
+    occs.chunk_by(|a, b| a.0 == b.0)
+        .filter(|alike| alike.len() >= 2)
+        .map(|alike| RawGroup {
+            hash: combine(group.hash, alike[0].0),
+            tokens: group.tokens,
+            run_len: group.run_len,
+            occs: alike.iter().map(|(_, o)| o.clone()).collect(),
+        })
+        .collect()
+}
+
+fn spelling_hash(occ: &Occ, files: &[Arc<FileIndex>]) -> u64 {
+    let file = &files[occ.file as usize];
+    occ.leaf_indices().fold(0, |h, leaf| {
+        let text = file.leaf_text(&file.leaves[leaf as usize]);
+        combine(h, hash_bytes(text.as_bytes()))
+    })
 }
 
 /// Also covered: a tandem run whose copies all sit in accepted copies. A
