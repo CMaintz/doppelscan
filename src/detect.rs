@@ -336,7 +336,7 @@ fn distinct_positions(
     sorted: &[u32],
     len: usize,
 ) -> Option<(Vec<u32>, Vec<u32>)> {
-    let kept: Vec<u32> = non_overlapping(sorted, len, text, |_| true).collect();
+    let kept: Vec<u32> = non_overlapping(sorted, len, text).collect();
     let first = sorted[0] as usize;
     if !is_tandem(&text.symbols[first..first + len]) {
         return Some((kept, Vec::new()));
@@ -358,12 +358,27 @@ fn spelled_like_copies(
     if copies.is_empty() {
         return None;
     }
-    let wanted: FxHashSet<u64> = spellings(&copies, files, text, len).collect();
-    let spelled_alike = |p| wanted.contains(&text.spelling(files, p, len));
-    let taken = non_overlapping(sorted, len, text, spelled_alike).collect();
+    let twinned = spelled_like(&copies, sorted, files, text, len);
+    let taken = non_overlapping(&twinned, len, text).collect();
     let positions = held_twice(taken, files, text, len);
     copies.retain(|p| positions.binary_search(p).is_ok());
     Some((positions, copies))
+}
+
+/// The positions in `sorted` spelled like a copy, less those with no twin.
+/// Those must go before positions are taken: a lone copy spelled like nothing
+/// else would push out a real part overlapping it.
+fn spelled_like(
+    copies: &[u32],
+    sorted: &[u32],
+    files: &[Arc<FileIndex>],
+    text: &RunText,
+    len: usize,
+) -> Vec<u32> {
+    let wanted: FxHashSet<u64> = spellings(copies, files, text, len).collect();
+    let is_wanted = |p: &u32| wanted.contains(&text.spelling(files, *p, len));
+    let alike = sorted.iter().copied().filter(is_wanted).collect();
+    held_twice(alike, files, text, len)
 }
 
 fn alone_in_their_blocks(sorted: &[u32], text: &RunText) -> Vec<u32> {
@@ -435,26 +450,21 @@ fn is_tandem(run: &[u32]) -> bool {
 }
 
 /// A tandem repeat ("s s s s") yields occurrences that overlap within one
-/// block; keep a greedy left-to-right set of disjoint ones among those
-/// `wanted` allows. `wanted` is asked only about positions clear of the last
-/// one taken, which keeps a full text comparison per taken position from
-/// turning quadratic on a long table.
+/// block; keep a greedy left-to-right set of disjoint ones.
 fn non_overlapping<'a>(
     sorted: &'a [u32],
     len: usize,
     text: &'a RunText,
-    wanted: impl Fn(u32) -> bool + 'a,
 ) -> impl Iterator<Item = u32> + 'a {
     let mut taken_end: Option<(u32, u32, usize)> = None;
     sorted.iter().copied().filter(move |&p| {
         let (fi, si, _) = text.owner[p as usize];
         let overlaps =
             matches!(taken_end, Some((f, s, end)) if f == fi && s == si && (p as usize) < end);
-        let take = !overlaps && wanted(p);
-        if take {
+        if !overlaps {
             taken_end = Some((fi, si, p as usize + len));
         }
-        take
+        !overlaps
     })
 }
 

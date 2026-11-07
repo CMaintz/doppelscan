@@ -1205,3 +1205,36 @@ fn a_verbatim_head_survives_a_longer_run_over_the_density_limit() {
     let first = &gs[0].occurrences[0];
     assert!(first.start_line == 2 && first.end_line < 14, "{first:?}");
 }
+
+fn setter_block(method: &str, names: &[&str]) -> String {
+    let set = |n: &&str| format!("        d.set{n}(read(map, \"{n}\"));\n");
+    let body: String = names.iter().map(set).collect();
+    format!("class {method} {{\n    void m() {{\n{body}    }}\n}}\n")
+}
+
+// Catches lone copies being taken before the ones with no twin are ruled out:
+// `Y` starts one statement ahead of the verbatim part, so its own lone copy,
+// spelled like nothing else, overlaps the part and pushes it out.
+#[test]
+fn a_lone_copy_with_no_twin_does_not_hide_the_part_beside_it() {
+    let part = ["Aa", "Bb", "Cc", "Dd", "Ee", "Ff"];
+    let wall: Vec<String> = (0..14).map(|n| format!("W{n}")).collect();
+    let wall: Vec<&str> = wall.iter().map(String::as_str).collect();
+    let x = [&part[..], &["Gg", "Hh", "Ii", "Jj"]].concat();
+    let y = [&["Pp"], &part[..], &["Qq", "Rr", "Ss", "Tt"]].concat();
+    let (w, x, y) = (
+        setter_block("W", &wall),
+        setter_block("X", &x),
+        setter_block("Y", &y),
+    );
+    let gs = groups_of(&[("W.java", &w), ("X.java", &x), ("Y.java", &y)]);
+    let is_part = |g: &&Group| {
+        let places: Vec<_> = g
+            .occurrences
+            .iter()
+            .map(|o| (o.file.as_str(), o.start_line))
+            .collect();
+        places == [("X.java", 3), ("Y.java", 4)]
+    };
+    assert!(gs.iter().any(|g| is_part(&g)), "{gs:#?}");
+}
