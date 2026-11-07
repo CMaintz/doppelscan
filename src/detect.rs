@@ -2,6 +2,7 @@
 //! maximal repeats, then subsumption so each duplication is reported once
 //! at its largest extent.
 
+use std::fmt;
 use std::sync::Arc;
 
 use rayon::prelude::*;
@@ -9,7 +10,7 @@ use rustc_hash::FxHashMap;
 
 use crate::hash::combine;
 use crate::index::{FileIndex, Frag};
-use crate::suffix::maximal_repeats;
+use crate::suffix::{Repeat, maximal_repeats};
 
 #[derive(Clone, Debug)]
 pub struct Occ {
@@ -19,9 +20,47 @@ pub struct Occ {
     pub start_line: u32,
     pub end_line: u32,
     pub scope: u32,
-    /// Leaf index ranges; one per run element so separators between
-    /// siblings (which differ between grammars) never break alignment.
-    pub leaves: Vec<(u32, u32)>,
+    leaf_count: u32,
+    elems: Elems,
+}
+
+/// The syntax elements an occurrence covers, each with its own leaf range so
+/// separators between siblings (which differ between grammars) never break
+/// alignment. A run points into its file rather than holding a copy: between
+/// two equal tables every length has a group of its own until the longest
+/// subsumes them, which is quadratic in the table when copied.
+#[derive(Clone)]
+enum Elems {
+    Node {
+        file: Arc<FileIndex>,
+        index: u32,
+    },
+    Run {
+        file: Arc<FileIndex>,
+        seq: u32,
+        start: u32,
+        len: u32,
+    },
+}
+
+impl Elems {
+    fn frags(&self) -> &[Frag] {
+        match self {
+            Elems::Node { file, index } => std::slice::from_ref(&file.nodes[*index as usize]),
+            Elems::Run {
+                file,
+                seq,
+                start,
+                len,
+            } => &file.seqs.get(*seq as usize)[*start as usize..(start + len) as usize],
+        }
+    }
+}
+
+impl fmt::Debug for Elems {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.frags()).finish()
+    }
 }
 
 impl Occ {
@@ -35,11 +74,13 @@ impl Occ {
     }
 
     fn leaf_span(&self) -> (u32, u32) {
-        (self.leaves[0].0, self.leaves[self.leaves.len() - 1].1)
+        let frags = self.elems.frags();
+        (frags[0].leaf_start, frags[frags.len() - 1].leaf_end)
     }
 
     pub fn leaf_indices(&self) -> impl Iterator<Item = u32> + '_ {
-        self.leaves.iter().flat_map(|&(s, e)| s..e)
+        let frags = self.elems.frags().iter();
+        frags.flat_map(|e| e.leaf_start..e.leaf_end)
     }
 }
 
@@ -87,7 +128,13 @@ fn node_groups(files: &[Arc<FileIndex>], min_tokens: u32) -> Vec<RawGroup> {
         .map(|c| {
             let occs = c
                 .iter()
-                .map(|&(_, fi, ni)| occ_of(files, fi, &[files[fi as usize].nodes[ni as usize]]))
+                .map(|&(_, fi, ni)| {
+                    let elems = Elems::Node {
+                        file: Arc::clone(&files[fi as usize]),
+                        index: ni,
+                    };
+                    occ_of(files, fi, elems)
+                })
                 .collect();
             RawGroup {
                 hash: c[0].0,
@@ -99,8 +146,9 @@ fn node_groups(files: &[Arc<FileIndex>], min_tokens: u32) -> Vec<RawGroup> {
         .collect()
 }
 
-fn occ_of(files: &[Arc<FileIndex>], file: u32, elems: &[Frag]) -> Occ {
-    let (first, last) = (elems[0], elems[elems.len() - 1]);
+fn occ_of(files: &[Arc<FileIndex>], file: u32, elems: Elems) -> Occ {
+    let frags = elems.frags();
+    let (first, last) = (frags[0], frags[frags.len() - 1]);
     let (start_line, end_line) = files[file as usize].lines(first.start, last.end);
     Occ {
         file,
@@ -109,7 +157,8 @@ fn occ_of(files: &[Arc<FileIndex>], file: u32, elems: &[Frag]) -> Occ {
         start_line,
         end_line,
         scope: first.scope,
-        leaves: elems.iter().map(|e| (e.leaf_start, e.leaf_end)).collect(),
+        leaf_count: frags.iter().map(Frag::tokens).sum(),
+        elems,
     }
 }
 
@@ -154,45 +203,76 @@ fn build_run_text(files: &[Arc<FileIndex>]) -> RunText {
 
 fn run_groups(files: &[Arc<FileIndex>], min_tokens: u32) -> Vec<RawGroup> {
     let text = build_run_text(files);
-    maximal_repeats(&text.symbols, 2)
-        .into_par_iter()
-        .filter_map(|rep| run_group(files, &text, rep.len, rep.positions, min_tokens))
+    let repeats = maximal_repeats(&text.symbols, 2);
+    let block_until = repeats.alike_until(|p| block_of(p, &text));
+    let run_of = |rep: &Repeat| Run {
+        len: rep.len,
+        positions: repeats.positions(rep),
+        one_block: repeats.all_alike(rep, &block_until),
+    };
+    repeats
+        .found
+        .par_iter()
+        .filter_map(|rep| run_group(files, &text, run_of(rep), min_tokens))
         .collect()
+}
+
+/// A repeat's occurrences, in suffix order and not yet sorted.
+struct Run<'a> {
+    len: usize,
+    positions: &'a [u32],
+    one_block: bool,
+}
+
+impl Run<'_> {
+    /// Repetition inside one block only, with no copy elsewhere: the shape
+    /// of a wall. Decided before the positions are sorted, because a long
+    /// table has one such run per length.
+    fn is_only_a_wall(&self, text: &RunText) -> bool {
+        let (a, b) = (self.positions[0] as usize, self.positions[1] as usize);
+        let overlap_proves_it = 2 * a.abs_diff(b) <= self.len;
+        self.one_block && (overlap_proves_it || is_tandem(&text.symbols[a..a + self.len]))
+    }
 }
 
 fn run_group(
     files: &[Arc<FileIndex>],
     text: &RunText,
-    len: usize,
-    mut positions: Vec<u32>,
+    run: Run,
     min_tokens: u32,
 ) -> Option<RawGroup> {
+    let Run { len, positions, .. } = run;
     let p0 = positions[0] as usize;
     let tokens = (text.token_prefix[p0 + len] - text.token_prefix[p0]) as u32;
-    if tokens < min_tokens {
+    if tokens < min_tokens || run.is_only_a_wall(text) {
         return None;
     }
-    positions.sort_unstable();
-    let kept = distinct_positions(files, text, &positions, len)?;
-    let occs: Vec<Occ> = kept
-        .iter()
-        .map(|&p| {
-            occ_of(
-                files,
-                text.owner[p as usize].0,
-                run_elems(files, text, p, len),
-            )
-        })
-        .collect();
-    let hash = run_elems(files, text, p0 as u32, len)
-        .iter()
-        .fold(len as u64, |h, e| combine(h, e.hash));
-    (occs.len() >= 2).then_some(RawGroup {
-        hash,
+    let mut sorted = positions.to_vec();
+    sorted.sort_unstable();
+    let kept = distinct_positions(files, text, &sorted, len)?;
+    let occs: Vec<Occ> = kept.iter().map(|&p| run_occ(files, text, p, len)).collect();
+    (occs.len() >= 2).then(|| RawGroup {
+        hash: run_hash(run_elems(files, text, p0 as u32, len)),
         tokens,
         run_len: len,
         occs,
     })
+}
+
+fn run_hash(elems: &[Frag]) -> u64 {
+    let len = elems.len() as u64;
+    elems.iter().fold(len, |h, e| combine(h, e.hash))
+}
+
+fn run_occ(files: &[Arc<FileIndex>], text: &RunText, pos: u32, len: usize) -> Occ {
+    let (fi, si, ei) = text.owner[pos as usize];
+    let elems = Elems::Run {
+        file: Arc::clone(&files[fi as usize]),
+        seq: si,
+        start: ei,
+        len: len as u32,
+    };
+    occ_of(files, fi, elems)
 }
 
 /// Disjoint positions worth reporting, in text order. Inside a wall of
@@ -242,8 +322,12 @@ fn shares_a_block(sorted: &[u32], text: &RunText) -> bool {
 }
 
 fn same_block(a: u32, b: u32, text: &RunText) -> bool {
-    let (a, b) = (text.owner[a as usize], text.owner[b as usize]);
-    (a.0, a.1) == (b.0, b.1)
+    block_of(a, text) == block_of(b, text)
+}
+
+fn block_of(pos: u32, text: &RunText) -> (u32, u32) {
+    let (file, seq, _) = text.owner[pos as usize];
+    (file, seq)
 }
 
 fn is_tandem(run: &[u32]) -> bool {
@@ -289,9 +373,8 @@ fn non_overlapping<'a>(
 /// Guards against a 64-bit hash collision pairing fragments of different
 /// shape: every occurrence must have as many leaves as the first.
 fn keep_aligned(group: &mut RawGroup) -> bool {
-    let count = |o: &Occ| o.leaves.iter().map(|&(s, e)| e - s).sum::<u32>();
-    let expected = count(&group.occs[0]);
-    group.occs.retain(|o| count(o) == expected);
+    let expected = group.occs[0].leaf_count;
+    group.occs.retain(|o| o.leaf_count == expected);
     group.occs.len() >= 2
 }
 
