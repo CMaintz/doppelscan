@@ -895,3 +895,21 @@ fn an_accepted_fingerprint_matches_in_any_case() {
     std::fs::write(dir.join(".doppelscan.toml"), config).unwrap();
     assert_eq!(group_count(&dir, &["."]), 0);
 }
+
+// Catches a non-finite density reaching `baseline`: JSON has no `inf`, so
+// the file holds `null` and every later `check` and `--prune` fails to parse.
+#[test]
+fn a_density_json_cannot_hold_is_refused() {
+    let dir = repo_with_config("density", "max-param-density = inf\n");
+    let (code, _, err) = run(&dir, &["baseline", "."]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("max-param-density"), "{err}");
+    assert!(!dir.join(".doppelscan-baseline.json").exists());
+
+    write(&dir, ".doppelscan.toml", "max-param-density = 8\n");
+    for value in ["inf", "NaN"] {
+        let (code, _, err) = run(&dir, &["baseline", ".", "--max-param-density", value]);
+        assert_eq!(code, 2, "{err}");
+        assert!(err.contains("max-param-density"), "{err}");
+    }
+}
