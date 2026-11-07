@@ -204,10 +204,14 @@ tokens and the functions it sits in, not line numbers. Moving or renaming
 known duplication passes, and so does shrinking it within the same functions,
 which means a clone of code the entry held, sitting where the entry sat, with
 up to two stretches deleted from it. A deletion in more spots than that reads
-as a new clone until the baseline is written again. A clone over several
-top-level definitions sits in its files, so what an edit leaves of it, even
-inside one definition, counts as shrunk. Another copy, a clone that grew, or
-new code beside an accepted clone does not, even in the same class or function. A baseline written before tokens were recorded goes by
+as a new clone until the baseline is written again. Such a deletion counts
+only once the whole clone has gone, since new code can open and close like an
+accepted clone; a new function added in the same change that edits the clone
+can still slip through that way. A clone over several top-level definitions
+sits in its files, so what an edit leaves of it, even inside one definition,
+counts as shrunk. Another copy, a clone that grew, or new code beside an
+accepted clone does not, even in the same class or function. A baseline
+written before tokens were recorded goes by
 size and functions alone until it is written again, so there new code smaller
 than an accepted clone in the same functions passes. `--prune` only drops
 entries and forgets copies that are gone, so it cannot accept new duplication.
