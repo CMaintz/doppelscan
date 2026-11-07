@@ -1547,3 +1547,107 @@ function unused",
     let (code, out) = doppelscan(&dir, &["check"]);
     assert_eq!(code, 0, "{out}");
 }
+
+// Statements of unlike shapes, so the function is one clone with no shorter
+// run in it that recurs.
+const SETTLE: &str = r#"
+export function settle(orders: Order[], config: Config): number {
+    const paid = orders.filter((o) => o.status === "paid");
+    const gross = paid.reduce((sum, o) => sum + o.amount, 0);
+    audit.record(paid.length, gross);
+    const fee = Math.ceil(gross * config.rate);
+    if (fee > config.cap) { throw new Error("fee"); }
+    const net = gross - fee - config.flat;
+    return Math.round(net * 100) / 100;
+}
+"#;
+
+fn settle_without(cut: &[&str]) -> String {
+    let drop_cut = |text: String, line: &&str| text.replace(*line, "");
+    cut.iter().fold(SETTLE.to_string(), drop_cut)
+}
+
+fn repo_of_settle(name: &str) -> PathBuf {
+    let dir = repo(name);
+    let code = settle_without(&[]);
+    write_all(&dir, &[("src/a.ts", code.clone()), ("src/b.ts", code)]);
+    assert_eq!(doppelscan(&dir, &["baseline"]).0, 0);
+    dir
+}
+
+const AUDIT_LINE: &str = "    audit.record(paid.length, gross);\n";
+
+// Catches a shrink rule wanting the clone contiguous in its entry: taking a
+// statement out of the middle of both copies adds no code.
+#[test]
+fn deleting_a_middle_statement_from_every_copy_is_not_new() {
+    let dir = repo_of_settle("cut-middle");
+    let code = settle_without(&[AUDIT_LINE]);
+    write_all(&dir, &[("src/a.ts", code.clone()), ("src/b.ts", code)]);
+    let (status, out) = doppelscan(&dir, &["check"]);
+    assert_eq!(status, 0, "{out}");
+}
+
+// Catches a rule that takes one cut only: each cleanup would fail the check
+// as soon as it touched a second spot.
+#[test]
+fn deleting_two_statements_apart_is_not_new() {
+    let dir = repo_of_settle("cut-twice");
+    let fee_line = "    const fee = Math.ceil(gross * config.rate);\n";
+    let code = settle_without(&[AUDIT_LINE, fee_line]).replace("- fee ", "");
+    let code = code.replace(
+        "    if (fee > config.cap) { throw new Error(\"fee\"); }\n",
+        "",
+    );
+    write_all(&dir, &[("src/a.ts", code.clone()), ("src/b.ts", code)]);
+    let (status, out) = doppelscan(&dir, &["check"]);
+    assert_eq!(status, 0, "{out}");
+}
+
+// Catches a prune that only counts contiguous groups as leaning on an entry:
+// it would drop the entry of a clone that is still there, and the next check
+// would fail on it.
+#[test]
+fn pruning_keeps_the_entry_of_a_clone_with_a_statement_deleted() {
+    let dir = repo_of_settle("cut-prune");
+    let before = written_entries(&dir);
+    let code = settle_without(&[AUDIT_LINE]);
+    write_all(&dir, &[("src/a.ts", code.clone()), ("src/b.ts", code)]);
+    assert_eq!(doppelscan(&dir, &["baseline", "--prune"]).0, 0);
+    assert_eq!(written_entries(&dir), before);
+    let (status, out) = doppelscan(&dir, &["check"]);
+    assert_eq!(status, 0, "{out}");
+}
+
+// Every other field of `FIELDS`, with other names. Its tokens all appear in
+// `FIELDS` in order, which is what a bare subsequence test would accept, yet
+// this is new code spread over the whole accepted clone.
+const SCATTERED_FIELDS: &str = r#"
+  total: number = 2;
+  active: boolean = true;
+  maximum = 20 * 4;
+  waiting = new Set<Order>();
+  window: [number, number] = [2, 9];
+  extra = { c: 3, d: 4 };
+"#;
+
+// Catches the shrink rule loosening into a subsequence test: over so few
+// token kinds, most new code is a subsequence of a long enough accepted clone.
+#[test]
+fn new_fields_scattered_through_an_accepted_clone_are_new() {
+    let dir = repo("scattered");
+    write_all(
+        &dir,
+        &[("src/a.ts", class_c("")), ("src/b.ts", class_d(""))],
+    );
+    assert_eq!(doppelscan(&dir, &["baseline"]).0, 0);
+    write_all(
+        &dir,
+        &[
+            ("src/a.ts", class_c(SCATTERED_FIELDS)),
+            ("src/b.ts", class_d(SCATTERED_FIELDS)),
+        ],
+    );
+    let (status, out) = doppelscan(&dir, &["check"]);
+    assert_eq!(status, 1, "{out}");
+}

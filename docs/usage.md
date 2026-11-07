@@ -197,11 +197,12 @@ the others (`smaller` in the JSON) and do not fail the check.
 A baseline stores each accepted group's fingerprint, copy count, normalized
 tokens and the functions it sits in, not line numbers. Moving or renaming
 known duplication passes, and so does shrinking it within the same functions,
-which means a clone of code the entry held, sitting where the entry sat. A
-clone over several top-level definitions sits in its files, so what an edit
-leaves of it, even inside one definition, counts as shrunk. Another copy, a
-clone that grew, or new code beside an accepted clone does not, even in the
-same class or function. A baseline written before tokens were recorded goes by
+which means a clone of code the entry held, sitting where the entry sat, with
+up to two stretches deleted from it. A deletion in more spots than that reads
+as a new clone until the baseline is written again. A clone over several
+top-level definitions sits in its files, so what an edit leaves of it, even
+inside one definition, counts as shrunk. Another copy, a clone that grew, or
+new code beside an accepted clone does not, even in the same class or function. A baseline written before tokens were recorded goes by
 size and functions alone until it is written again, so there new code smaller
 than an accepted clone in the same functions passes. `--prune` only drops
 entries and forgets copies that are gone, so it cannot accept new duplication.

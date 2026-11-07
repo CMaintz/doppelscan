@@ -318,21 +318,41 @@ impl Entry {
     }
 }
 
-/// A shrunk clone is code the entry held, in places it held it. A clone over
-/// several definitions sits at the bare file, and the pieces an edit leaves
-/// of it inside one of them are shrunk too. An entry without a shape can only
-/// go by places, and there only named ones count: two files sharing one
-/// top-level clone must not excuse every later clone between them.
+/// A shrunk clone is code the entry held, in places it held it, and code
+/// deleted from the middle of every copy leaves the rest joined up. A clone
+/// over several definitions sits at the bare file, and the pieces an edit
+/// leaves of it inside one of them are shrunk too. An entry without a shape
+/// can only go by places, and there only named ones count: two files sharing
+/// one top-level clone must not excuse every later clone between them.
 fn is_shrunk_from(group: &Entry, accepted: &Entry) -> bool {
     let has_shape = !accepted.shape.is_empty();
     let held = if has_shape {
-        accepted.shape.contains(&group.shape)
+        is_cut_from(&group.shape, &accepted.shape)
     } else {
         group.places.iter().all(|p| p.contains('#'))
     };
     group.tokens <= accepted.tokens
         && held
         && is_sub_multiset(&group.places, &accepted.places, has_shape)
+}
+
+/// Whether `shape` is `accepted` with up to two stretches cut out, or part
+/// of what that leaves. Not any subsequence: over so few token kinds, most
+/// new code is a subsequence of a long enough clone. Shapes are read back
+/// from a file a person can edit, so a cut is not assumed to fall between
+/// characters.
+fn is_cut_from(shape: &str, accepted: &str) -> bool {
+    let (small, big) = (shape.as_bytes(), accepted.as_bytes());
+    let head = common_len(small.iter(), big.iter());
+    let tail = common_len(small[head..].iter().rev(), big[head..].iter().rev());
+    let rest = accepted.get(head..big.len() - tail);
+    let kept = shape.get(head..small.len() - tail);
+    rest.zip(kept)
+        .is_some_and(|(rest, kept)| rest.contains(kept))
+}
+
+fn common_len<'a>(a: impl Iterator<Item = &'a u8>, b: impl Iterator<Item = &'a u8>) -> usize {
+    a.zip(b).take_while(|(x, y)| x == y).count()
 }
 
 fn entry(analysis: &Analysis, raw: &RawGroup) -> Entry {
