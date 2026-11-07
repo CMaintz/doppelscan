@@ -6,9 +6,37 @@
 
 use libsais::SuffixArrayConstruction;
 
+/// A repeated run of `len` symbols. Its occurrences stay a range of the suffix
+/// array because LCP intervals nest: on a periodic text n intervals average
+/// n/2 occurrences, so a copy per interval is quadratic in the text.
 pub struct Repeat {
     pub len: usize,
-    pub positions: Vec<u32>,
+    first_rank: u32,
+    last_rank: u32,
+}
+
+pub struct Repeats {
+    sa: Vec<u32>,
+    pub found: Vec<Repeat>,
+}
+
+impl Repeats {
+    /// Start of each occurrence, in suffix order.
+    pub fn positions(&self, repeat: &Repeat) -> &[u32] {
+        &self.sa[repeat.first_rank as usize..=repeat.last_rank as usize]
+    }
+
+    /// Answers which occurrences share a key, for [`Repeats::all_alike`].
+    pub fn alike_until<K: Eq>(&self, key: impl Fn(u32) -> K) -> Vec<u32> {
+        alike_until(&self.sa, key)
+    }
+
+    /// Whether `alike_until` found one key across all of `repeat`'s
+    /// occurrences, in one lookup: a walk over them for every interval is
+    /// quadratic on a periodic text.
+    pub fn all_alike(&self, repeat: &Repeat, alike_until: &[u32]) -> bool {
+        alike_until[repeat.first_rank as usize] >= repeat.last_rank
+    }
 }
 
 /// SA-IS via libsais: linear in the text whatever the repeat lengths,
@@ -59,53 +87,52 @@ pub fn lcp_array(text: &[u32], sa: &[u32]) -> Vec<u32> {
 /// Enumerates LCP intervals with lcp >= `min_len` whose occurrences are
 /// left-maximal (not all preceded by the same symbol); the others are
 /// suffixes of a longer repeat that is reported on its own.
-pub fn maximal_repeats(text: &[u32], min_len: usize) -> Vec<Repeat> {
+pub fn maximal_repeats(text: &[u32], min_len: usize) -> Repeats {
     let sa = suffix_array(text);
     let lcp = lcp_array(text, &sa);
-    let mut out = Vec::new();
+    let same_left = alike_until(&sa, |p| (p > 0).then(|| text[p as usize - 1]));
+    let left_extendable = |lb: usize, rb: usize| sa[lb] > 0 && same_left[lb] as usize >= rb;
+    let mut found = Vec::new();
+    for_each_lcp_interval(&lcp, |len, lb, rb| {
+        if len >= min_len && !left_extendable(lb, rb) {
+            found.push(Repeat {
+                len,
+                first_rank: lb as u32,
+                last_rank: rb as u32,
+            });
+        }
+    });
+    Repeats { sa, found }
+}
+
+/// Calls `visit(lcp, left bound, right bound)` for each interval, children
+/// before the interval holding them.
+fn for_each_lcp_interval(lcp: &[u32], mut visit: impl FnMut(usize, usize, usize)) {
     let mut stack: Vec<(usize, usize)> = Vec::new(); // (lcp, left bound)
     // i runs one past the end to flush the stack with a virtual lcp of 0.
-    #[allow(clippy::needless_range_loop)]
-    for i in 1..=sa.len() {
-        let cur = if i < sa.len() { lcp[i] as usize } else { 0 };
+    for i in 1..=lcp.len() {
+        let cur = lcp.get(i).map_or(0, |&l| l as usize);
         let mut lb = i - 1;
-        while let Some(&(top_lcp, top_lb)) = stack.last() {
-            if top_lcp <= cur {
-                break;
-            }
+        while let Some(&(top_lcp, top_lb)) = stack.last().filter(|top| top.0 > cur) {
             stack.pop();
-            emit(text, &sa, top_lcp, top_lb, i - 1, min_len, &mut out);
+            visit(top_lcp, top_lb, i - 1);
             lb = top_lb;
         }
         if stack.last().is_none_or(|&(l, _)| l < cur) {
             stack.push((cur, lb));
         }
     }
-    out
 }
 
-fn emit(
-    text: &[u32],
-    sa: &[u32],
-    len: usize,
-    lb: usize,
-    rb: usize,
-    min_len: usize,
-    out: &mut Vec<Repeat>,
-) {
-    if len < min_len {
-        return;
+/// For each rank, the last rank up to which every suffix has the same `key`.
+fn alike_until<K: Eq>(sa: &[u32], key: impl Fn(u32) -> K) -> Vec<u32> {
+    let mut until: Vec<u32> = (0..sa.len() as u32).collect();
+    for rank in (1..sa.len()).rev() {
+        if key(sa[rank - 1]) == key(sa[rank]) {
+            until[rank - 1] = until[rank];
+        }
     }
-    let positions = &sa[lb..=rb];
-    let preceding = |p: u32| (p > 0).then(|| text[p as usize - 1]);
-    let first = preceding(positions[0]);
-    let left_extendable = first.is_some() && positions.iter().all(|&p| preceding(p) == first);
-    if !left_extendable {
-        out.push(Repeat {
-            len,
-            positions: positions.to_vec(),
-        });
-    }
+    until
 }
 
 #[cfg(test)]
@@ -160,9 +187,9 @@ mod tests {
     fn reports_only_maximal_runs() {
         let text = [1, 2, 3, 100, 1, 2, 3, 101];
         let reps = maximal_repeats(&text, 2);
-        assert_eq!(reps.len(), 1);
-        assert_eq!(reps[0].len, 3);
-        let mut pos = reps[0].positions.clone();
+        assert_eq!(reps.found.len(), 1);
+        assert_eq!(reps.found[0].len, 3);
+        let mut pos = reps.positions(&reps.found[0]).to_vec();
         pos.sort();
         assert_eq!(pos, vec![0, 4]);
     }
