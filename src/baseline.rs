@@ -114,6 +114,13 @@ impl Settings {
     }
 }
 
+/// Every group of `now`, in `now.groups` order and then the accepted ones,
+/// which hide from the report but are still there.
+fn current_entries(now: &Analysis) -> Vec<Entry> {
+    let found = now.groups.iter().chain(&now.accepted);
+    found.map(|group| entry(now, group)).collect()
+}
+
 /// A list whose order does not change the scan, as one comparable value.
 fn set_of(items: &[String]) -> String {
     let mut items = items.to_vec();
@@ -178,9 +185,10 @@ impl Baseline {
 
     /// Ids of the groups in `now` that this baseline does not account for.
     pub fn new_groups(&self, now: &Analysis) -> Vec<usize> {
-        let index = Index::new(&self.groups);
+        let current = current_entries(now);
+        let index = Index::new(&self.groups, &current);
         (1..=now.groups.len())
-            .filter(|&id| !index.excuses(&entry(now, &now.groups[id - 1])))
+            .filter(|&id| !index.excuses(&current[id - 1]))
             .collect()
     }
 
@@ -191,9 +199,8 @@ impl Baseline {
     /// copy moves, so from part of the tree a copy that moved out of it looks
     /// exactly like one that was deleted.
     pub fn pruned(&self, now: &Analysis) -> Self {
-        let found = now.groups.iter().chain(&now.accepted);
-        let current: Vec<Entry> = found.map(|group| entry(now, group)).collect();
-        let excused = Index::new(&self.groups).excused_groups(&current);
+        let current = current_entries(now);
+        let excused = Index::new(&self.groups, &current).excused_groups(&current);
         let kept = self.groups.iter().zip(&excused);
         let groups = kept.filter_map(|(e, by)| e.pruned(by)).collect();
         Self {
@@ -211,12 +218,14 @@ struct Index<'a> {
     entries: &'a [Entry],
     by_fingerprint: FxHashMap<&'a str, Vec<usize>>,
     by_place: FxHashMap<&'a str, Vec<usize>>,
+    /// The most copies any current group holds, per fingerprint.
+    copies_now: FxHashMap<&'a str, usize>,
 }
 
 impl<'a> Index<'a> {
     /// Bare files are left out of entries without a shape, which the shrink
     /// rule never lets them excuse anything for.
-    fn new(entries: &'a [Entry]) -> Self {
+    fn new(entries: &'a [Entry], current: &'a [Entry]) -> Self {
         let mut by_fingerprint: FxHashMap<&str, Vec<usize>> = FxHashMap::default();
         let mut by_place: FxHashMap<&str, Vec<usize>> = FxHashMap::default();
         for (i, e) in entries.iter().enumerate() {
@@ -230,7 +239,15 @@ impl<'a> Index<'a> {
             entries,
             by_fingerprint,
             by_place,
+            copies_now: copies_by_fingerprint(current),
         }
+    }
+
+    /// Whether all of the entry's copies are still there, unchanged. Nothing
+    /// has then been cut from them, whatever a smaller group looks like.
+    fn is_whole(&self, entry: &Entry) -> bool {
+        let copies = self.copies_now.get(entry.fingerprint.as_str());
+        copies.is_some_and(|&copies| copies >= entry.occurrences)
     }
 
     /// An entry accounts for a group when it is the same clone with at
@@ -273,9 +290,40 @@ impl<'a> Index<'a> {
         let mut candidates: Vec<usize> = held.flatten().copied().collect();
         candidates.sort_unstable();
         candidates.dedup();
-        candidates.retain(|&i| is_shrunk_from(group, &self.entries[i]));
+        candidates.retain(|&i| self.is_shrunk_from(group, &self.entries[i]));
         candidates
     }
+
+    /// A shrunk clone is code the entry held, in places it held it, and code
+    /// deleted from the middle of every copy leaves the rest joined up. Most
+    /// functions open and close alike, so new code can read as such a cut;
+    /// one is believed only once the entry's clone has gone. A clone over
+    /// several definitions sits at the bare file, and the pieces an edit
+    /// leaves of it inside one of them are shrunk too. An entry without a
+    /// shape can only go by places, and there only named ones count: two
+    /// files sharing one top-level clone must not excuse every later clone
+    /// between them.
+    fn is_shrunk_from(&self, group: &Entry, accepted: &Entry) -> bool {
+        let has_shape = !accepted.shape.is_empty();
+        let held = if has_shape {
+            accepted.shape.contains(&group.shape)
+                || (!self.is_whole(accepted) && is_cut_from(&group.shape, &accepted.shape))
+        } else {
+            group.places.iter().all(|p| p.contains('#'))
+        };
+        group.tokens <= accepted.tokens
+            && held
+            && is_sub_multiset(&group.places, &accepted.places, has_shape)
+    }
+}
+
+fn copies_by_fingerprint(current: &[Entry]) -> FxHashMap<&str, usize> {
+    let mut copies: FxHashMap<&str, usize> = FxHashMap::default();
+    for group in current {
+        let most = copies.entry(&group.fingerprint).or_default();
+        *most = group.occurrences.max(*most);
+    }
+    copies
 }
 
 impl Entry {
@@ -316,24 +364,6 @@ impl Entry {
         let kept = self.places.iter().zip(held).filter(|(_, held)| *held);
         kept.map(|(place, _)| place.clone()).collect()
     }
-}
-
-/// A shrunk clone is code the entry held, in places it held it, and code
-/// deleted from the middle of every copy leaves the rest joined up. A clone
-/// over several definitions sits at the bare file, and the pieces an edit
-/// leaves of it inside one of them are shrunk too. An entry without a shape
-/// can only go by places, and there only named ones count: two files sharing
-/// one top-level clone must not excuse every later clone between them.
-fn is_shrunk_from(group: &Entry, accepted: &Entry) -> bool {
-    let has_shape = !accepted.shape.is_empty();
-    let held = if has_shape {
-        is_cut_from(&group.shape, &accepted.shape)
-    } else {
-        group.places.iter().all(|p| p.contains('#'))
-    };
-    group.tokens <= accepted.tokens
-        && held
-        && is_sub_multiset(&group.places, &accepted.places, has_shape)
 }
 
 /// Whether `shape` is `accepted` with up to two stretches cut out, or part

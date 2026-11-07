@@ -1619,6 +1619,53 @@ fn pruning_keeps_the_entry_of_a_clone_with_a_statement_deleted() {
     assert_eq!(status, 0, "{out}");
 }
 
+const REFUND: &str = r#"
+export function refund(orders: Order[], ledger: Ledger): string[] {
+    const due = orders.filter((o) => o.status === "returned");
+    for (const order of due) { ledger.credit(order.customer, order.amount); }
+    const ids = due.map((o) => o.id);
+    try { mailer.notify(ids); } catch (err) { log.warn(err); }
+    return ids.sort();
+}
+"#;
+
+// Opens like `SETTLE` and closes like `REFUND` with nothing between, so its
+// tokens are the clone of both with one stretch cut out of the middle.
+const RECONCILE: &str = r#"
+export function reconcile(orders: Order[], config: Config): number {
+    const open = orders.filter((o) => o.status === "open");
+    const total = open.reduce((sum, o) => sum + o.amount, 0);
+    audit.record(open.length, total);
+    try { mailer.notify(ids); } catch (err) { log.warn(err); }
+    return ids.sort();
+}
+"#;
+
+// Catches the shrink rule excusing a function that looks like what a cut
+// would leave while the clone it was cut from is still there whole.
+#[test]
+fn a_new_function_shaped_like_a_cut_of_an_accepted_clone_is_new() {
+    let dir = repo("cut-lookalike");
+    let accepted = format!("{SETTLE}{REFUND}");
+    write_all(
+        &dir,
+        &[
+            ("src/a.ts", accepted.clone()),
+            ("src/b.ts", accepted.clone()),
+        ],
+    );
+    assert_eq!(doppelscan(&dir, &["baseline"]).0, 0);
+    write_all(
+        &dir,
+        &[
+            ("src/a.ts", format!("{RECONCILE}{accepted}")),
+            ("src/b.ts", format!("{accepted}{RECONCILE}")),
+        ],
+    );
+    let (status, out) = doppelscan(&dir, &["check"]);
+    assert_eq!(status, 1, "{out}");
+}
+
 // Every other field of `FIELDS`, with other names. Its tokens all appear in
 // `FIELDS` in order, which is what a bare subsequence test would accept, yet
 // this is new code spread over the whole accepted clone.
