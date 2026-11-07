@@ -1179,3 +1179,29 @@ fn a_verbatim_copy_is_found_whatever_a_renamed_one_is_called() {
         ["A.java", "C.java"]
     );
 }
+
+fn put_lines(key: &str, count: usize) -> String {
+    (0..count)
+        .map(|n| format!("        out.put(\"{key}A{n}\", {key}B{n}.{key}C{n}(row.{key}D{n}));\n"))
+        .collect()
+}
+
+// Catches a run longer than the copy shadowing it before the density limit
+// has judged that run: a vetoed group must not hide the smaller clones inside
+// it. The whole method fails the limit, its tails differing in every name.
+#[test]
+fn a_verbatim_head_survives_a_longer_run_over_the_density_limit() {
+    let method = |tail: &str| {
+        let lines = put_lines("same", 7) + &put_lines(tail, 6);
+        format!(
+            "void m() {{
+{lines}}}
+"
+        )
+    };
+    let (a, b) = (method("left"), method("right"));
+    let gs = groups_of(&[("A.java", &a), ("B.java", &b)]);
+    assert_eq!(gs.len(), 1, "{gs:#?}");
+    let first = &gs[0].occurrences[0];
+    assert!(first.start_line == 2 && first.end_line < 14, "{first:?}");
+}

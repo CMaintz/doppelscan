@@ -2,8 +2,6 @@
 //! maximal repeats, then subsumption so each duplication is reported once
 //! at its largest extent.
 
-use std::cmp::Reverse;
-use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::{Arc, OnceLock};
 
@@ -23,6 +21,8 @@ pub struct Occ {
     pub end_line: u32,
     pub scope: u32,
     leaf_count: u32,
+    /// A tandem run alone in its block, which `is_covered` judges by itself.
+    is_copy: bool,
     elems: Elems,
 }
 
@@ -160,6 +160,7 @@ fn occ_of(files: &[Arc<FileIndex>], file: u32, elems: Elems) -> Occ {
         end_line,
         scope: first.scope,
         leaf_count: frags.iter().map(Frag::tokens).sum(),
+        is_copy: false,
         elems,
     }
 }
@@ -252,38 +253,11 @@ fn run_groups(files: &[Arc<FileIndex>], min_tokens: u32) -> Vec<RawGroup> {
         positions: repeats.positions(rep),
         one_block: repeats.all_alike(rep, &block_until),
     };
-    let found = repeats
+    repeats
         .found
         .par_iter()
         .filter_map(|rep| run_group(files, &text, run_of(rep), min_tokens))
-        .collect();
-    without_nested_copies(found)
-}
-
-/// A group from a run, with the positions (each the run's length long) where
-/// a tandem run sits alone in its block. Empty for any other run.
-struct RunFind {
-    group: RawGroup,
-    copies: Vec<u32>,
-}
-
-/// Drops a tandem run whose copies all sit inside a longer run's. A shorter
-/// table fits a periodic one at every length, each tiling it differently, so
-/// subsumption, which needs one occurrence inside another, keeps them all.
-/// Blocks end in separators, so positions compare across them, and what is
-/// held never nests: the longest come first and a nested copy is not added.
-fn without_nested_copies(mut found: Vec<RunFind>) -> Vec<RawGroup> {
-    found.sort_by_key(|f| Reverse(f.group.run_len));
-    let mut held: BTreeMap<u32, u32> = BTreeMap::new();
-    found.retain(|f| {
-        let len = f.group.run_len as u32;
-        let is_held =
-            |p: u32| matches!(held.range(..=p).next_back(), Some((_, &end)) if p + len <= end);
-        let fresh: Vec<u32> = f.copies.iter().copied().filter(|&p| !is_held(p)).collect();
-        held.extend(fresh.iter().map(|&p| (p, p + len)));
-        f.copies.is_empty() || !fresh.is_empty()
-    });
-    found.into_iter().map(|f| f.group).collect()
+        .collect()
 }
 
 /// A repeat's occurrences, in suffix order and not yet sorted.
@@ -309,7 +283,7 @@ fn run_group(
     text: &RunText,
     run: Run,
     min_tokens: u32,
-) -> Option<RunFind> {
+) -> Option<RawGroup> {
     let Run { len, positions, .. } = run;
     let p0 = positions[0] as usize;
     let tokens = (text.token_prefix[p0 + len] - text.token_prefix[p0]) as u32;
@@ -319,14 +293,20 @@ fn run_group(
     let mut sorted = positions.to_vec();
     sorted.sort_unstable();
     let (kept, copies) = distinct_positions(files, text, &sorted, len)?;
-    let occs: Vec<Occ> = kept.iter().map(|&p| run_occ(files, text, p, len)).collect();
-    let group = (occs.len() >= 2).then(|| RawGroup {
+    let occ_at = |&p: &u32| {
+        let is_copy = copies.binary_search(&p).is_ok();
+        Occ {
+            is_copy,
+            ..run_occ(files, text, p, len)
+        }
+    };
+    let occs: Vec<Occ> = kept.iter().map(occ_at).collect();
+    (occs.len() >= 2).then(|| RawGroup {
         hash: run_hash(run_elems(files, text, p0 as u32, len)),
         tokens,
         run_len: len,
         occs,
-    })?;
-    Some(RunFind { group, copies })
+    })
 }
 
 fn run_hash(elems: &[Frag]) -> u64 {
@@ -504,12 +484,7 @@ fn suppress_subsumed(
     let mut accepted_by_file: FxHashMap<u32, Vec<Occ>> = FxHashMap::default();
     let mut kept = Vec::new();
     for g in groups {
-        let covered = g.occs.iter().all(|o| {
-            accepted_by_file
-                .get(&o.file)
-                .is_some_and(|acc| acc.iter().any(|a| a.contains(o)))
-        });
-        if covered || !useful(&g) {
+        if is_covered(&g, &accepted_by_file) || !useful(&g) {
             continue;
         }
         for o in &g.occs {
@@ -518,6 +493,21 @@ fn suppress_subsumed(
         kept.push(g);
     }
     kept
+}
+
+/// Also covered: a tandem run whose copies all sit in accepted copies. A
+/// shorter table fits a periodic one at every length, each tiling it
+/// differently, so its wall occurrences never sit inside one another. Only
+/// copies count here: code a larger clone holds says nothing of the wall.
+fn is_covered(group: &RawGroup, accepted_by_file: &FxHashMap<u32, Vec<Occ>>) -> bool {
+    let held = |o: &Occ, by: fn(&Occ) -> bool| {
+        accepted_by_file
+            .get(&o.file)
+            .is_some_and(|acc| acc.iter().any(|a| by(a) && a.contains(o)))
+    };
+    let mut copies = group.occs.iter().filter(|o| o.is_copy).peekable();
+    group.occs.iter().all(|o| held(o, |_| true))
+        || (copies.peek().is_some() && copies.all(|o| held(o, |a| a.is_copy)))
 }
 
 fn byte_span(g: &RawGroup) -> u32 {
