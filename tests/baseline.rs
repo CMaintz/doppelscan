@@ -376,6 +376,7 @@ fn accepted(fingerprint: &str, occurrences: usize, tokens: u32, places: &[&str])
         occurrences,
         tokens,
         places: places.iter().map(|p| p.to_string()).collect(),
+        shape: String::new(),
     }
 }
 
@@ -1275,5 +1276,133 @@ fn an_uncommitted_case_only_rename_is_not_new() {
     let dir = repo("case-rename");
     git(&dir, &["mv", "-f", "src/a.ts", "src/A.ts"]);
     let (code, out) = doppelscan(&dir, &["check", "--base", "HEAD"]);
+    assert_eq!(code, 0, "{out}");
+}
+
+// Fields of unlike shapes: more tokens than `SUM_TOTALS` as a method, and no
+// shorter run inside that recurs and surfaces as a group of its own.
+const FIELDS: &str = r#"
+  id: string = "x";
+  count: number = 1;
+  readonly flag: boolean = true;
+  private rows?: Order[] = [];
+  static limit = 10 * 2;
+  lookup: Map<string, number> = new Map();
+  pending = new Set<Order>();
+  handler = (x: number) => x + 1;
+  range: [number, number] = [0, 1];
+  label: string | null = null;
+  meta = { a: 1, b: 2 };
+  retries: number = Math.max(1, 3);
+"#;
+
+fn method(code: &str) -> String {
+    code.replace("export function ", "")
+}
+
+// `C` and `D` share the fields, and a member that differs stops anything
+// added after it from extending that run.
+fn class_c(added: &str) -> String {
+    format!("class C {{{FIELDS}  size(): number {{ return 1; }}\n{added}}}\n")
+}
+
+fn class_d(added: &str) -> String {
+    format!("class D {{{FIELDS}  label(x: boolean) {{ if (x) {{ log(x); }} }}\n{added}}}\n")
+}
+
+// Catches excusing a group for sitting inside an accepted place: the class
+// holds an accepted clone, but the method is not part of it.
+#[test]
+fn a_new_method_in_classes_sharing_an_accepted_clone_is_new() {
+    let dir = repo("new-method");
+    let foo = method(SUM_TOTALS);
+    write_all(
+        &dir,
+        &[("src/a.ts", class_c("")), ("src/b.ts", class_d(""))],
+    );
+    assert_eq!(doppelscan(&dir, &["baseline"]).0, 0);
+    assert_eq!(
+        written_entries(&dir)[0].places,
+        ["src/a.ts#C", "src/b.ts#D"]
+    );
+    assert!(written_entries(&dir)[0].tokens > 90);
+
+    write_all(
+        &dir,
+        &[("src/a.ts", class_c(&foo)), ("src/b.ts", class_d(&foo))],
+    );
+    let (code, out) = doppelscan(&dir, &["check"]);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("sumTotals"), "{out}");
+}
+
+const AUDIT_LOOP: &str = r#"
+    for (const entry of ledger.entries()) {
+        audit.record(entry.id, entry.amount, entry.currency);
+    }
+"#;
+
+fn body_with(name: &str, differs: &str, added: &str) -> String {
+    let statements = SUM_TOTALS.lines().skip(2);
+    let statements: Vec<&str> = statements.take_while(|l| !l.starts_with('}')).collect();
+    let body = statements.join("\n");
+    format!("function {name}(orders: Order[], config: Config) {{\n{body}\n{differs}\n{added}}}\n")
+}
+
+// Catches trusting an exact place: the statements are new, though the entry
+// sits at the very same functions and is larger than they are.
+#[test]
+fn new_statements_in_functions_sharing_an_accepted_clone_are_new() {
+    let side = |added| {
+        vec![
+            ("a.ts", body_with("f", "first();", added)),
+            ("b.ts", body_with("g", "if (ready) { second(1); }", added)),
+        ]
+    };
+    let base = scan(&side(""));
+    let baseline = Baseline::from_analysis(&base, &options());
+    assert_eq!(baseline.groups[0].places, ["a.ts#f", "b.ts#g"]);
+    let now = scan(&side(AUDIT_LOOP));
+    assert_eq!(now.groups.len(), 2, "the loop is a clone of its own");
+    assert!(now.groups[1].tokens <= baseline.groups[0].tokens);
+    assert_eq!(baseline.new_groups(&now).len(), 1);
+}
+
+// Catches comparing token streams with their separators: the accepted
+// whole-class clone holds the `;` between fields, the run cut from it does
+// not, and nothing was added.
+#[test]
+fn a_whole_class_shrunk_to_a_run_of_its_fields_is_not_new() {
+    let class = |name: &str, fields: &str| format!("class {name} {{{fields}}}\n");
+    let edited = FIELDS.replace("retries: number", "declare retries");
+    let base = scan(&[("a.ts", class("C", FIELDS)), ("b.ts", class("D", FIELDS))]);
+    let now = scan(&[("a.ts", class("C", FIELDS)), ("b.ts", class("D", &edited))]);
+    assert_eq!(base.group(1, false).kind, "node");
+    assert_eq!(now.groups.len(), 1);
+    assert_eq!(now.group(1, false).kind, "run");
+    assert!(new_groups(&base, &now).is_empty());
+}
+
+fn drop_shapes(dir: &Path) {
+    let file = dir.join(".doppelscan-baseline.json");
+    let text = std::fs::read_to_string(&file).unwrap();
+    let mut baseline: serde_json::Value = serde_json::from_str(&text).unwrap();
+    for entry in baseline["groups"].as_array_mut().unwrap() {
+        entry.as_object_mut().unwrap().remove("shape");
+    }
+    std::fs::write(&file, baseline.to_string()).unwrap();
+}
+
+// Catches treating a missing shape as holding nothing: a baseline written
+// before shapes were recorded would fail on every clone that shrank.
+#[test]
+fn a_baseline_without_shapes_still_excuses_a_shrunk_clone() {
+    let dir = repo("no-shape");
+    assert_eq!(doppelscan(&dir, &["baseline"]).0, 0);
+    drop_shapes(&dir);
+    let shrunk =
+        renamed(SUM_TOTALS, 2).replace("return Math.round(total * 100) / 100;", "return total;");
+    std::fs::write(dir.join("src/b.ts"), shrunk).unwrap();
+    let (code, out) = doppelscan(&dir, &["check"]);
     assert_eq!(code, 0, "{out}");
 }

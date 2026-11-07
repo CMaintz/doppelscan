@@ -194,10 +194,15 @@ only while still seeing the small ones, set `[check] min-tokens` in the
 config (or `--check-min-tokens`): new groups under it are listed after
 the others (`smaller` in the JSON) and do not fail the check.
 
-A baseline stores each accepted group's fingerprint, copy count and the
-functions it sits in, not line numbers. Moving or renaming known duplication
-passes, and so does shrinking it within the same functions; another copy, a
-clone that grew, or a new top-level clone does not. `--prune` only drops
+A baseline stores each accepted group's fingerprint, copy count, normalized
+tokens and the functions it sits in, not line numbers. Moving or renaming
+known duplication passes, and so does shrinking it within the same functions,
+which means a clone of code the entry held, sitting where the entry sat.
+Another copy, a clone that grew, or new code beside an accepted clone does
+not, even in the same class or function. A baseline written before tokens were
+recorded goes by size and functions alone until it is written again, so there
+new code smaller than an accepted clone in the same functions passes.
+`--prune` only drops
 entries and forgets copies that are gone, so it cannot accept new
 duplication. Only a scan of the whole directory the baseline describes can
 tell that code is gone: from a subdirectory, a copy that moved out looks

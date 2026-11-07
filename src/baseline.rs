@@ -21,6 +21,8 @@ pub const DEFAULT_FILE: &str = ".doppelscan-baseline.json";
 /// language the binary knew, so a release adding languages failed every check
 /// on their existing duplication.
 const VERSION: u32 = 3;
+/// All of these stay one byte in JSON.
+const SHAPE_CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+-";
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Baseline {
@@ -55,6 +57,12 @@ pub struct Entry {
     /// `file` or `file#scope` per occurrence, sorted. Line numbers are left
     /// out because every edit above a clone would make them stale.
     pub places: Vec<String>,
+    /// The clone's normalized tokens, one character each, for telling code
+    /// it held from new code beside it: a place only says where the clone
+    /// sat, and an edit leaves a shrunk clone with a new fingerprint. Empty
+    /// in baselines written before this was recorded.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub shape: String,
 }
 
 impl Settings {
@@ -308,12 +316,17 @@ impl Entry {
     }
 }
 
-/// Only named places count: two files sharing one top-level clone must not
-/// excuse every later top-level clone between them.
+/// A shrunk clone is code the entry held, in places it held it. An entry
+/// without a shape can only go by places, and there only named ones count:
+/// two files sharing one top-level clone must not excuse every later
+/// top-level clone between them.
 fn is_shrunk_from(group: &Entry, accepted: &Entry) -> bool {
-    group.tokens <= accepted.tokens
-        && group.places.iter().all(|p| p.contains('#'))
-        && is_sub_multiset(&group.places, &accepted.places)
+    let held = if accepted.shape.is_empty() {
+        group.places.iter().all(|p| p.contains('#'))
+    } else {
+        accepted.shape.contains(&group.shape)
+    };
+    group.tokens <= accepted.tokens && held && is_sub_multiset(&group.places, &accepted.places)
 }
 
 fn entry(analysis: &Analysis, raw: &RawGroup) -> Entry {
@@ -334,7 +347,23 @@ fn entry(analysis: &Analysis, raw: &RawGroup) -> Entry {
         occurrences: raw.occs.len(),
         tokens: raw.tokens,
         places,
+        shape: shape(analysis, raw),
     }
+}
+
+/// Six bits a token keep the file small, and a false match would still take
+/// a whole clone's worth of tokens lining up. Separators are left out
+/// because a run holds only its elements while the whole node around them
+/// holds what sits between them too, and a run cut from that node must still
+/// read as part of it.
+fn shape(analysis: &Analysis, raw: &RawGroup) -> String {
+    let occ = &raw.occs[0];
+    let file = &analysis.files[occ.file as usize];
+    let leaves = occ.leaf_indices().map(|i| &file.leaves[i as usize]);
+    let tokens = leaves.filter(|leaf| !matches!(file.leaf_text(leaf), "," | ";"));
+    tokens
+        .map(|leaf| SHAPE_CHARS[leaf.token as usize % SHAPE_CHARS.len()] as char)
+        .collect()
 }
 
 fn is_sub_multiset(small: &[String], big: &[String]) -> bool {
