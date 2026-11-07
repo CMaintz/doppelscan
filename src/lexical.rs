@@ -186,8 +186,10 @@ pub fn index_tokens(
     let lang_seed = hash_bytes(LANGS[lang].name.as_bytes());
     let lines = line_starts(&source);
     let mut builder = Builder::new(&source, strict, lexicon, lang_seed);
-    for tok in tokenize(&source, lexicon) {
-        builder.push(&tok);
+    let mut toks = tokenize(&source, lexicon);
+    disarm_unclosed(&mut toks);
+    for tok in &toks {
+        builder.push(tok);
     }
     builder.finish();
     let Builder {
@@ -246,6 +248,31 @@ fn tokenize(source: &str, lexicon: &Lexicon) -> Vec<Tok> {
         lexer.step();
     }
     lexer.toks
+}
+
+/// Bracket depth keeps line ends from splitting a statement, so an opener no
+/// closer answers (in a regex, a heredoc, a `%w(`) would make one statement
+/// of the rest of its block. Such an opener becomes plain punctuation. This
+/// pairs brackets as `Builder::push` counts them, per block and ignoring
+/// kind, so balanced code comes out the same.
+fn disarm_unclosed(toks: &mut [Tok]) {
+    let (mut open, mut blocks) = (Vec::new(), Vec::new());
+    for i in 0..toks.len() {
+        match toks[i].shape {
+            Shape::Open => open.push(i),
+            Shape::Close if open.len() > blocks.last().copied().unwrap_or(0) => {
+                open.pop();
+            }
+            Shape::OpenBrace => blocks.push(open.len()),
+            Shape::CloseBrace => {
+                let base = blocks.pop().unwrap_or(open.len());
+                open.drain(base..)
+                    .for_each(|o| toks[o].shape = Shape::Other);
+            }
+            _ => {}
+        }
+    }
+    open.into_iter().for_each(|o| toks[o].shape = Shape::Other);
 }
 
 /// Found once up front: asking at each `=begin` would rescan the file for
