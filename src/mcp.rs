@@ -32,7 +32,7 @@ Use find_duplicates to survey a repo for helper-extraction candidates, get_dupli
 helper template and parameters, duplicates_at to check a file/line range you are editing, find_similar_code \
 before writing a new helper to see whether equivalent code already exists, check_new_duplicates after \
 writing code to see whether it duplicated anything, and find_near_duplicates for functions that are copies \
-with small edits. Prefer fingerprints over numeric ids \
+with small edits. Prefer names or fingerprints over numeric ids \
 when referring back to a group; ids depend on the scan options.";
 
 pub fn serve(engine: &Engine, root: &Path) -> anyhow::Result<()> {
@@ -516,9 +516,9 @@ fn tool_definitions() -> Value {
         {
             "name": "get_duplicate_group",
             "title": "Show one clone group",
-            "description": "Full detail for one clone group: locations, parameters, and a helper template (the first occurrence with each parameter replaced by $1, $2, ...). Pass the same scan options used to find it.",
+            "description": "Full detail for one clone group: its fingerprint, locations, parameters, and a helper template (the first occurrence with each parameter replaced by $1, $2, ...). Pass the same scan options used to find it.",
             "inputSchema": { "type": "object", "properties": with(json!({
-                "id": { "type": "string", "description": "Fingerprint (preferred) or numeric id from find_duplicates." },
+                "id": { "type": "string", "description": "Group name from find_duplicates (preferred), or its fingerprint or numeric id. A name shared by two groups is an error listing their fingerprints." },
                 "include_code": { "type": "boolean", "description": "Also return the source of every occurrence." },
             })), "required": ["id"] },
             "annotations": { "readOnlyHint": true },

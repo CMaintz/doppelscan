@@ -22,9 +22,9 @@ cargo install --git https://github.com/CMaintz/doppelscan
 Then, from your repository:
 
 ```sh
-doppelscan                       # the 20 most worthwhile clone groups
-doppelscan show b4a94232d76e     # one group in full, with its helper template
-doppelscan near                  # functions that are copies with small edits
+doppelscan                              # the 20 most worthwhile clone groups
+doppelscan show rink-point-city-roast   # one group in full, with its helper template
+doppelscan near                         # functions that are copies with small edits
 ```
 
 To stop duplication growing in a codebase that already has plenty, accept
@@ -44,7 +44,7 @@ claude mcp add doppelscan -- doppelscan mcp
 ## What you get
 
 ```
-#1 [b4a94232d76e] x9 | 71 tokens, 3 lines, run of 3 | score 568
+#1 [rink-point-city-roast] x9 | 71 tokens, 3 lines, run of 3 | score 568
   src/app/resume-state.service.ts:303-305  (ResumeStateService.addExperience)
   src/app/resume-state.service.ts:317-319  (ResumeStateService.addEducation)
   ...
@@ -71,7 +71,7 @@ claude mcp add doppelscan -- doppelscan mcp
 | Command | Use |
 | --- | --- |
 | `doppelscan [path]` | Find clones, best first. `--limit 0` lists them all. |
-| `doppelscan show <id>` | One group in full. |
+| `doppelscan show <id>` | One group in full, by name, fingerprint or number. |
 | `doppelscan at <file>:<lines>` | Is the code at these lines duplicated elsewhere? |
 | `doppelscan similar --lang ts` | Does the snippet on stdin already exist? |
 | `doppelscan near` | Functions that match except for statements added, removed or changed, and the lines that differ. |

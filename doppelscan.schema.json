@@ -81,7 +81,7 @@
       "type": "object",
       "properties": {
         "fingerprint": {
-          "description": "The group's fingerprint, as `doppelscan` shows it in brackets.",
+          "description": "The group's fingerprint, as `doppelscan show` prints it. Not its name.",
           "type": "string"
         },
         "reason": {

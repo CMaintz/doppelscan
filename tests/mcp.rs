@@ -671,7 +671,12 @@ fn a_match_on_an_accepted_clone_says_so() {
     let args = json!({ "path": "src", "min_tokens": 20 });
     let found = tool(&engine, &root, "find_duplicates", args);
     let text = tool_text(&found);
-    let fingerprint = text.split('[').nth(1).unwrap().split(']').next().unwrap();
+    let name = text.split('[').nth(1).unwrap().split(']').next().unwrap();
+    let args = json!({ "path": "src", "min_tokens": 20, "id": name });
+    let shown = tool(&engine, &root, "get_duplicate_group", args);
+    let shown = tool_text(&shown);
+    let line = shown.split("fingerprint: ").nth(1).unwrap();
+    let fingerprint = line.lines().next().unwrap();
     let config = format!("[[accept]]\nfingerprint = \"{fingerprint}\"\nreason = \"on purpose\"\n");
     std::fs::write(root.join(".doppelscan.toml"), config).unwrap();
     let text = similar(&engine, &root, CLONE, "ts");

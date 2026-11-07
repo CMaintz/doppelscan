@@ -39,7 +39,7 @@ enum Command {
     Scan(ScanArgs),
     /// Show one group in full: locations, parameters, helper template.
     Show {
-        /// Group id from `scan`, or its fingerprint.
+        /// Group id, name or fingerprint from `scan`.
         id: String,
         #[command(flatten)]
         common: Common,

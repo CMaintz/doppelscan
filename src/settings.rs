@@ -387,8 +387,8 @@ fn template(langs: &[(usize, usize)], tests: &[&str]) -> String {
 # ones are still reported. 0 leaves it to min-tokens.
 # min-tokens = 0
 
-# A clone group kept on purpose, by the fingerprint doppelscan shows in
-# brackets: left out of every report and never failing `check`. Changing
+# A clone group kept on purpose, by the fingerprint `doppelscan show` prints:
+# left out of every report and never failing `check`. Changing
 # the code's structure changes the fingerprint, so it comes back for another
 # look; renames and changed literals do not, unless the scan is strict.
 # [[accept]]

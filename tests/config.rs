@@ -20,6 +20,21 @@ export function sumTotals(orders: Order[], config: Config): number {
 }
 "#;
 
+const OTHER_CLONE: &str = r#"
+export async function activeNames(client: Client, limit: number): Promise<string[]> {
+    const rows = await client.query(limit);
+    const result: string[] = [];
+    while (rows.hasNext()) {
+        const row = rows.next();
+        if (row.active && !row.hidden) {
+            result.push(row.name.trim());
+        }
+    }
+    await client.close();
+    return result.sort();
+}
+"#;
+
 /// A repo with one clone pair in `src` and `config` as its config file.
 fn repo_with_config(name: &str, config: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("doppelscan-config-{name}-{}", std::process::id()));
@@ -882,6 +897,32 @@ fn a_config_inside_the_scan_does_not_warn() {
     assert_eq!(code, 0, "{err}");
     assert!(!err.contains("warning:"), "{err}");
     assert!(!out.contains("pkg/b.ts"), "{out}");
+}
+
+// Catches `show` not taking the name a listing prints, or taking it and
+// showing another group: with two groups, each name must find its own, and
+// the fingerprint must be there for `accept`.
+#[test]
+fn show_finds_a_group_by_the_name_json_gives() {
+    let dir = repo_with_config("show-name", "");
+    std::fs::write(dir.join("src/c.ts"), OTHER_CLONE).unwrap();
+    let copy = OTHER_CLONE.replace("activeNames", "staffNames");
+    std::fs::write(dir.join("src/d.ts"), copy).unwrap();
+    let (_, out, _) = run(&dir, &[".", "--format", "json"]);
+    let report: Value = serde_json::from_str(&out).unwrap();
+    let groups = report["groups"].as_array().unwrap();
+    assert_eq!(groups.len(), 2, "{out}");
+    for group in groups {
+        let name = group["name"].as_str().unwrap();
+        let fingerprint = group["fingerprint"].as_str().unwrap();
+        let (code, shown, err) = run(&dir, &["show", name]);
+        assert_eq!(code, 0, "{err}");
+        assert!(shown.contains(&format!("[{name}]")), "{shown}");
+        assert!(
+            shown.contains(&format!("fingerprint: {fingerprint}")),
+            "{shown}"
+        );
+    }
 }
 
 // Catches accepting a fingerprint only in the case doppelscan prints it,

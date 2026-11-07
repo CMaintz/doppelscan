@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use doppelscan::detect::RawGroup;
 use doppelscan::engine::{ScanOptions, Source, analyze, index_sources};
 use doppelscan::lang::lang_index_for_path;
-use doppelscan::report::{Analysis, Group};
+use doppelscan::report::{Analysis, Group, name};
 
 fn scan_with(files: &[(&str, &str)], opts: ScanOptions) -> Analysis {
     let sources = files
@@ -310,6 +310,51 @@ fn a_number_out_of_id_range_is_no_group_even_if_a_fingerprint_starts_with_it() {
     }
     assert_eq!(a.resolve("2"), Some(2));
     assert_eq!(a.resolve(" #3 "), Some(3));
+}
+
+// Catches a name lookup that picks a neighbour, such as one comparing only
+// the first word.
+#[test]
+fn a_name_resolves_to_its_own_group() {
+    let a = with_fingerprints(&[0x54ab12345678, 0xabcdef123456, 0xabcd00000001]);
+    for id in 1..=3 {
+        assert_eq!(a.resolve(&name(&a.groups[id - 1])), Some(id));
+    }
+    assert_eq!(a.resolve(&name(&a.groups[1]).to_uppercase()), Some(2));
+}
+
+// Catches the bit layout or the word list changing: names would no longer
+// match what people noted down or what an earlier run printed.
+#[test]
+fn a_fingerprint_always_gets_the_same_name() {
+    let a = with_fingerprints(&[0xb4a94232d76e]);
+    assert_eq!(name(&a.groups[0]), "rink-point-city-roast");
+}
+
+// Catches a shared name silently picking the first or last match. These two
+// fingerprints differ only in the bits a name leaves out.
+#[test]
+fn a_shared_name_is_refused_and_lists_the_candidates() {
+    let a = with_fingerprints(&[0xabcdef123400, 0xabcdef1234ff]);
+    let shared = name(&a.groups[0]);
+    assert_eq!(shared, name(&a.groups[1]));
+    assert_eq!(a.resolve(&shared), None);
+    let error = a.unresolved(&shared);
+    assert!(error.contains("#1 [abcdef123400]"), "{error}");
+    assert!(error.contains("#2 [abcdef1234ff]"), "{error}");
+}
+
+// Catches matching names by prefix, as fingerprints are: part of a name, or
+// a name with a word changed, would land on a group nobody asked for.
+#[test]
+fn an_unknown_or_partial_name_is_no_group() {
+    let a = with_fingerprints(&[0xabcdef123456]);
+    let whole = name(&a.groups[0]);
+    let (partial, _) = whole.rsplit_once('-').unwrap();
+    for key in [partial, "not-a-real-name"] {
+        assert_eq!(a.resolve(key), None, "{key:?}");
+        assert!(a.unresolved(key).contains("no clone group"), "{key:?}");
+    }
 }
 
 // Catches an empty key being a prefix of every fingerprint, which resolves

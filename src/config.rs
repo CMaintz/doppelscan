@@ -69,7 +69,7 @@ struct File {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct AcceptFile {
-    /// The group's fingerprint, as `doppelscan` shows it in brackets.
+    /// The group's fingerprint, as `doppelscan show` prints it. Not its name.
     fingerprint: String,
     /// Why the duplication stays.
     reason: String,
