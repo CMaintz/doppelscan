@@ -216,12 +216,23 @@ impl Config {
             rules: self.rules.clone(),
             skip_nested: self.skip_nested,
             accept: self.accepts.iter().map(normalized_fingerprint).collect(),
-            max_param_density: asked
-                .max_param_density
-                .or(value(&self.max_param_density))
-                .unwrap_or(defaults.max_param_density),
+            max_param_density: self.max_param_density(asked.max_param_density)?,
             ..defaults
         })
+    }
+
+    /// The density asked for, else the config's, else the default. A
+    /// baseline records it, and JSON has no way to write a non-finite number
+    /// that can be read back, so those stop here rather than at the next
+    /// `check`.
+    fn max_param_density(&self, asked: Option<f32>) -> anyhow::Result<f32> {
+        let default = ScanOptions::default().max_param_density;
+        let density = asked.or(value(&self.max_param_density)).unwrap_or(default);
+        anyhow::ensure!(
+            density.is_finite(),
+            "max-param-density has to be a finite number, not {density}; a large one such as 1000 keeps every group"
+        );
+        Ok(density)
     }
 
     /// Whether a config lists path patterns anchored at a directory sharing

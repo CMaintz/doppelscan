@@ -5,6 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::detect::RawGroup;
@@ -20,6 +21,8 @@ pub const DEFAULT_FILE: &str = ".doppelscan-baseline.json";
 /// language the binary knew, so a release adding languages failed every check
 /// on their existing duplication.
 const VERSION: u32 = 3;
+/// All of these stay one byte in JSON.
+const SHAPE_CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+-";
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Baseline {
@@ -54,6 +57,12 @@ pub struct Entry {
     /// `file` or `file#scope` per occurrence, sorted. Line numbers are left
     /// out because every edit above a clone would make them stale.
     pub places: Vec<String>,
+    /// The clone's normalized tokens, one character each, for telling code
+    /// it held from new code beside it: a place only says where the clone
+    /// sat, and an edit leaves a shrunk clone with a new fingerprint. Empty
+    /// in baselines written before this was recorded.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub shape: String,
 }
 
 impl Settings {
@@ -169,8 +178,9 @@ impl Baseline {
 
     /// Ids of the groups in `now` that this baseline does not account for.
     pub fn new_groups(&self, now: &Analysis) -> Vec<usize> {
+        let index = Index::new(&self.groups);
         (1..=now.groups.len())
-            .filter(|&id| !self.excuses(&entry(now, &now.groups[id - 1])))
+            .filter(|&id| !index.excuses(&entry(now, &now.groups[id - 1])))
             .collect()
     }
 
@@ -183,16 +193,43 @@ impl Baseline {
     pub fn pruned(&self, now: &Analysis) -> Self {
         let found = now.groups.iter().chain(&now.accepted);
         let current: Vec<Entry> = found.map(|group| entry(now, group)).collect();
-        let groups = self
-            .groups
-            .iter()
-            .filter_map(|e| e.pruned(&current))
-            .collect();
+        let excused = Index::new(&self.groups).excused_groups(&current);
+        let kept = self.groups.iter().zip(&excused);
+        let groups = kept.filter_map(|(e, by)| e.pruned(by)).collect();
         Self {
             version: VERSION,
             settings: self.settings.clone(),
             scanned: self.scanned.clone(),
             groups,
+        }
+    }
+}
+
+/// Entries by what a group has to share with them to match, so a large
+/// baseline costs a lookup per group rather than a pass over every entry.
+struct Index<'a> {
+    entries: &'a [Entry],
+    by_fingerprint: FxHashMap<&'a str, Vec<usize>>,
+    by_place: FxHashMap<&'a str, Vec<usize>>,
+}
+
+impl<'a> Index<'a> {
+    /// Bare files are left out of entries without a shape, which the shrink
+    /// rule never lets them excuse anything for.
+    fn new(entries: &'a [Entry]) -> Self {
+        let mut by_fingerprint: FxHashMap<&str, Vec<usize>> = FxHashMap::default();
+        let mut by_place: FxHashMap<&str, Vec<usize>> = FxHashMap::default();
+        for (i, e) in entries.iter().enumerate() {
+            by_fingerprint.entry(&e.fingerprint).or_default().push(i);
+            let usable = |p: &&String| !e.shape.is_empty() || p.contains('#');
+            for place in e.places.iter().filter(usable) {
+                by_place.entry(place).or_default().push(i);
+            }
+        }
+        Self {
+            entries,
+            by_fingerprint,
+            by_place,
         }
     }
 
@@ -201,30 +238,59 @@ impl Baseline {
     /// or when it is a smaller clone in places one entry already covered:
     /// an edit that shrinks a clone changes its fingerprint but adds nothing.
     fn excuses(&self, group: &Entry) -> bool {
-        self.groups.iter().any(|e| {
-            (e.fingerprint == group.fingerprint && group.occurrences <= e.occurrences)
-                || is_shrunk_from(group, e)
-        })
+        let copies = |&i: &usize| self.entries[i].occurrences;
+        self.same(group)
+            .iter()
+            .any(|i| group.occurrences <= copies(i))
+            || !self.shrunk_from(group).is_empty()
+    }
+
+    /// For each entry, the groups in `current` that lean on it.
+    fn excused_groups<'g>(&self, current: &'g [Entry]) -> Vec<Vec<&'g Entry>> {
+        let mut excused = vec![Vec::new(); self.entries.len()];
+        for group in current {
+            let same = self.same(group).iter().copied();
+            for i in same.chain(self.shrunk_from(group)) {
+                excused[i].push(group);
+            }
+        }
+        excused
+    }
+
+    /// Fingerprints are truncated hashes, so several entries can share one.
+    fn same(&self, group: &Entry) -> &[usize] {
+        let found = self.by_fingerprint.get(group.fingerprint.as_str());
+        found.map_or(&[], Vec::as_slice)
+    }
+
+    /// The entries `group` is a shrunk form of. Every place of such a group
+    /// pairs with a place of the entry, so holding something that encloses
+    /// its first place narrows the candidates without missing any.
+    fn shrunk_from(&self, group: &Entry) -> Vec<usize> {
+        let first = group.places.iter().take(1);
+        let enclosed = first.flat_map(|place| enclosing(place));
+        let held = enclosed.filter_map(|place| self.by_place.get(place));
+        let mut candidates: Vec<usize> = held.flatten().copied().collect();
+        candidates.sort_unstable();
+        candidates.dedup();
+        candidates.retain(|&i| is_shrunk_from(group, &self.entries[i]));
+        candidates
     }
 }
 
 impl Entry {
-    /// What the groups found now still need of this entry, or `None` when
-    /// they need none of it.
-    fn pruned(&self, current: &[Entry]) -> Option<Self> {
-        let is_same = |c: &Entry| c.fingerprint == self.fingerprint;
-        let excused = current
-            .iter()
-            .filter(|c| is_same(c) || is_shrunk_from(c, self));
-        let excused: Vec<&Entry> = excused.collect();
+    /// What `excused`, the groups leaning on this entry, still need of it,
+    /// or `None` when there are none.
+    fn pruned(&self, excused: &[&Entry]) -> Option<Self> {
         if excused.is_empty() {
             return None;
         }
         // Same and shrunk groups both lean on this entry at once, so what
         // only one of them holds has to stay; moved copies hold no place,
         // which is why the same group's own count also counts.
-        let places = self.places_held_by(&excused);
-        let copies = excused.iter().filter(|c| is_same(c)).map(|c| c.occurrences);
+        let places = self.places_held_by(excused);
+        let same = excused.iter().filter(|c| c.fingerprint == self.fingerprint);
+        let copies = same.map(|c| c.occurrences);
         let remaining = copies.max().unwrap_or(0).max(places.len());
         Some(self.narrowed(places, remaining))
     }
@@ -243,7 +309,7 @@ impl Entry {
         let mut held = vec![false; self.places.len()];
         let paired = groups
             .iter()
-            .flat_map(|g| pairings(&g.places, &self.places));
+            .flat_map(|g| pairings(&g.places, &self.places, !self.shape.is_empty()));
         for i in paired.flatten() {
             held[i] = true;
         }
@@ -252,12 +318,41 @@ impl Entry {
     }
 }
 
-/// Only named places count: two files sharing one top-level clone must not
-/// excuse every later top-level clone between them.
+/// A shrunk clone is code the entry held, in places it held it, and code
+/// deleted from the middle of every copy leaves the rest joined up. A clone
+/// over several definitions sits at the bare file, and the pieces an edit
+/// leaves of it inside one of them are shrunk too. An entry without a shape
+/// can only go by places, and there only named ones count: two files sharing
+/// one top-level clone must not excuse every later clone between them.
 fn is_shrunk_from(group: &Entry, accepted: &Entry) -> bool {
+    let has_shape = !accepted.shape.is_empty();
+    let held = if has_shape {
+        is_cut_from(&group.shape, &accepted.shape)
+    } else {
+        group.places.iter().all(|p| p.contains('#'))
+    };
     group.tokens <= accepted.tokens
-        && group.places.iter().all(|p| p.contains('#'))
-        && is_sub_multiset(&group.places, &accepted.places)
+        && held
+        && is_sub_multiset(&group.places, &accepted.places, has_shape)
+}
+
+/// Whether `shape` is `accepted` with up to two stretches cut out, or part
+/// of what that leaves. Not any subsequence: over so few token kinds, most
+/// new code is a subsequence of a long enough clone. Shapes are read back
+/// from a file a person can edit, so a cut is not assumed to fall between
+/// characters.
+fn is_cut_from(shape: &str, accepted: &str) -> bool {
+    let (small, big) = (shape.as_bytes(), accepted.as_bytes());
+    let head = common_len(small.iter(), big.iter());
+    let tail = common_len(small[head..].iter().rev(), big[head..].iter().rev());
+    let rest = accepted.get(head..big.len() - tail);
+    let kept = shape.get(head..small.len() - tail);
+    rest.zip(kept)
+        .is_some_and(|(rest, kept)| rest.contains(kept))
+}
+
+fn common_len<'a>(a: impl Iterator<Item = &'a u8>, b: impl Iterator<Item = &'a u8>) -> usize {
+    a.zip(b).take_while(|(x, y)| x == y).count()
 }
 
 fn entry(analysis: &Analysis, raw: &RawGroup) -> Entry {
@@ -278,36 +373,64 @@ fn entry(analysis: &Analysis, raw: &RawGroup) -> Entry {
         occurrences: raw.occs.len(),
         tokens: raw.tokens,
         places,
+        shape: shape(analysis, raw),
     }
 }
 
-fn is_sub_multiset(small: &[String], big: &[String]) -> bool {
-    pairings(small, big).all(|slot| slot.is_some())
+/// Six bits a token keep the file small, and a false match would still take
+/// a whole clone's worth of tokens lining up. Separators are left out
+/// because a run holds only its elements while the whole node around them
+/// holds what sits between them too, and a run cut from that node must still
+/// read as part of it.
+fn shape(analysis: &Analysis, raw: &RawGroup) -> String {
+    let occ = &raw.occs[0];
+    let file = &analysis.files[occ.file as usize];
+    let leaves = occ.leaf_indices().map(|i| &file.leaves[i as usize]);
+    let tokens = leaves.filter(|leaf| !matches!(file.leaf_text(leaf), "," | ";"));
+    tokens
+        .map(|leaf| SHAPE_CHARS[leaf.token as usize % SHAPE_CHARS.len()] as char)
+        .collect()
+}
+
+fn is_sub_multiset(small: &[String], big: &[String], by_file: bool) -> bool {
+    pairings(small, big, by_file).all(|slot| slot.is_some())
 }
 
 /// For each place in `small`, the index of a distinct place in `big` that
-/// is the same or encloses it (`a.ts#Cart` encloses `a.ts#Cart.total`).
-/// Each place takes the deepest free match, so an exact match is never
-/// spent on a place an enclosing scope could have covered.
+/// is the same or encloses it (`a.ts#Cart` encloses `a.ts#Cart.total`, and
+/// with `by_file` `a.ts` encloses both). Each place takes the deepest free
+/// match, so an exact match is never spent on a place an enclosing scope
+/// could have covered.
 fn pairings<'a>(
     small: &'a [String],
     big: &'a [String],
+    by_file: bool,
 ) -> impl Iterator<Item = Option<usize>> + 'a {
     let mut used = vec![false; big.len()];
     small.iter().map(move |s| {
         let slot = (0..big.len())
-            .filter(|&i| !used[i] && encloses(&big[i], s))
+            .filter(|&i| !used[i] && encloses(&big[i], s, by_file))
             .max_by_key(|&i| big[i].len());
         slot.inspect(|&i| used[i] = true)
     })
 }
 
-fn encloses(outer: &str, inner: &str) -> bool {
-    inner == outer
-        || (outer.contains('#')
-            && inner
-                .strip_prefix(outer)
-                .is_some_and(|rest| rest.starts_with('.')))
+/// Every `outer` that can enclose `place`. Cuts at each `.` and `#` rather
+/// than parsing out the scope, since `encloses` does not parse either and a
+/// path can hold both.
+fn enclosing(place: &str) -> impl Iterator<Item = &str> {
+    let cuts = place.match_indices(['.', '#']).map(|(i, _)| &place[..i]);
+    cuts.filter(|outer| encloses(outer, place, true))
+        .chain(std::iter::once(place))
+}
+
+fn encloses(outer: &str, inner: &str, by_file: bool) -> bool {
+    let Some(rest) = inner.strip_prefix(outer) else {
+        return false;
+    };
+    rest.is_empty()
+        || (outer.contains('#') && rest.starts_with('.'))
+        || (by_file && rest.starts_with('#'))
 }
 
 #[cfg(test)]
@@ -323,7 +446,8 @@ mod tests {
     #[test]
     fn matching_keeps_enclosing_places_for_places_without_an_exact_match() {
         let small = places(&["a.ts#C.m", "a.ts#C.n"]);
-        assert!(is_sub_multiset(&small, &places(&["a.ts#C", "a.ts#C.m"])));
-        assert!(!is_sub_multiset(&small, &places(&["a.ts#C.m", "a.ts#D"])));
+        let holds = |big: &[&str]| is_sub_multiset(&small, &places(big), false);
+        assert!(holds(&["a.ts#C", "a.ts#C.m"]));
+        assert!(!holds(&["a.ts#C.m", "a.ts#D"]));
     }
 }
