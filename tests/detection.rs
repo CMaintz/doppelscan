@@ -557,6 +557,93 @@ fn a_part_of_a_wall_copied_verbatim_is_a_clone_at_that_part() {
     );
 }
 
+/// Every setting of a wall a line each, and all but the first in a copy, so
+/// the run of the copy's length fits the wall at two overlapping places.
+fn one_line_wall_and_copy() -> (String, String) {
+    let line = |n: &&str| {
+        format!(
+            "    config.put(\"{n}\", source.read(\"{n}\", {n}.class).trim());
+"
+        )
+    };
+    let rows: Vec<String> = SETTING_NAMES.iter().map(line).collect();
+    let wall = format!(
+        "class A {{
+  void init() {{
+{}  }}
+}}
+",
+        rows.concat()
+    );
+    (wall, settings_copy(&rows[1..]))
+}
+
+fn ranges(g: &Group) -> Vec<(&str, u32, u32)> {
+    let occurrences = g.occurrences.iter();
+    occurrences
+        .map(|o| (o.file.as_str(), o.start_line, o.end_line))
+        .collect()
+}
+
+// Catches positions being taken before asking which of them the copy spells
+// like: a wall too short to hold the run twice leaves the first fit standing,
+// which here is the wrong setting's and fails the density limit.
+#[test]
+fn a_copy_of_nearly_a_whole_wall_is_found_at_its_own_part() {
+    let (wall, copy) = one_line_wall_and_copy();
+    let gs = scan_wall_and_copy(&wall, &copy);
+    assert_eq!(gs.len(), 1, "{gs:#?}");
+    assert_eq!(ranges(&gs[0]), [("A.java", 4, 9), ("B.java", 3, 8)]);
+}
+
+// Catches the same wrong pick where the density limit would not reveal it.
+#[test]
+fn a_copy_of_nearly_a_whole_wall_keeps_its_part_at_any_density_limit() {
+    let (wall, copy) = one_line_wall_and_copy();
+    let opts = ScanOptions {
+        max_param_density: 1000.0,
+        ..Default::default()
+    };
+    let gs = groups(&scan_with(&[("A.java", &wall), ("B.java", &copy)], opts));
+    let verbatim = gs.iter().find(|g| ranges(g).contains(&("B.java", 3, 8)));
+    assert_eq!(
+        ranges(verbatim.expect("the copy")),
+        [("A.java", 4, 9), ("B.java", 3, 8)]
+    );
+}
+
+// Catches the wall's own period deciding the part: every row recurs in the
+// wall, so the first fit has a twin of its own and would win over the part
+// the copy spells like.
+#[test]
+fn a_copy_of_most_of_a_periodic_table_is_found_at_its_part() {
+    let rows = ["0x01, 0x02, 0x03, 0x04", "0x05, 0x06, 0x07, 0x08"];
+    let row = |i: usize| {
+        format!(
+            "    {},
+",
+            rows[i % 2]
+        )
+    };
+    let body = |lines: std::ops::Range<usize>| lines.map(row).collect::<String>();
+    let wall = format!(
+        "T = [
+{}]
+",
+        body(1..41)
+    );
+    let copy = format!(
+        "C = [
+{}]
+print(C)
+",
+        body(2..32)
+    );
+    let gs = groups_of(&[("t.py", &wall), ("c.py", &copy)]);
+    let verbatim = [("t.py", 3, 32), ("c.py", 2, 31)];
+    assert!(gs.iter().any(|g| ranges(g) == verbatim), "{gs:#?}");
+}
+
 // Catches the wall's other members coming back as noise: renamed fields in a
 // second class are what every pair of data classes has in common.
 #[test]
@@ -1039,4 +1126,202 @@ fn a_clone_end_skips_trailing_blank_lines() {
 fn a_last_case_ends_before_the_closing_brace() {
     let a = scan(&[("a.go", GO_SWITCH)]);
     assert_eq!(line_spans(&a), [(5, 8), (9, 12)]);
+}
+
+// Catches a run dropped because it repeats inside one file when another file
+// holds a verbatim copy: 4 statements in A and 2 in B are 34 tokens each, so
+// only the run of two reaches the default size.
+#[test]
+fn a_tandem_run_copied_to_another_file_is_a_clone() {
+    let statement = "    r.add(p.parse(c, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11));
+";
+    let method = |count: usize| {
+        format!(
+            "void m() {{
+{}}}
+",
+            statement.repeat(count)
+        )
+    };
+    let (a, b) = (method(4), method(2));
+    let gs = groups(&scan_with(
+        &[("A.java", &a), ("B.java", &b)],
+        ScanOptions::default(),
+    ));
+    assert_eq!(gs.len(), 1, "{gs:#?}");
+    let places: Vec<_> = gs[0]
+        .occurrences
+        .iter()
+        .map(|o| (o.file.as_str(), o.start_line))
+        .collect();
+    assert_eq!(places, [("A.java", 2), ("A.java", 4), ("B.java", 2)]);
+}
+
+fn py_table(name: &str, row: &str, rows: usize) -> String {
+    format!("{name} = [\n{}]\n", format!("    {row}\n").repeat(rows))
+}
+
+fn groups_of(files: &[(&str, &str)]) -> Vec<Group> {
+    groups(&scan_with(files, ScanOptions::default()))
+}
+
+const ZERO_ROW: &str = "0, 0, 0, 0, 0, 0, 0, 0,";
+
+// Catches every length that fits the shorter table once counting as a copy
+// of the longer: tilings at different lengths do not subsume one another, so
+// the pair floods the report with one group per length.
+#[test]
+fn a_zero_table_and_a_shorter_one_are_one_group() {
+    let (long, short) = (py_table("A", ZERO_ROW, 100), py_table("B", ZERO_ROW, 40));
+    let gs = groups_of(&[("a.py", &long), ("b.py", &short)]);
+    assert_eq!(gs.len(), 1, "{} groups", gs.len());
+    let in_short: Vec<_> = gs[0]
+        .occurrences
+        .iter()
+        .filter(|o| o.file == "b.py")
+        .map(|o| (o.start_line, o.end_line))
+        .collect();
+    assert_eq!(in_short, [(2, 41)]);
+}
+
+// The same flood with both tables in one file, where only blocks tell them
+// apart.
+#[test]
+fn two_zero_arrays_in_one_file_are_one_group() {
+    let row = "    0, 0, 0, 0, 0, 0, 0, 0,\n";
+    let text = format!(
+        "const a = [\n{}];\nconst b = [\n{}];\n",
+        row.repeat(60),
+        row.repeat(25)
+    );
+    let gs = groups_of(&[("t.ts", &text)]);
+    assert_eq!(gs.len(), 1, "{} groups", gs.len());
+}
+
+// Catches a rule that only looks at whether the copy repeats at the next
+// offset: with a period of two the run also fits at the odd phase, once.
+#[test]
+fn a_table_with_a_longer_period_is_one_group_too() {
+    let row = "0, \"a\", 0, \"a\", 0, \"a\", 0, \"a\",";
+    let (long, short) = (py_table("A", row, 100), py_table("B", row, 40));
+    let gs = groups_of(&[("a.py", &long), ("b.py", &short)]);
+    assert_eq!(gs.len(), 1, "{} groups", gs.len());
+}
+
+// Catches the longest run being the plain pair of the shorter table with the
+// start of the longer, which leaves the tiled runs below it nothing to lose
+// to: the longer table holds it less than twice.
+#[test]
+fn a_table_under_twice_as_long_is_one_group() {
+    let (long, short) = (py_table("A", ZERO_ROW, 60), py_table("B", ZERO_ROW, 40));
+    let gs = groups_of(&[("a.py", &long), ("b.py", &short)]);
+    assert_eq!(gs.len(), 1, "{} groups", gs.len());
+}
+
+// Catches a copy counting only while the run fits it exactly once: the wall
+// breaks between its two stretches and the copy runs one statement past
+// either, so its whole length is no repeat and this is the only group there
+// is to report.
+#[test]
+fn a_copy_longer_than_any_stretch_of_the_wall_is_still_found() {
+    let statement = "    r.add(p.parse(c, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11));\n";
+    let stretch = statement.repeat(4);
+    let wall = format!("void m() {{\n{stretch}    other();\n{stretch}}}\n");
+    let copy = format!("void n() {{\n{}}}\n", statement.repeat(5));
+    let gs = groups_of(&[("A.java", &wall), ("B.java", &copy)]);
+    assert_eq!(gs.len(), 1, "{gs:#?}");
+    let files: Vec<_> = gs[0].occurrences.iter().map(|o| o.file.as_str()).collect();
+    assert_eq!(files, ["A.java", "A.java", "B.java"]);
+}
+
+// A wall in `A.java`, a verbatim part of it in `verbatim` and the same part
+// renamed in `renamed`, both alone in their blocks. The two copies are clones
+// of each other too, so this is the group that reaches the wall. Sorted as
+// the walk would.
+fn wall_group_with_two_copies(verbatim: &str, renamed: &str) -> Vec<String> {
+    let setting =
+        |names: &[&str]| -> Vec<String> { names.iter().map(|n| parsed_setting(n)).collect() };
+    let kept = settings_copy(&setting(&SETTING_NAMES[2..5]));
+    let changed = settings_copy(&setting(&["One", "Two", "Three"]));
+    let wall = settings_wall();
+    let mut files = [("A.java", &wall), (verbatim, &kept), (renamed, &changed)];
+    files.sort_by_key(|(path, _)| *path);
+    let gs = groups_of(&files.map(|(p, t)| (p, t.as_str())));
+    let in_wall = |g: &&Group| g.occurrences.iter().any(|o| o.file == "A.java");
+    let found = gs.iter().find(in_wall).expect("a group in the wall");
+    found.occurrences.iter().map(|o| o.file.clone()).collect()
+}
+
+// Catches only the first lone block being tried: which copy that is depends
+// on how the files sort. Also catches a lone copy with no twin in the wall
+// joining the group: a renamed copy is not part of it under either name.
+#[test]
+fn a_verbatim_copy_is_found_whatever_a_renamed_one_is_called() {
+    assert_eq!(
+        wall_group_with_two_copies("C.java", "D.java"),
+        ["A.java", "C.java"]
+    );
+    assert_eq!(
+        wall_group_with_two_copies("C.java", "B.java"),
+        ["A.java", "C.java"]
+    );
+}
+
+fn put_lines(key: &str, count: usize) -> String {
+    (0..count)
+        .map(|n| format!("        out.put(\"{key}A{n}\", {key}B{n}.{key}C{n}(row.{key}D{n}));\n"))
+        .collect()
+}
+
+// Catches a run longer than the copy shadowing it before the density limit
+// has judged that run: a vetoed group must not hide the smaller clones inside
+// it. The whole method fails the limit, its tails differing in every name.
+#[test]
+fn a_verbatim_head_survives_a_longer_run_over_the_density_limit() {
+    let method = |tail: &str| {
+        let lines = put_lines("same", 7) + &put_lines(tail, 6);
+        format!(
+            "void m() {{
+{lines}}}
+"
+        )
+    };
+    let (a, b) = (method("left"), method("right"));
+    let gs = groups_of(&[("A.java", &a), ("B.java", &b)]);
+    assert_eq!(gs.len(), 1, "{gs:#?}");
+    let first = &gs[0].occurrences[0];
+    assert!(first.start_line == 2 && first.end_line < 14, "{first:?}");
+}
+
+fn setter_block(method: &str, names: &[&str]) -> String {
+    let set = |n: &&str| format!("        d.set{n}(read(map, \"{n}\"));\n");
+    let body: String = names.iter().map(set).collect();
+    format!("class {method} {{\n    void m() {{\n{body}    }}\n}}\n")
+}
+
+// Catches lone copies being taken before the ones with no twin are ruled out:
+// `Y` starts one statement ahead of the verbatim part, so its own lone copy,
+// spelled like nothing else, overlaps the part and pushes it out.
+#[test]
+fn a_lone_copy_with_no_twin_does_not_hide_the_part_beside_it() {
+    let part = ["Aa", "Bb", "Cc", "Dd", "Ee", "Ff"];
+    let wall: Vec<String> = (0..14).map(|n| format!("W{n}")).collect();
+    let wall: Vec<&str> = wall.iter().map(String::as_str).collect();
+    let x = [&part[..], &["Gg", "Hh", "Ii", "Jj"]].concat();
+    let y = [&["Pp"], &part[..], &["Qq", "Rr", "Ss", "Tt"]].concat();
+    let (w, x, y) = (
+        setter_block("W", &wall),
+        setter_block("X", &x),
+        setter_block("Y", &y),
+    );
+    let gs = groups_of(&[("W.java", &w), ("X.java", &x), ("Y.java", &y)]);
+    let is_part = |g: &&Group| {
+        let places: Vec<_> = g
+            .occurrences
+            .iter()
+            .map(|o| (o.file.as_str(), o.start_line))
+            .collect();
+        places == [("X.java", 3), ("Y.java", 4)]
+    };
+    assert!(gs.iter().any(|g| is_part(&g)), "{gs:#?}");
 }

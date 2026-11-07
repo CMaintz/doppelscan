@@ -2,14 +2,15 @@
 //! maximal repeats, then subsumption so each duplication is reported once
 //! at its largest extent.
 
-use std::sync::Arc;
+use std::fmt;
+use std::sync::{Arc, OnceLock};
 
 use rayon::prelude::*;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::hash::combine;
+use crate::hash::{combine, hash_bytes};
 use crate::index::{FileIndex, Frag};
-use crate::suffix::maximal_repeats;
+use crate::suffix::{Repeat, maximal_repeats};
 
 #[derive(Clone, Debug)]
 pub struct Occ {
@@ -19,9 +20,49 @@ pub struct Occ {
     pub start_line: u32,
     pub end_line: u32,
     pub scope: u32,
-    /// Leaf index ranges; one per run element so separators between
-    /// siblings (which differ between grammars) never break alignment.
-    pub leaves: Vec<(u32, u32)>,
+    leaf_count: u32,
+    /// A tandem run alone in its block, which `is_covered` judges by itself.
+    is_copy: bool,
+    elems: Elems,
+}
+
+/// The syntax elements an occurrence covers, each with its own leaf range so
+/// separators between siblings (which differ between grammars) never break
+/// alignment. A run points into its file rather than holding a copy: between
+/// two equal tables every length has a group of its own until the longest
+/// subsumes them, which is quadratic in the table when copied.
+#[derive(Clone)]
+enum Elems {
+    Node {
+        file: Arc<FileIndex>,
+        index: u32,
+    },
+    Run {
+        file: Arc<FileIndex>,
+        seq: u32,
+        start: u32,
+        len: u32,
+    },
+}
+
+impl Elems {
+    fn frags(&self) -> &[Frag] {
+        match self {
+            Elems::Node { file, index } => std::slice::from_ref(&file.nodes[*index as usize]),
+            Elems::Run {
+                file,
+                seq,
+                start,
+                len,
+            } => &file.seqs.get(*seq as usize)[*start as usize..(start + len) as usize],
+        }
+    }
+}
+
+impl fmt::Debug for Elems {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.frags()).finish()
+    }
 }
 
 impl Occ {
@@ -35,11 +76,13 @@ impl Occ {
     }
 
     fn leaf_span(&self) -> (u32, u32) {
-        (self.leaves[0].0, self.leaves[self.leaves.len() - 1].1)
+        let frags = self.elems.frags();
+        (frags[0].leaf_start, frags[frags.len() - 1].leaf_end)
     }
 
     pub fn leaf_indices(&self) -> impl Iterator<Item = u32> + '_ {
-        self.leaves.iter().flat_map(|&(s, e)| s..e)
+        let frags = self.elems.frags().iter();
+        frags.flat_map(|e| e.leaf_start..e.leaf_end)
     }
 }
 
@@ -87,7 +130,13 @@ fn node_groups(files: &[Arc<FileIndex>], min_tokens: u32) -> Vec<RawGroup> {
         .map(|c| {
             let occs = c
                 .iter()
-                .map(|&(_, fi, ni)| occ_of(files, fi, &[files[fi as usize].nodes[ni as usize]]))
+                .map(|&(_, fi, ni)| {
+                    let elems = Elems::Node {
+                        file: Arc::clone(&files[fi as usize]),
+                        index: ni,
+                    };
+                    occ_of(files, fi, elems)
+                })
                 .collect();
             RawGroup {
                 hash: c[0].0,
@@ -99,8 +148,9 @@ fn node_groups(files: &[Arc<FileIndex>], min_tokens: u32) -> Vec<RawGroup> {
         .collect()
 }
 
-fn occ_of(files: &[Arc<FileIndex>], file: u32, elems: &[Frag]) -> Occ {
-    let (first, last) = (elems[0], elems[elems.len() - 1]);
+fn occ_of(files: &[Arc<FileIndex>], file: u32, elems: Elems) -> Occ {
+    let frags = elems.frags();
+    let (first, last) = (frags[0], frags[frags.len() - 1]);
     let (start_line, end_line) = files[file as usize].lines(first.start, last.end);
     Occ {
         file,
@@ -109,7 +159,9 @@ fn occ_of(files: &[Arc<FileIndex>], file: u32, elems: &[Frag]) -> Occ {
         start_line,
         end_line,
         scope: first.scope,
-        leaves: elems.iter().map(|e| (e.leaf_start, e.leaf_end)).collect(),
+        leaf_count: frags.iter().map(Frag::tokens).sum(),
+        is_copy: false,
+        elems,
     }
 }
 
@@ -120,6 +172,45 @@ struct RunText {
     /// (file, seq, element) at each position; separators have file u32::MAX.
     owner: Vec<(u32, u32, u32)>,
     token_prefix: Vec<u64>,
+    spelling_prefix: OnceLock<Vec<u64>>,
+}
+
+const SPELLING_BASE: u64 = 0x9E37_79B9_7F4A_7C15;
+
+impl RunText {
+    /// The text of the `len` elements at `pos`, as a hash. Prefix sums make
+    /// this one lookup, since a tandem run compares every position of a table
+    /// with its copies, at every length. Built on first use: it reads every
+    /// leaf, and a scan with no tandem run in two places never asks.
+    fn spelling(&self, files: &[Arc<FileIndex>], pos: u32, len: usize) -> u64 {
+        let prefix = self
+            .spelling_prefix
+            .get_or_init(|| spelling_prefix(files, self));
+        let (start, end) = (prefix[pos as usize], prefix[pos as usize + len]);
+        end.wrapping_sub(start.wrapping_mul(SPELLING_BASE.wrapping_pow(len as u32)))
+    }
+}
+
+fn spelling_prefix(files: &[Arc<FileIndex>], text: &RunText) -> Vec<u64> {
+    let mut prefix = Vec::with_capacity(text.symbols.len() + 1);
+    prefix.push(0u64);
+    for &owner in &text.owner {
+        let next = prefix[prefix.len() - 1].wrapping_mul(SPELLING_BASE);
+        prefix.push(next.wrapping_add(element_spelling(files, owner)));
+    }
+    prefix
+}
+
+fn element_spelling(files: &[Arc<FileIndex>], (file, seq, element): (u32, u32, u32)) -> u64 {
+    if file == u32::MAX {
+        return 0;
+    }
+    let file = &files[file as usize];
+    let e = &file.seqs.get(seq as usize)[element as usize];
+    let leaves = &file.leaves[e.leaf_start as usize..e.leaf_end as usize];
+    leaves.iter().fold(0, |h, leaf| {
+        combine(h, hash_bytes(file.leaf_text(leaf).as_bytes()))
+    })
 }
 
 fn build_run_text(files: &[Arc<FileIndex>]) -> RunText {
@@ -128,6 +219,7 @@ fn build_run_text(files: &[Arc<FileIndex>]) -> RunText {
         symbols: Vec::new(),
         owner: Vec::new(),
         token_prefix: vec![0],
+        spelling_prefix: OnceLock::new(),
     };
     let mut separators = Vec::new();
     for (fi, f) in files.iter().enumerate() {
@@ -154,82 +246,199 @@ fn build_run_text(files: &[Arc<FileIndex>]) -> RunText {
 
 fn run_groups(files: &[Arc<FileIndex>], min_tokens: u32) -> Vec<RawGroup> {
     let text = build_run_text(files);
-    maximal_repeats(&text.symbols, 2)
-        .into_par_iter()
-        .filter_map(|rep| run_group(files, &text, rep.len, rep.positions, min_tokens))
+    let repeats = maximal_repeats(&text.symbols, 2);
+    let block_until = repeats.alike_until(|p| block_of(p, &text));
+    let run_of = |rep: &Repeat| Run {
+        len: rep.len,
+        positions: repeats.positions(rep),
+        one_block: repeats.all_alike(rep, &block_until),
+    };
+    repeats
+        .found
+        .par_iter()
+        .filter_map(|rep| run_group(files, &text, run_of(rep), min_tokens))
         .collect()
+}
+
+/// A repeat's occurrences, in suffix order and not yet sorted.
+struct Run<'a> {
+    len: usize,
+    positions: &'a [u32],
+    one_block: bool,
+}
+
+impl Run<'_> {
+    /// Repetition inside one block only, with no copy elsewhere: the shape
+    /// of a wall. Decided before the positions are sorted, because a long
+    /// table has one such run per length.
+    fn is_only_a_wall(&self, text: &RunText) -> bool {
+        let (a, b) = (self.positions[0] as usize, self.positions[1] as usize);
+        let overlap_proves_it = 2 * a.abs_diff(b) <= self.len;
+        self.one_block && (overlap_proves_it || is_tandem(&text.symbols[a..a + self.len]))
+    }
 }
 
 fn run_group(
     files: &[Arc<FileIndex>],
     text: &RunText,
-    len: usize,
-    mut positions: Vec<u32>,
+    run: Run,
     min_tokens: u32,
 ) -> Option<RawGroup> {
+    let Run { len, positions, .. } = run;
     let p0 = positions[0] as usize;
     let tokens = (text.token_prefix[p0 + len] - text.token_prefix[p0]) as u32;
-    if tokens < min_tokens {
+    if tokens < min_tokens || run.is_only_a_wall(text) {
         return None;
     }
-    positions.sort_unstable();
-    let kept = distinct_positions(files, text, &positions, len)?;
-    let occs: Vec<Occ> = kept
-        .iter()
-        .map(|&p| {
-            occ_of(
-                files,
-                text.owner[p as usize].0,
-                run_elems(files, text, p, len),
-            )
-        })
-        .collect();
-    let hash = run_elems(files, text, p0 as u32, len)
-        .iter()
-        .fold(len as u64, |h, e| combine(h, e.hash));
-    (occs.len() >= 2).then_some(RawGroup {
-        hash,
+    let mut sorted = positions.to_vec();
+    sorted.sort_unstable();
+    let (kept, copies) = distinct_positions(files, text, &sorted, len)?;
+    let occs = run_occs(files, text, (&kept, &copies), len);
+    (occs.len() >= 2).then(|| RawGroup {
+        hash: run_hash(run_elems(files, text, p0 as u32, len)),
         tokens,
         run_len: len,
         occs,
     })
 }
 
+fn run_occs(
+    files: &[Arc<FileIndex>],
+    text: &RunText,
+    (kept, copies): (&[u32], &[u32]),
+    len: usize,
+) -> Vec<Occ> {
+    let occ_at = |&p: &u32| Occ {
+        is_copy: copies.binary_search(&p).is_ok(),
+        ..run_occ(files, text, p, len)
+    };
+    kept.iter().map(occ_at).collect()
+}
+
+fn run_hash(elems: &[Frag]) -> u64 {
+    let len = elems.len() as u64;
+    elems.iter().fold(len, |h, e| combine(h, e.hash))
+}
+
+fn run_occ(files: &[Arc<FileIndex>], text: &RunText, pos: u32, len: usize) -> Occ {
+    let (fi, si, ei) = text.owner[pos as usize];
+    let elems = Elems::Run {
+        file: Arc::clone(&files[fi as usize]),
+        seq: si,
+        start: ei,
+        len: len as u32,
+    };
+    occ_of(files, fi, elems)
+}
+
 /// Disjoint positions worth reporting, in text order. Inside a wall of
 /// near-identical members a tandem repeat fits at every multiple of its
 /// period, which is the wall's shape and no clone, so such a run counts only
-/// through a copy elsewhere, at the wall positions spelled exactly like it.
+/// through copies elsewhere, at the wall positions spelled exactly like one.
+/// Returns the positions and, for a tandem run, its copies.
 fn distinct_positions(
     files: &[Arc<FileIndex>],
     text: &RunText,
     sorted: &[u32],
     len: usize,
-) -> Option<Vec<u32>> {
-    let kept: Vec<u32> = non_overlapping(sorted, len, text, |_| true).collect();
+) -> Option<(Vec<u32>, Vec<u32>)> {
+    let kept: Vec<u32> = non_overlapping(sorted, len, text).collect();
     let first = sorted[0] as usize;
-    if !is_tandem(&text.symbols[first..first + len]) || !shares_a_block(&kept, text) {
-        return Some(kept);
+    if !is_tandem(&text.symbols[first..first + len]) {
+        return Some((kept, Vec::new()));
     }
-    let copy = alone_in_its_block(&kept, text)?;
-    let same_text = |p| spelled_alike(files, text, p, copy, len);
-    Some(non_overlapping(sorted, len, text, same_text).collect())
+    if shares_a_block(&kept, text) {
+        return spelled_like_copies(files, text, sorted, &kept, len);
+    }
+    let in_part = in_a_lone_copys_part(files, text, sorted, len);
+    Some(in_part.unwrap_or_else(|| (kept.clone(), kept)))
 }
 
-fn alone_in_its_block(sorted: &[u32], text: &RunText) -> Option<u32> {
-    sorted
-        .chunk_by(|&a, &b| same_block(a, b, text))
-        .find(|block| block.len() == 1)
+/// A run too long to fit its wall twice keeps one wall position, the first,
+/// which need not be the part a copy was taken from. Only a copy alone in its
+/// block moves it: when the copy is a wall too, wall and copy share a run of
+/// every length, and spelling each one's positions costs a sixth more time on
+/// such tables. With no part to move to, as for a renamed copy, the first fit
+/// stays a clone with parameters.
+fn in_a_lone_copys_part(
+    files: &[Arc<FileIndex>],
+    text: &RunText,
+    sorted: &[u32],
+    len: usize,
+) -> Option<(Vec<u32>, Vec<u32>)> {
+    if !shares_a_block(sorted, text) {
+        return None;
+    }
+    let found = spelled_like_copies(files, text, sorted, sorted, len)?;
+    (found.0.len() >= 2).then_some(found)
+}
+
+fn spelled_like_copies(
+    files: &[Arc<FileIndex>],
+    text: &RunText,
+    sorted: &[u32],
+    kept: &[u32],
+    len: usize,
+) -> Option<(Vec<u32>, Vec<u32>)> {
+    let mut copies = alone_in_their_blocks(kept, text);
+    if copies.is_empty() {
+        return None;
+    }
+    let twinned = spelled_like(&copies, sorted, files, text, len);
+    let taken = non_overlapping(&twinned, len, text).collect();
+    let positions = held_twice(taken, files, text, len);
+    copies.retain(|p| positions.binary_search(p).is_ok());
+    Some((positions, copies))
+}
+
+/// The positions in `sorted` spelled like a copy, less those with no twin.
+/// Those must go before positions are taken: a lone copy spelled like nothing
+/// else would push out a real part overlapping it.
+fn spelled_like(
+    copies: &[u32],
+    sorted: &[u32],
+    files: &[Arc<FileIndex>],
+    text: &RunText,
+    len: usize,
+) -> Vec<u32> {
+    let wanted: FxHashSet<u64> = spellings(copies, files, text, len).collect();
+    let is_wanted = |p: &u32| wanted.contains(&text.spelling(files, *p, len));
+    let alike = sorted.iter().copied().filter(is_wanted).collect();
+    held_twice(alike, files, text, len)
+}
+
+fn alone_in_their_blocks(sorted: &[u32], text: &RunText) -> Vec<u32> {
+    let blocks = sorted.chunk_by(|&a, &b| same_block(a, b, text));
+    blocks
+        .filter(|block| block.len() == 1)
         .map(|block| block[0])
+        .collect()
 }
 
-fn spelled_alike(files: &[Arc<FileIndex>], text: &RunText, a: u32, b: u32, len: usize) -> bool {
-    let spelling = |pos: u32| {
-        let file = &files[text.owner[pos as usize].0 as usize];
-        let elems = run_elems(files, text, pos, len).iter();
-        let leaves = elems.flat_map(|e| &file.leaves[e.leaf_start as usize..e.leaf_end as usize]);
-        leaves.map(|leaf| file.leaf_text(leaf))
-    };
-    spelling(a).eq(spelling(b))
+fn spellings<'a>(
+    positions: &'a [u32],
+    files: &'a [Arc<FileIndex>],
+    text: &'a RunText,
+    len: usize,
+) -> impl Iterator<Item = u64> + 'a {
+    let spelling = move |&p: &u32| text.spelling(files, p, len);
+    positions.iter().map(spelling)
+}
+
+/// A copy spelled unlike anything else, such as a renamed part of a wall,
+/// has nothing to be a clone of here.
+fn held_twice(
+    mut positions: Vec<u32>,
+    files: &[Arc<FileIndex>],
+    text: &RunText,
+    len: usize,
+) -> Vec<u32> {
+    let mut holders: FxHashMap<u64, u32> = FxHashMap::default();
+    for spelling in spellings(&positions, files, text, len) {
+        *holders.entry(spelling).or_default() += 1;
+    }
+    positions.retain(|&p| holders[&text.spelling(files, p, len)] >= 2);
+    positions
 }
 
 fn run_elems<'f>(files: &'f [Arc<FileIndex>], text: &RunText, pos: u32, len: usize) -> &'f [Frag] {
@@ -242,8 +451,12 @@ fn shares_a_block(sorted: &[u32], text: &RunText) -> bool {
 }
 
 fn same_block(a: u32, b: u32, text: &RunText) -> bool {
-    let (a, b) = (text.owner[a as usize], text.owner[b as usize]);
-    (a.0, a.1) == (b.0, b.1)
+    block_of(a, text) == block_of(b, text)
+}
+
+fn block_of(pos: u32, text: &RunText) -> (u32, u32) {
+    let (file, seq, _) = text.owner[pos as usize];
+    (file, seq)
 }
 
 fn is_tandem(run: &[u32]) -> bool {
@@ -263,35 +476,29 @@ fn is_tandem(run: &[u32]) -> bool {
 }
 
 /// A tandem repeat ("s s s s") yields occurrences that overlap within one
-/// block; keep a greedy left-to-right set of disjoint ones among those
-/// `wanted` allows. `wanted` is asked only about positions clear of the last
-/// one taken, which keeps a full text comparison per taken position from
-/// turning quadratic on a long table.
+/// block; keep a greedy left-to-right set of disjoint ones.
 fn non_overlapping<'a>(
     sorted: &'a [u32],
     len: usize,
     text: &'a RunText,
-    wanted: impl Fn(u32) -> bool + 'a,
 ) -> impl Iterator<Item = u32> + 'a {
     let mut taken_end: Option<(u32, u32, usize)> = None;
     sorted.iter().copied().filter(move |&p| {
         let (fi, si, _) = text.owner[p as usize];
         let overlaps =
             matches!(taken_end, Some((f, s, end)) if f == fi && s == si && (p as usize) < end);
-        let take = !overlaps && wanted(p);
-        if take {
+        if !overlaps {
             taken_end = Some((fi, si, p as usize + len));
         }
-        take
+        !overlaps
     })
 }
 
 /// Guards against a 64-bit hash collision pairing fragments of different
 /// shape: every occurrence must have as many leaves as the first.
 fn keep_aligned(group: &mut RawGroup) -> bool {
-    let count = |o: &Occ| o.leaves.iter().map(|&(s, e)| e - s).sum::<u32>();
-    let expected = count(&group.occs[0]);
-    group.occs.retain(|o| count(o) == expected);
+    let expected = group.occs[0].leaf_count;
+    group.occs.retain(|o| o.leaf_count == expected);
     group.occs.len() >= 2
 }
 
@@ -313,12 +520,7 @@ fn suppress_subsumed(
     let mut accepted_by_file: FxHashMap<u32, Vec<Occ>> = FxHashMap::default();
     let mut kept = Vec::new();
     for g in groups {
-        let covered = g.occs.iter().all(|o| {
-            accepted_by_file
-                .get(&o.file)
-                .is_some_and(|acc| acc.iter().any(|a| a.contains(o)))
-        });
-        if covered || !useful(&g) {
+        if is_covered(&g, &accepted_by_file) || !useful(&g) {
             continue;
         }
         for o in &g.occs {
@@ -327,6 +529,21 @@ fn suppress_subsumed(
         kept.push(g);
     }
     kept
+}
+
+/// Also covered: a tandem run whose copies all sit in accepted copies. A
+/// shorter table fits a periodic one at every length, each tiling it
+/// differently, so its wall occurrences never sit inside one another. Only
+/// copies count here: code a larger clone holds says nothing of the wall.
+fn is_covered(group: &RawGroup, accepted_by_file: &FxHashMap<u32, Vec<Occ>>) -> bool {
+    let held = |o: &Occ, by: fn(&Occ) -> bool| {
+        accepted_by_file
+            .get(&o.file)
+            .is_some_and(|acc| acc.iter().any(|a| by(a) && a.contains(o)))
+    };
+    let mut copies = group.occs.iter().filter(|o| o.is_copy).peekable();
+    group.occs.iter().all(|o| held(o, |_| true))
+        || (copies.peek().is_some() && copies.all(|o| held(o, |a| a.is_copy)))
 }
 
 fn byte_span(g: &RawGroup) -> u32 {
