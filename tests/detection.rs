@@ -489,6 +489,87 @@ fn a_repetitive_wall_copied_between_classes_is_reported_whole() {
     assert_eq!((gs[0].elements, gs[0].occurrences.len()), (16, 2));
 }
 
+fn parsed_setting(name: &str) -> String {
+    format!(
+        "    String {name} = parse(context, settings.get{name}());
+    if ({name} != null) {{
+        strategy.set{name}({name});
+    }}
+"
+    )
+}
+
+const SETTING_NAMES: [&str; 7] = ["Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta", "Eta"];
+
+fn settings_wall() -> String {
+    let wall: String = SETTING_NAMES.iter().map(|n| parsed_setting(n)).collect();
+    format!(
+        "class A {{
+  void init() {{
+{wall}  }}
+}}
+"
+    )
+}
+
+/// `class B` holding `settings`, followed by a statement unlike the wall's.
+fn settings_copy(settings: &[String]) -> String {
+    let settings = settings.concat();
+    format!(
+        "class B {{
+  void make() {{
+{settings}    run();
+  }}
+}}
+"
+    )
+}
+
+/// Wall and copy scanned at a size that leaves out one setting and a half,
+/// runs too short to be tandem repeats.
+fn scan_wall_and_copy(wall: &str, copy: &str) -> Vec<Group> {
+    let opts = ScanOptions::default();
+    groups(&scan_with(&[("A.java", wall), ("B.java", copy)], opts))
+}
+
+// Catches a part of a wall copied elsewhere being dropped with the wall, or
+// reported at wall positions that are not that copy: the rest of the wall
+// differs in every name, so it would fail the density limit too.
+#[test]
+fn a_part_of_a_wall_copied_verbatim_is_a_clone_at_that_part() {
+    let copied: Vec<String> = SETTING_NAMES[2..5]
+        .iter()
+        .map(|n| parsed_setting(n))
+        .collect();
+    let (wall, copy) = (settings_wall(), settings_copy(&copied));
+    let gs = scan_wall_and_copy(&wall, &copy);
+    assert_eq!(gs.len(), 1, "{gs:#?}");
+    let place = |o: &doppelscan::report::Location| (o.file.clone(), o.start_line);
+    let places: Vec<_> = gs[0].occurrences.iter().map(place).collect();
+    let gamma = wall
+        .lines()
+        .position(|l| l.contains("String Gamma"))
+        .unwrap() as u32
+        + 1;
+    assert_eq!(
+        places,
+        [("A.java".to_string(), gamma), ("B.java".to_string(), 3)]
+    );
+}
+
+// Catches the wall's other members coming back as noise: renamed fields in a
+// second class are what every pair of data classes has in common.
+#[test]
+fn a_renamed_part_of_a_wall_stays_suppressed() {
+    let renamed: Vec<String> = ["One", "Two", "Three"]
+        .iter()
+        .map(|n| parsed_setting(n))
+        .collect();
+    let (wall, copy) = (settings_wall(), settings_copy(&renamed));
+    let gs = scan_wall_and_copy(&wall, &copy);
+    assert!(gs.is_empty(), "{gs:#?}");
+}
+
 // Catches an import-bearing file node replacing the function it wraps: the
 // files differ only in imports, so the function itself is the clone.
 #[test]
