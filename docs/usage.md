@@ -65,7 +65,8 @@ Useful options: `--min-tokens` (default 50; 20 for `similar`, since snippets
 are small), `--strict` (identical names and
 literals only), `--only ts,java`, `--exclude 'generated/**'`,
 `--max-param-density` (default 8 per 100 tokens; higher shows data tables and
-mapping boilerplate too; in token-level languages a name that differs in
+mapping boilerplate too; a group over the limit still keeps its copies that
+are spelled exactly alike; in token-level languages a name that differs in
 several places is taken for a renamed local and not counted).
 
 `.gitignore` is honoured, and dependency/build directories, tool caches,

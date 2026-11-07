@@ -542,6 +542,67 @@ fn data_tables_are_not_reported() {
     );
 }
 
+/// A class copying eight fields under names built from `spelling`, so two of
+/// these with different spellings need more parameters than the density limit
+/// allows.
+fn header_mapper(class: &str, spelling: &str) -> String {
+    let fields = [
+        "Id", "Source", "Kind", "Version", "Length", "Time", "Trace", "State",
+    ];
+    let set = |f: &&str| {
+        format!(
+            "        message.setHeader({spelling}{f}, event.read{spelling}{f}());
+"
+        )
+    };
+    let body: String = fields.iter().map(set).collect();
+    format!(
+        "class {class} {{
+    void fill(Message message, Event event) {{
+{body}        done();
+    }}
+}}
+"
+    )
+}
+
+fn group_files(g: &Group) -> Vec<&str> {
+    g.occurrences.iter().map(|o| o.file.as_str()).collect()
+}
+
+// Catches one different occurrence vetoing the verbatim copies beside it.
+#[test]
+fn a_different_occurrence_does_not_veto_verbatim_copies() {
+    let opts = ScanOptions::default();
+    let files = [
+        ("A.java", header_mapper("A", "Dapr")),
+        ("B.java", header_mapper("B", "Dapr")),
+        ("C.java", header_mapper("C", "Azure")),
+    ];
+    let files: Vec<(&str, &str)> = files.iter().map(|(p, t)| (*p, t.as_str())).collect();
+    let gs = groups(&scan_with(&files, opts));
+    assert_eq!(gs.len(), 1, "{gs:#?}");
+    assert_eq!(group_files(&gs[0]), ["A.java", "B.java"]);
+    assert!(gs[0].parameters.is_empty(), "{:?}", gs[0].parameters);
+}
+
+// Catches subsets of one vetoed group keeping its fingerprint: `show` could
+// not tell them apart and accepting one would hide the other.
+#[test]
+fn each_verbatim_subset_of_a_vetoed_group_has_its_own_fingerprint() {
+    let opts = ScanOptions::default();
+    let files = [
+        ("A.java", header_mapper("A", "Dapr")),
+        ("B.java", header_mapper("B", "Dapr")),
+        ("C.java", header_mapper("C", "Azure")),
+        ("D.java", header_mapper("D", "Azure")),
+    ];
+    let files: Vec<(&str, &str)> = files.iter().map(|(p, t)| (*p, t.as_str())).collect();
+    let gs = groups(&scan_with(&files, opts));
+    assert_eq!(gs.len(), 2, "{gs:#?}");
+    assert_ne!(gs[0].fingerprint, gs[1].fingerprint);
+}
+
 // Catches runs being limited to statement blocks: two constructor calls
 // sharing a long argument prefix are a clone even though the calls differ.
 #[test]
