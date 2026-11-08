@@ -1,8 +1,9 @@
 # Benchmark
 
 doppelscan, [dupehound](https://crates.io/crates/dupehound) and
-[jscpd](https://github.com/kucherenko/jscpd) on the same large repository,
-run four times as doppelscan changed. The latest run comes first; every
+[jscpd](https://github.com/kucherenko/jscpd) on large repositories, run five
+times as doppelscan changed: Elasticsearch in every run, Apache Camel from run
+5. The latest run comes first; every
 earlier result is kept below it.
 
 ## Setup
@@ -10,9 +11,9 @@ earlier result is kept below it.
 | | |
 | --- | --- |
 | Machine | AMD Ryzen 7 3800X (8 cores, 16 threads), 32 GB RAM, Windows 10 Pro |
-| Repository | Elasticsearch at `6aae768f2d1d`: 51,122 tracked files, 33,386 of them Java |
+| Repositories | Elasticsearch at `6aae768f2d1d`: 51,122 tracked files, 33,386 of them Java. Apache Camel at `91e44cf13c8c` from run 5 |
 | Planted clones | 80, added in one commit, in code no tool had flagged before |
-| Timing | Wall time and peak working set of the process. 3 runs on the unplanted repo, median reported, unless noted |
+| Timing | Wall time and peak working set, median reported. Runs 1-4: 3 runs on the unplanted repo unless noted. Run 5: 15 unplanted and 9 planted runs per config |
 | Minimum size | 50 tokens wherever a tool has one |
 
 The tools were run as:
@@ -46,6 +47,197 @@ source and another overlapping the copy. That is generous to window-based
 finders: a near plant counts when only its untouched half is reported. So
 each recall table has a stricter partner where the occurrences must cover
 at least 80% of both ranges.
+
+## Run 5, 2026-11-08: two repositories, three passes
+
+doppelscan at `5b5d42f`, after the audit fixes, on Elasticsearch and Apache
+Camel at `91e44cf13c8c` (45,124 tracked files, 29,926 of them Java). Camel's
+80 plants follow the same recipe, copied across Maven modules; its lexical
+plants are 5 shell functions and 5 YAML blocks, since no Groovy file gave a
+usable block.
+
+Each tool ran alone on an otherwise idle machine, in three full passes hours
+apart: 5 runs per config on the unplanted tree and 3 on the planted one per
+pass. Every run was tracked in a Windows job object, so CPU, I/O and peak
+commit cover the whole process tree, with commit capped at 22 GB. jscpd ran
+first in each pass, then dupehound, then doppelscan. Camel's first-pass jscpd
+and dupehound runs were taken a day earlier with the same binaries. No run
+failed, timed out or hit the cap. Every tool gave the same output on every
+run, timing fields aside; the hashes of Camel's first-pass jscpd and
+dupehound runs still included those fields, so they cannot be compared.
+
+"Peak RAM" is the peak working set, "peak commit" the most memory the job
+had reserved. The `check` rows run on the planted tree against a baseline
+written from the unplanted one, so they exit 1 by design.
+
+### Speed and resources
+
+#### Camel
+
+| Repo state | Config | Runs | Median wall | Range | CPU s | Cores used | Peak RAM MB | Peak commit MB | Read MB | Written MB | Page faults |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| unplanted | jscpd default | 15 | 184.89 s | 163.19-193.68 | 276.5 | 1.5 | 13554 | 15093 | 182 | 341 | 5835009 |
+| unplanted | jscpd type-2/3 | 15 | 304.43 s | 283.97-328.37 | 397.3 | 1.3 | 15510 | 17862 | 193 | 841 | 7516311 |
+| unplanted | dupehound | 15 | 9.02 s | 8.96-9.49 | 65.5 | 7.2 | 114 | 108 | 189 | 9 | 63140 |
+| unplanted | doppelscan exact | 15 | 5.81 s | 5.74-6.00 | 60.3 | 10.3 | 958 | 1398 | 146 | 59 | 326009 |
+| unplanted | doppelscan near | 15 | 5.54 s | 5.50-5.58 | 70.1 | 12.7 | 880 | 1288 | 146 | 4 | 302649 |
+| unplanted | doppelscan yaml | 15 | 0.35 s | 0.33-0.42 | 3.6 | 10.4 | 29 | 133 | 1 | 0 | 7088 |
+| unplanted | doppelscan baseline | 15 | 5.48 s | 5.44-5.55 | 59.8 | 10.9 | 992 | 1413 | 146 | 18 | 332501 |
+| planted | jscpd default | 9 | 182.16 s | 173.00-196.41 | 273.4 | 1.5 | 13554 | 15104 | 182 | 341 | 5835115 |
+| planted | jscpd type-2/3 | 9 | 305.75 s | 289.56-312.85 | 394.8 | 1.3 | 15533 | 17873 | 194 | 841 | 7512971 |
+| planted | dupehound | 9 | 9.02 s | 9.00-9.18 | 65.8 | 7.3 | 100 | 105 | 189 | 9 | 62417 |
+| planted | doppelscan exact | 9 | 5.81 s | 5.79-5.85 | 60.5 | 10.4 | 962 | 1388 | 147 | 59 | 327000 |
+| planted | doppelscan near | 9 | 5.55 s | 5.47-5.61 | 70.0 | 12.6 | 879 | 1292 | 147 | 4 | 296693 |
+| planted | doppelscan yaml | 9 | 0.35 s | 0.34-0.36 | 3.7 | 10.5 | 28 | 131 | 1 | 0 | 6840 |
+| planted | doppelscan check | 9 | 5.70 s | 5.66-5.74 | 60.1 | 10.5 | 998 | 1446 | 183 | 0 | 340919 |
+| planted | doppelscan check --base main | 9 | 14.63 s | 14.37-15.50 | 116.7 | 8.0 | 1053 | 1452 | 299 | 152 | 685042 |
+
+| Config | Groups | Occurrences | Files | Lines covered |
+| --- | --- | --- | --- | --- |
+| doppelscan exact | 23,321 | 81,929 | 15,216 | 836,011 |
+| doppelscan near | 3,045 | 11,146 | 5,243 | 206,756 |
+| doppelscan yaml | 95 | 256 | 75 | 4,548 |
+| dupehound | 7,681 | 22,724 | 8,908 | 390,521 |
+| jscpd default | 225,864 | 451,728 | 35,943 | 2,682,956 |
+| jscpd type-2/3 | 590,166 | 1,180,332 | 36,528 | 3,845,155 |
+
+#### Elasticsearch
+
+| Repo state | Config | Runs | Median wall | Range | CPU s | Cores used | Peak RAM MB | Peak commit MB | Read MB | Written MB | Page faults |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| unplanted | jscpd default | 15 | 220.25 s | 195.83-238.49 | 331.1 | 1.5 | 15115 | 16912 | 296 | 321 | 6195917 |
+| unplanted | jscpd type-2/3 | 15 | 396.95 s | 373.56-412.44 | 514.7 | 1.3 | 18362 | 21028 | 318 | 957 | 8485719 |
+| unplanted | dupehound | 15 | 13.88 s | 13.36-14.77 | 144.5 | 10.4 | 216 | 213 | 311 | 14 | 118868 |
+| unplanted | doppelscan exact | 15 | 12.02 s | 11.78-12.26 | 126.5 | 10.5 | 2066 | 2776 | 306 | 86 | 721783 |
+| unplanted | doppelscan near | 15 | 19.37 s | 19.31-19.82 | 261.7 | 13.5 | 1851 | 2514 | 306 | 8 | 664136 |
+| unplanted | doppelscan yaml | 15 | 0.75 s | 0.72-0.80 | 5.1 | 6.8 | 137 | 431 | 14 | 10 | 35008 |
+| unplanted | doppelscan baseline | 15 | 11.56 s | 11.48-12.12 | 125.9 | 10.9 | 2067 | 2791 | 306 | 36 | 765459 |
+| planted | jscpd default | 9 | 228.37 s | 195.13-247.98 | 337.1 | 1.5 | 15110 | 16908 | 297 | 321 | 6198359 |
+| planted | jscpd type-2/3 | 9 | 393.54 s | 375.26-411.40 | 510.5 | 1.3 | 18351 | 21013 | 319 | 957 | 8488006 |
+| planted | dupehound | 9 | 13.71 s | 13.13-14.18 | 143.6 | 10.6 | 217 | 213 | 311 | 15 | 114999 |
+| planted | doppelscan exact | 9 | 11.97 s | 11.84-12.03 | 126.6 | 10.6 | 2068 | 2775 | 306 | 86 | 720029 |
+| planted | doppelscan near | 9 | 19.38 s | 19.28-19.50 | 261.9 | 13.5 | 1867 | 2538 | 306 | 8 | 669151 |
+| planted | doppelscan yaml | 9 | 0.76 s | 0.73-0.78 | 5.2 | 6.8 | 138 | 432 | 14 | 10 | 35133 |
+| planted | doppelscan check | 9 | 11.93 s | 11.89-12.05 | 126.2 | 10.6 | 2113 | 2804 | 379 | 0 | 759264 |
+| planted | doppelscan check --base main | 9 | 27.75 s | 27.59-28.79 | 245.6 | 8.9 | 2168 | 2865 | 630 | 324 | 1393891 |
+
+| Config | Groups | Occurrences | Files | Lines covered |
+| --- | --- | --- | --- | --- |
+| doppelscan exact | 53,603 | 151,653 | 18,478 | 1,371,533 |
+| doppelscan near | 6,086 | 21,553 | 8,179 | 406,591 |
+| doppelscan yaml | 6,304 | 18,463 | 1,658 | 252,389 |
+| dupehound | 11,512 | 36,544 | 10,954 | 721,275 |
+| jscpd default | 235,094 | 470,188 | 37,095 | 2,472,511 |
+| jscpd type-2/3 | 703,346 | 1,406,692 | 39,741 | 4,698,009 |
+
+### Recall, any overlap
+
+#### Camel
+
+| Kind | n | doppelscan exact | doppelscan near | doppelscan yaml | doppelscan all | dupehound | jscpd default | jscpd type-2/3 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| exact | 10 | 10 | 0 | 0 | 10 | 10 | 10 | 10 |
+| renamed | 10 | 10 | 0 | 0 | 10 | 10 | 0 | 9 |
+| near-add | 10 | 10 | 8 | 0 | 10 | 1 | 10 | 10 |
+| near-remove | 10 | 10 | 10 | 0 | 10 | 9 | 10 | 10 |
+| near-change | 10 | 10 | 7 | 0 | 10 | 6 | 10 | 10 |
+| block | 10 | 10 | 0 | 0 | 10 | 1 | 10 | 9 |
+| cross-module | 10 | 10 | 0 | 0 | 10 | 9 | 5 | 9 |
+| lexical | 10 | 5 | 0 | 5 | 10 | 0 | 10 | 10 |
+| **total** | **80** | **75** | **25** | **5** | **80** | **46** | **65** | **77** |
+
+#### Elasticsearch
+
+| Kind | n | doppelscan exact | doppelscan near | doppelscan yaml | doppelscan all | dupehound | jscpd default | jscpd type-2/3 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| exact | 10 | 10 | 0 | 0 | 10 | 10 | 10 | 10 |
+| renamed | 10 | 10 | 0 | 0 | 10 | 10 | 0 | 10 |
+| near-add | 10 | 10 | 5 | 0 | 10 | 2 | 10 | 10 |
+| near-remove | 10 | 10 | 10 | 0 | 10 | 8 | 10 | 10 |
+| near-change | 10 | 10 | 5 | 0 | 10 | 6 | 10 | 10 |
+| block | 10 | 10 | 0 | 0 | 10 | 0 | 10 | 10 |
+| cross-module | 10 | 10 | 0 | 0 | 10 | 10 | 6 | 10 |
+| lexical | 10 | 7 | 0 | 2 | 9 | 0 | 9 | 9 |
+| **total** | **80** | **77** | **20** | **2** | **79** | **46** | **65** | **79** |
+
+### Recall, 80% coverage
+
+#### Camel
+
+| Kind | n | doppelscan exact | doppelscan near | doppelscan yaml | doppelscan all | dupehound | jscpd default | jscpd type-2/3 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| exact | 10 | 10 | 0 | 0 | 10 | 10 | 10 | 10 |
+| renamed | 10 | 10 | 0 | 0 | 10 | 10 | 0 | 8 |
+| near-add | 10 | 1 | 8 | 0 | 8 | 1 | 4 | 8 |
+| near-remove | 10 | 5 | 10 | 0 | 10 | 9 | 5 | 10 |
+| near-change | 10 | 4 | 7 | 0 | 8 | 6 | 5 | 7 |
+| block | 10 | 10 | 0 | 0 | 10 | 1 | 10 | 9 |
+| cross-module | 10 | 10 | 0 | 0 | 10 | 9 | 5 | 9 |
+| lexical | 10 | 5 | 0 | 5 | 10 | 0 | 10 | 10 |
+| **total** | **80** | **55** | **25** | **5** | **76** | **46** | **49** | **71** |
+
+#### Elasticsearch
+
+| Kind | n | doppelscan exact | doppelscan near | doppelscan yaml | doppelscan all | dupehound | jscpd default | jscpd type-2/3 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| exact | 10 | 10 | 0 | 0 | 10 | 10 | 10 | 10 |
+| renamed | 10 | 10 | 0 | 0 | 10 | 10 | 0 | 9 |
+| near-add | 10 | 0 | 5 | 0 | 5 | 2 | 3 | 8 |
+| near-remove | 10 | 4 | 10 | 0 | 10 | 8 | 5 | 8 |
+| near-change | 10 | 4 | 5 | 0 | 6 | 6 | 6 | 10 |
+| block | 10 | 10 | 0 | 0 | 10 | 0 | 10 | 10 |
+| cross-module | 10 | 10 | 0 | 0 | 10 | 10 | 5 | 10 |
+| lexical | 10 | 7 | 0 | 2 | 9 | 0 | 9 | 9 |
+| **total** | **80** | **55** | **20** | **2** | **70** | **46** | **48** | **74** |
+
+### Near at similarity 0.7
+
+All of doppelscan's misses at 80% coverage except Elasticsearch's lexical-09
+are edited copies whose near score falls between 0.70 and 0.79. The same
+recall run with `near --similarity 0.7`:
+
+| | Camel | Elasticsearch |
+| --- | --- | --- |
+| doppelscan all at 80% coverage, near 0.8 | 76 | 70 |
+| doppelscan all at 80% coverage, near 0.7 | **80** | **79** |
+| near groups at 0.8 | 3,045 | 6,086 |
+| groups at 0.7 sharing no occurrence with a 0.8 group | 2,002 | 4,346 |
+| near time at 0.7, one run | 23 s | 22 s |
+
+### Precision
+
+20 random groups per tool and repository, plus 20 of the groups only 0.7
+reports, shuffled together under opaque ids and labelled by reviewers who
+were not told which tool reported what. E is real duplication worth
+extracting, B real but not worth it (boilerplate, tests repetitive by
+design, per-type overloads), W not meaningful duplication.
+
+| Source | Camel E / B / W | Elasticsearch E / B / W | Both, E | Both, W |
+| --- | --- | --- | --- | --- |
+| doppelscan exact | 8 / 10 / 2 | 7 / 13 / 0 | 15 of 40 | 2 of 40 |
+| doppelscan near 0.8 | 5 / 13 / 2 | 8 / 12 / 0 | 13 of 40 | 2 of 40 |
+| doppelscan near, added by 0.7 | 4 / 14 / 2 | 8 / 11 / 1 | 12 of 40 | 3 of 40 |
+| dupehound | 7 / 10 / 3 | 8 / 11 / 1 | 15 of 40 | 4 of 40 |
+| jscpd default | 0 / 5 / 15 | 2 / 8 / 10 | 2 of 40 | 25 of 40 |
+| jscpd type-2/3 | 0 / 2 / 18 | 0 / 3 / 17 | 0 of 40 | 35 of 40 |
+
+Nearly all of jscpd's wrong groups are license headers, package lines and
+import lists; it has no notion of where a member starts. 87 of the 112 B
+labels across all tools are tests.
+
+### Verdict
+
+doppelscan catches the most plants on Camel (76 against jscpd type-2/3's 71)
+and is 4 behind it on Elasticsearch (70 against 74), in 12 and 32 seconds
+against 5 and 6.5 minutes, with a tenth of the memory or less and almost none
+of the noise. dupehound stays the lightest and is as precise, but finds 46 plants on
+each, as it only compares whole functions. The gap to jscpd is near's 0.8
+threshold: at 0.7 doppelscan catches 80 and 79, and the extra groups were as
+often worth extracting as those at 0.8 in this small sample, at the cost of
+about 70% more near groups to read.
+
+`check` takes about as long as a scan: 5.7 s on Camel and 11.9 s on
+Elasticsearch, and 15 s and 28 s with `--base main`.
 
 ## Run 4, 2026-11-06: after the audit
 
@@ -268,7 +460,8 @@ exact scan skipped dot-directories, which hid 5 lexical plants.
 
 ## Limits of this benchmark
 
-It is one repository, mostly Java, on one machine with other work running. The
-plants and the precision labels come from the doppelscan side, and the labels
-had no second opinion. The scripts and raw output are not in
-this repository.
+Two repositories, both mostly Java, on one machine; runs 1-4 had other work
+running, run 5 did not. The plants and the precision labels come from the
+doppelscan side. Each label is one reviewer's call with no second opinion,
+and 20 groups per source is a small sample: a difference of a few labels is
+noise. The scripts and raw output are not in this repository.
