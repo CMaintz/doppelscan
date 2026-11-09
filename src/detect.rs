@@ -81,6 +81,11 @@ impl Occ {
         (frags[0].leaf_start, frags[frags.len() - 1].leaf_end)
     }
 
+    /// The syntax elements the occurrence is made of.
+    pub fn frags(&self) -> &[Frag] {
+        self.elems.frags()
+    }
+
     pub fn leaf_indices(&self) -> impl Iterator<Item = u32> + '_ {
         let frags = self.elems.frags().iter();
         frags.flat_map(|e| e.leaf_start..e.leaf_end)

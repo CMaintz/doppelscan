@@ -38,6 +38,9 @@ pub struct Lang {
     pub assign_declares: bool,
     /// Scanned only when named (`--only`), not by default.
     pub opt_in: bool,
+    /// Methods each value class writes for itself, by convention of the
+    /// language: near copies made only of these are not reported.
+    pub identity_methods: &'static [&'static str],
     classes: Vec<KindClass>,
 }
 
@@ -149,6 +152,7 @@ impl Lang {
             extensions,
             assign_declares,
             opt_in: false,
+            identity_methods: &[],
             classes,
         }
     }
@@ -160,12 +164,18 @@ impl Lang {
             extensions,
             assign_declares: false,
             opt_in: false,
+            identity_methods: &[],
             classes: Vec::new(),
         }
     }
 
     fn opt_in(mut self) -> Self {
         self.opt_in = true;
+        self
+    }
+
+    fn identity_methods(mut self, names: &'static [&'static str]) -> Self {
+        self.identity_methods = names;
         self
     }
 
@@ -215,7 +225,8 @@ pub static LANGS: LazyLock<Vec<Lang>> = LazyLock::new(|| {
             &["js", "jsx", "mjs", "cjs"],
             false,
         ),
-        Lang::new("java", tree_sitter_java::LANGUAGE.into(), &["java"], false),
+        Lang::new("java", tree_sitter_java::LANGUAGE.into(), &["java"], false)
+            .identity_methods(&["equals", "hashCode"]),
         Lang::new(
             "csharp",
             tree_sitter_c_sharp::LANGUAGE.into(),

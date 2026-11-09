@@ -468,6 +468,8 @@ fn renamed_clones_are_found_in_every_language() {
     }
 }
 
+/// Getter and setter pairs that each do a little work: trivial ones are
+/// dropped as accessors before the wall rules are reached.
 fn member_wall() -> String {
     [
         "id", "name", "email", "phone", "address", "city", "country", "zip",
@@ -475,8 +477,8 @@ fn member_wall() -> String {
     .iter()
     .map(|f| {
         format!(
-            "    public String get{f}() {{ return this.{f}; }}
-    public void set{f}(String v) {{ this.{f} = v; }}
+            "    public String get{f}() {{ return this.{f}.trim(); }}
+    public void set{f}(String v) {{ this.{f} = v.strip(); }}
 "
         )
     })
@@ -1476,4 +1478,137 @@ fn a_lone_copy_with_no_twin_does_not_hide_the_part_beside_it() {
         places == [("X.java", 3), ("Y.java", 4)]
     };
     assert!(gs.iter().any(|g| is_part(&g)), "{gs:#?}");
+}
+
+/// A getter and setter per field, in the form each language writes them.
+fn accessors(ext: &str, fields: &[&str]) -> String {
+    let pair = |f: &&str| match ext {
+        "java" => format!(
+            "    public int get{f}() {{\n        return {f};\n    }}\n    public void set{f}(int v) {{\n        this.{f} = v;\n    }}\n"
+        ),
+        "ts" => format!(
+            "    get{f}(): number {{\n        return this.{f};\n    }}\n    set{f}(v: number): void {{\n        this.{f} = v;\n    }}\n"
+        ),
+        "php" => format!(
+            "    public function get{f}() {{\n        return $this->{f};\n    }}\n    public function set{f}($v) {{\n        $this->{f} = $v;\n    }}\n"
+        ),
+        _ => unreachable!("{ext}"),
+    };
+    fields.iter().map(pair).collect()
+}
+
+/// A method unlike the other class's, so only the accessor run can match.
+fn lone_method(ext: &str, name: &str) -> String {
+    let head = match ext {
+        "java" => "void",
+        "php" => "function",
+        _ => "",
+    };
+    format!(
+        "    {head} {name}() {{ run(); }}
+"
+    )
+}
+
+fn class_of(ext: &str, name: &str, members: &str) -> String {
+    let open = if ext == "php" { "<?php\n" } else { "" };
+    format!("{open}class {name} {{\n{members}}}\n")
+}
+
+const CONSUL: [&str; 5] = ["Port", "Timeout", "Ttl", "Delay", "Interval"];
+const JMS: [&str; 5] = ["Consumers", "Tasks", "Level", "Limit", "Priority"];
+
+// Catches accessor runs for unrelated fields being reported: with names
+// normalised, every class's getters and setters look alike.
+#[test]
+fn accessor_runs_for_different_fields_are_not_clones() {
+    for ext in ["java", "ts", "php"] {
+        let start = format!("{}{}", accessors(ext, &CONSUL), lone_method(ext, "start"));
+        let stop = format!("{}{}", lone_method(ext, "stop"), accessors(ext, &JMS));
+        let a = class_of(ext, "Consul", &start);
+        let b = class_of(ext, "Jms", &stop);
+        let gs = groups_of(&[(&format!("a.{ext}"), &a), (&format!("b.{ext}"), &b)]);
+        assert!(gs.is_empty(), "{ext}: {gs:#?}");
+    }
+}
+
+// Catches same-named accessors coming back as copies spelled alike: two
+// classes implementing one interface each hold `getId`/`setId` and the like,
+// which is still nothing to extract.
+#[test]
+fn accessor_runs_for_the_same_fields_are_not_clones() {
+    let files = consul_and_jms(&accessors("java", &CONSUL), &accessors("java", &CONSUL));
+    let files: Vec<(&str, &str)> = files.iter().map(|(p, t)| (*p, t.as_str())).collect();
+    let gs = groups_of(&files);
+    assert!(gs.is_empty(), "{gs:#?}");
+}
+
+/// Classes `Consul` and `Jms` holding `consul` and `jms`, each followed by
+/// a method unlike the other's so the members are the only clone.
+fn consul_and_jms(consul: &str, jms: &str) -> [(&'static str, String); 2] {
+    let other = "    int other(int a) {
+        return a * 2 - limit;
+    }
+";
+    let consul = format!("{consul}{}", lone_method("java", "other"));
+    [
+        ("a.java", class_of("java", "Consul", &consul)),
+        ("b.java", class_of("java", "Jms", &format!("{jms}{other}"))),
+    ]
+}
+
+/// Elements per group, with no density limit: what the accessor guard
+/// leaves.
+fn run_lengths(files: &[(&str, String)]) -> Vec<usize> {
+    let files: Vec<(&str, &str)> = files.iter().map(|(p, t)| (*p, t.as_str())).collect();
+    let opts = ScanOptions {
+        max_param_density: f32::INFINITY,
+        ..ScanOptions::default()
+    };
+    groups(&scan_with(&files, opts))
+        .iter()
+        .map(|g| g.elements)
+        .collect()
+}
+
+const SCALED: &str = "    public int scaled(int base) {
+        int total = base * factor + offset;
+        if (total > limit) {
+            total = limit - margin;
+        }
+        return total;
+    }
+";
+
+// Catches the guard firing when any element is an accessor rather than all
+// of them: the run here holds real code too, and stays a clone.
+#[test]
+fn an_accessor_run_holding_real_code_is_still_a_clone() {
+    let body = |fields: &[&str]| {
+        let (head, tail) = fields.split_at(2);
+        format!(
+            "{}{SCALED}{}",
+            accessors("java", head),
+            accessors("java", tail)
+        )
+    };
+    assert_eq!(
+        run_lengths(&consul_and_jms(&body(&CONSUL), &body(&JMS))),
+        [11]
+    );
+}
+
+fn one_liners(fields: &[&str]) -> String {
+    let method = |f: &&str| {
+        format!("    public int scaled{f}() {{\n        return {f} * rate + 1;\n    }}\n")
+    };
+    fields.iter().map(method).collect()
+}
+
+// Catches the accessor shape matching any one-line method: these compute
+// something, so a run of them is code that can be shared.
+#[test]
+fn one_line_methods_that_compute_are_not_accessors() {
+    let files = consul_and_jms(&one_liners(&CONSUL), &one_liners(&JMS));
+    assert_eq!(run_lengths(&files), [5]);
 }

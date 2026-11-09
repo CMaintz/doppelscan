@@ -208,6 +208,7 @@ pub fn index_tokens(
         nodes,
         seqs,
         units: Vec::new(),
+        accessors: Vec::new(),
         line_starts: lines,
         scopes,
         scope_spans,

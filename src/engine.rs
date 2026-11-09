@@ -11,6 +11,7 @@ use rustc_hash::FxHashMap;
 use tree_sitter::Parser;
 
 use crate::baseline::Baseline;
+use crate::boilerplate::accessors_only;
 use crate::detect::{Occ, RawGroup, detect};
 use crate::filter::{PathFilter, PathRules};
 use crate::index::{FileIndex, MIN_STORED_TOKENS, index_source};
@@ -208,16 +209,13 @@ pub fn index_sources(sources: Vec<Source>, strict: bool) -> Vec<Arc<FileIndex>> 
 
 pub fn analyze(files: Vec<Arc<FileIndex>>, opts: &ScanOptions, started: Instant) -> Analysis {
     let min_tokens = opts.min_tokens.max(MIN_STORED_TOKENS);
-    let density = opts.max_param_density;
-    let groups: Vec<RawGroup> = detect(&files, min_tokens, |g| {
-        let allowed = (density * g.tokens as f32 / 100.0).max(FREE_PARAMS);
-        let params = variation::analyze(g, &files)
-            .parameters
-            .iter()
-            .filter(|p| counts_as_parameter(p))
-            .count();
-        params as f32 <= allowed
+    let mut groups: Vec<RawGroup> = detect(&files, min_tokens, |g| {
+        within_density(g, &files, opts.max_param_density)
     });
+    // Dropped after suppression rather than vetoed: a veto would bring back
+    // the copies spelled alike, and every piece of an accessor run is
+    // accessors too, so nothing real was hiding inside it.
+    groups.retain(|g| !accessors_only(g, &files));
     // After suppression, so the pieces inside an accepted clone stay
     // hidden with it instead of surfacing as groups of their own.
     let (accepted, mut groups): (Vec<_>, Vec<_>) = groups
@@ -230,6 +228,16 @@ pub fn analyze(files: Vec<Arc<FileIndex>>, opts: &ScanOptions, started: Instant)
         accepted,
         elapsed: started.elapsed(),
     }
+}
+
+fn within_density(g: &RawGroup, files: &[Arc<FileIndex>], density: f32) -> bool {
+    let allowed = (density * g.tokens as f32 / 100.0).max(FREE_PARAMS);
+    let params = variation::analyze(g, files)
+        .parameters
+        .iter()
+        .filter(|p| counts_as_parameter(p))
+        .count();
+    params as f32 <= allowed
 }
 
 /// A name that differs in several places, in a file read without a

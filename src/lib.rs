@@ -6,6 +6,7 @@
 //! helper without re-deriving the parameters itself.
 
 pub mod baseline;
+mod boilerplate;
 pub mod config;
 pub mod detect;
 pub mod engine;
