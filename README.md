@@ -100,23 +100,26 @@ renamed copies, but `near` skips them, and YAML is only scanned when asked for
 
 ## Benchmark
 
-Elasticsearch: 51,122 tracked files and 80 planted clones, on a Ryzen 7 3800X
-with 32 GB of RAM. "Caught" means both copies were reported together; the
-stricter column needs at least 80% of each copy covered.
+Two large Java repositories, Apache Camel (45,124 files) and Elasticsearch
+(51,122 files), each with 80 planted clones, on a Ryzen 7 3800X with 32 GB of
+RAM. Times are medians of 15 runs over three passes. "Caught" means one group
+covers at least 80% of both the original and the copy.
 
-| Tool | Time | Peak memory | Caught | At 80% coverage |
-| --- | --- | --- | --- | --- |
-| **doppelscan**, exact + near + YAML | **35 s** | 2.0 GB | **79 of 80** | 70 |
-| doppelscan, exact only | 12 s | 2.0 GB | 77 | 55 |
-| dupehound 0.1.2 | 17 s | 0.2 GB | 46 | 46 |
-| jscpd 5.3.0, default | 8 min 18 s | 14.4 GB | 65 | 48 |
-| jscpd 5.3.0, type-2/3 | 11 min 28 s | 15.9 GB | 79 | **74** |
+| Tool | Camel time | Camel memory | Camel caught | Elasticsearch time | Elasticsearch memory | Elasticsearch caught |
+| --- | --- | --- | --- | --- | --- | --- |
+| **doppelscan**, exact + near + YAML | 12 s | 1.0 GB | **76 of 80** | 32 s | 2.1 GB | 70 of 80 |
+| dupehound 0.1.2 | **9 s** | **0.1 GB** | 46 | **14 s** | **0.2 GB** | 46 |
+| jscpd 5.3.0, default | 3 min 5 s | 13.6 GB | 49 | 3 min 40 s | 15.1 GB | 48 |
+| jscpd 5.3.0, type-2/3 | 5 min 4 s | 15.5 GB | 71 | 6 min 37 s | 18.4 GB | **74** |
 
-In a sample of 20 groups per tool, 15 of jscpd's default hits were license
-headers, imports or generated stubs; none of doppelscan's exact or dupehound's
-were wrong. dupehound is the lightest but only compares whole functions.
-jscpd's type-2/3 mode covers near misses best. [Full results of all four
-runs](docs/benchmark.md), with what the benchmark does not show.
+In a blinded sample of 20 groups per tool and repository, 25 of 40 jscpd
+default groups and 35 of 40 type-2/3 groups were not real duplication
+(mostly license headers and import lists), against 2 of 40
+each for doppelscan's exact and near scans and 4 for dupehound. All of
+doppelscan's misses but one comment-heavy YAML block, which every tool misses,
+are edited copies scoring 0.70-0.79 against near's 0.8 threshold; with
+`--similarity 0.7` it catches 80 and 79. [Full results](docs/benchmark.md),
+with what the benchmark does not show.
 
 ## Documentation
 
