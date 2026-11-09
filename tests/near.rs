@@ -630,3 +630,72 @@ fn similarity_in_json_keeps_its_two_decimals() {
     let similarity = json["similarity"].to_string();
     assert!(similarity.len() <= 4, "{similarity}");
 }
+
+/// `equals` comparing `field` the way IDEs generate it, then returning
+/// `tail`.
+fn equals_method(name: &str, class: &str, field: &str, tail: &str) -> String {
+    format!(
+        "class {class} {{
+    @Override
+    public boolean {name}(Object o) {{
+        if (this == o) {{
+            return true;
+        }}
+        if (o == null || getClass() != o.getClass()) {{
+            return false;
+        }}
+        {class} that = ({class}) o;
+        if ({field} != null ? !{field}.equals(that.{field}) : that.{field} != null) {{
+            return false;
+        }}
+        return {tail};
+    }}
+}}
+"
+    )
+}
+
+const NULL_SAFE: &str = "bar != null ? bar.equals(that.bar) : that.bar == null";
+const ARRAYS: &str = "Arrays.equals(content, that.content)";
+
+// Catches equals methods of unrelated classes being reported: each class
+// needs its own, so their likeness is the idiom, not a helper to extract.
+#[test]
+fn equals_methods_of_different_classes_are_not_near_duplicates() {
+    let files = [
+        ("A.java", equals_method("equals", "A", "foo", NULL_SAFE)),
+        ("B.java", equals_method("equals", "B", "name", ARRAYS)),
+    ];
+    let gs = groups(&scan_near(&files, 0.7));
+    assert!(gs.is_empty(), "{gs:?}");
+}
+
+// Catches the guard firing when one member is an equals method rather than
+// all of them: an ordinary method with the same body is still a copy.
+#[test]
+fn an_equals_method_and_an_ordinary_copy_of_it_are_near_duplicates() {
+    let files = [
+        ("A.java", equals_method("equals", "A", "foo", NULL_SAFE)),
+        ("B.java", equals_method("sameAs", "B", "name", ARRAYS)),
+    ];
+    let gs = groups(&scan_near(&files, 0.7));
+    assert_eq!(gs.len(), 1, "{gs:?}");
+}
+
+// Catches the equals guard hiding a real copy: this one was pasted into
+// another class, renamed to it and trimmed, so it still compares the same
+// fields.
+#[test]
+fn an_equals_method_copied_with_its_fields_is_a_near_duplicate() {
+    let original = equals_method("equals", "A", "foo", NULL_SAFE);
+    let copy = equals_method("equals", "CopiedHolder", "foo", NULL_SAFE);
+    let trimmed = copy.replace(
+        "        if (this == o) {\n            return true;\n        }\n",
+        "",
+    );
+    let gs = groups(&scan_near(
+        &[("A.java", original), ("B.java", trimmed)],
+        0.7,
+    ));
+    assert_eq!(gs.len(), 1, "{gs:?}");
+}

@@ -54,6 +54,12 @@ the text. The usual problems:
   matched by `is_block`; add it.
 - **Literals stay distinct.** The literal kind is not matched by `is_string`
   or `is_number`.
+- **Getter and setter runs are reported.** `is_trivial_accessor` in
+  `src/boilerplate.rs` reads a method's `body` field and its return or
+  assignment by kind name; check what the grammar calls them.
+- **`near` reports equality methods.** Give the entry
+  `.identity_methods(...)` with the names its classes write for
+  themselves, as Java's has `equals` and `hashCode`.
 
 Change a classifier only together with a test that shows the effect, and run
 the whole suite: these functions are shared by every language.

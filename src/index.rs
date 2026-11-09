@@ -9,6 +9,7 @@ use std::num::NonZeroU16;
 
 use tree_sitter::{Node, Parser, TreeCursor};
 
+use crate::boilerplate::is_trivial_accessor;
 use crate::hash::{combine, hash_bytes, seed};
 use crate::ignore::{ignored_spans, overlaps};
 use crate::lang::{
@@ -151,6 +152,9 @@ pub struct FileIndex {
     pub units: Vec<Frag>,
     /// Byte offset where each line starts, for mapping leaves to lines.
     pub(crate) line_starts: Vec<u32>,
+    /// Byte spans of methods that only get or set a field. Sorted: no such
+    /// method holds another, so they close in source order.
+    pub accessors: Vec<(u32, u32)>,
     /// Qualified names ("Class.method") that `Frag::scope` indexes into.
     pub scopes: Vec<String>,
     /// Byte range of each scope's definition, parallel to `scopes`.
@@ -183,6 +187,7 @@ impl FileIndex {
         self.nodes.shrink_to_fit();
         self.seqs.shrink_to_fit();
         self.units.shrink_to_fit();
+        self.accessors.shrink_to_fit();
         self.scopes.shrink_to_fit();
         self.scope_spans.shrink_to_fit();
         self.local_scopes.shrink_to_fit();
@@ -206,6 +211,12 @@ impl FileIndex {
         let content = bytes.iter().rposition(|b| !b.is_ascii_whitespace());
         let last = start + content.unwrap_or(0) as u32;
         (self.line_of(start), self.line_of(last))
+    }
+
+    pub fn is_accessor(&self, frag: &Frag) -> bool {
+        self.accessors
+            .binary_search(&(frag.start, frag.end))
+            .is_ok()
     }
 
     pub fn leaf_text(&self, leaf: &Leaf) -> &str {
@@ -318,6 +329,7 @@ pub fn index_source(
         nodes: builder.nodes,
         seqs: builder.seqs,
         units: builder.units,
+        accessors: builder.accessors,
         line_starts: line_starts(&source),
         scopes: builder.scopes,
         scope_spans: builder.scope_spans,
@@ -361,6 +373,7 @@ struct Builder<'a> {
     nodes: Vec<Frag>,
     seqs: Seqs,
     units: Vec<Frag>,
+    accessors: Vec<(u32, u32)>,
     scopes: Vec<String>,
     scope_spans: Vec<(u32, u32)>,
     scope_stack: Vec<u32>,
@@ -380,6 +393,7 @@ impl<'a> Builder<'a> {
             nodes: Vec::new(),
             seqs: Seqs::default(),
             units: Vec::new(),
+            accessors: Vec::new(),
             scopes: Vec::new(),
             scope_spans: Vec::new(),
             scope_stack: Vec::new(),
@@ -444,6 +458,9 @@ impl<'a> Builder<'a> {
         if is_function_like(self.lang.kind_name(frame.kind)) {
             self.claim_locals(frame.leaf_start);
             self.push_unit(frag);
+            if class == KindClass::Definition && is_trivial_accessor(node) {
+                self.accessors.push((frag.start, frag.end));
+            }
         }
         if frame.scope_pushed {
             self.scope_stack.pop();

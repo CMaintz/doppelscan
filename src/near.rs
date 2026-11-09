@@ -19,9 +19,10 @@ use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use serde::Serialize;
 
+use crate::boilerplate::identity_methods_only;
 use crate::engine::ScanOptions;
-use crate::hash::combine;
-use crate::index::{FileIndex, Frag, MIN_STORED_TOKENS};
+use crate::hash::{combine, hash_bytes};
+use crate::index::{FileIndex, Frag, Leaf, MIN_STORED_TOKENS, Role};
 use crate::report::Detail;
 use crate::settings::wide;
 
@@ -101,6 +102,7 @@ pub fn near_analysis(
     let classes = exact_classes(&files, units);
     let edges = similar_classes(&files, &classes, threshold);
     let mut groups = without_nested(clusters(&classes, &edges));
+    groups.retain(|g| !identity_methods_only(g, &files) || spelled_alike(&files, g, threshold));
     rank(&mut groups);
     NearAnalysis {
         files,
@@ -189,6 +191,32 @@ fn always_inside_another(classes: &[Vec<Unit>]) -> Vec<bool> {
 
 fn holds(outer: &[Unit], inner: &[Unit]) -> bool {
     inner.iter().any(|i| outer.iter().any(|o| nested(i, o)))
+}
+
+/// Whether two members are as alike with every name and literal spelled
+/// out: one was copied from the other, not written to the same idiom.
+fn spelled_alike(files: &[Arc<FileIndex>], group: &RawNear, threshold: f32) -> bool {
+    let prints: Vec<Prints> = group
+        .members
+        .iter()
+        .map(|u| winnow(&spelled_tokens(files, u)))
+        .collect();
+    prints.iter().enumerate().any(|(i, a)| {
+        let later = &prints[i + 1..];
+        later.iter().any(|b| similarity(a, b, threshold).is_some())
+    })
+}
+
+/// Type names stay normalised: a copy pasted into another class has to
+/// name that class in its cast, and is a copy all the same.
+fn spelled_tokens(files: &[Arc<FileIndex>], unit: &Unit) -> Vec<u32> {
+    let file = &files[unit.file as usize];
+    let leaves = &file.leaves[unit.frag.leaf_start as usize..unit.frag.leaf_end as usize];
+    let spelling = |l: &Leaf| match l.role {
+        Role::Type => l.token,
+        _ => hash_bytes(file.leaf_text(l).as_bytes()) as u32,
+    };
+    leaves.iter().map(spelling).collect()
 }
 
 fn tokens(files: &[Arc<FileIndex>], unit: &Unit) -> Vec<u32> {

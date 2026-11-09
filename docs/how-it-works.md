@@ -12,7 +12,9 @@
 4. A group is dropped when every occurrence sits inside a larger accepted
    clone, when it is a tandem repeat inside one block (a wall of getters, a
    data table; only a verbatim copy of part of the wall elsewhere is reported),
-   or when it needs too many parameters to be a useful helper.
+   when every element of it is a trivial getter or setter (a method whose
+   body is only `return x;` or `this.x = v;`, which every class with fields
+   has), or when it needs too many parameters to be a useful helper.
    In that last case occurrences spelled exactly alike stay as their own group.
 5. Occurrences align leaf by leaf, so differing positions become parameters or
    renames. Each binding (declaration, parameter, loop, lambda or catch
@@ -36,8 +38,10 @@ skipping fingerprints common to many functions (idiom) so they do not pair
 everything, and each pair is scored by Jaccard similarity of all its
 fingerprint counts, idiom included (counts, so four repeated assignments and
 ten do not look alike). Union-find groups the pairs, exact clones are left to
-the exact scan, and the differing lines come from a token-level diff against
-another copy.
+the exact scan, groups made only of Java `equals` and `hashCode` methods are
+dropped (each class needs its own) unless two of them are as alike with
+their names spelled out, and the differing lines come from a token-level
+diff against another copy.
 
 ## Limitations
 
