@@ -13,7 +13,7 @@ so a Claude or other LLM session can call it as a tool.
 
 ## Quick start
 
-Install it (needs Rust and a C compiler for the tree-sitter grammars):
+Download a prebuilt binary from the [releases page](https://github.com/CMaintz/doppelscan/releases), or build it (needs Rust and a C compiler for the tree-sitter grammars):
 
 ```sh
 cargo install --git https://github.com/CMaintz/doppelscan
