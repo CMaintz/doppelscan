@@ -4,6 +4,18 @@ The [README](../README.md) has the quick start. This is the full reference.
 
 ## Install
 
+Each release attaches prebuilt binaries for Linux (x86_64, aarch64), macOS
+(Apple silicon, Intel) and Windows (x86_64), with a `SHA256SUMS` file and
+build provenance. Download one from the
+[releases page](https://github.com/CMaintz/doppelscan/releases) and check it:
+
+```sh
+sha256sum --check --ignore-missing SHA256SUMS
+gh attestation verify doppelscan-<tag>-<target>.tar.gz --repo CMaintz/doppelscan
+```
+
+Or build from source:
+
 ```sh
 cargo install --git https://github.com/CMaintz/doppelscan
 ```
