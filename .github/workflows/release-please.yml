@@ -1,0 +1,34 @@
+name: release-please
+
+# Keeps a release PR open that bumps the version and changelog from the conventional commits on
+# main. Merging it tags the release, which starts release.yml.
+#
+# It runs as the doppelscan release GitHub App, not GITHUB_TOKEN: GitHub starts no workflows for
+# PRs or tags made with GITHUB_TOKEN, so the release PR would never get the gate check the main
+# ruleset requires, and the tag would never trigger release.yml.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-please
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        id: app-token
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
