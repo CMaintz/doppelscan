@@ -202,7 +202,7 @@ recall run with `near --similarity 0.7`:
 | doppelscan all at 80% coverage, near 0.7 | **80** | **79** |
 | near groups at 0.8 | 3,045 | 6,086 |
 | groups at 0.7 sharing no occurrence with a 0.8 group | 2,002 | 4,346 |
-| near time at 0.7, one run | 23 s | 22 s |
+| near time at 0.7, best of 3 | 6.4 s | 22.5 s |
 
 ### Precision
 
