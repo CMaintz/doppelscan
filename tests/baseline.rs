@@ -1,7 +1,8 @@
 mod common;
+mod scratch;
 
 use std::io::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 use std::time::Instant;
 
@@ -10,6 +11,7 @@ use doppelscan::baseline::{Baseline, DEFAULT_FILE, Entry};
 use doppelscan::engine::{ScanOptions, Source, analyze, index_sources};
 use doppelscan::lang::lang_index_for_path;
 use doppelscan::report::Analysis;
+use scratch::Scratch;
 
 const SUM_TOTALS: &str = r#"
 export function sumTotals(orders: Order[], config: Config): number {
@@ -154,9 +156,8 @@ fn pruning_drops_resolved_entries_and_never_adds() {
     assert_eq!(pruned.new_groups(&now), vec![1], "the third copy stays new");
 }
 
-fn repo(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("doppelscan-base-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+fn repo(name: &str) -> Scratch {
+    let dir = Scratch::new(&format!("base-{name}"));
     std::fs::create_dir_all(dir.join("src")).unwrap();
     git(&dir, &["init", "-q"]);
     for (path, text) in two_copies() {
@@ -456,7 +457,7 @@ fn a_shrunk_group_with_more_copies_at_a_place_than_the_entry_is_new() {
     assert_eq!(baseline.new_groups(&now), vec![1]);
 }
 
-fn repo_accepting_its_baseline(name: &str) -> PathBuf {
+fn repo_accepting_its_baseline(name: &str) -> Scratch {
     let dir = repo(name);
     assert_eq!(doppelscan(&dir, &["baseline"]).0, 0);
     let fingerprint = &written_entries(&dir)[0].fingerprint;
@@ -504,7 +505,7 @@ fn write_all(dir: &Path, files: &[(&str, String)]) {
 
 /// The `repo` pair in `src`, and a separate clone in `src-old`: a sibling
 /// sharing the name's start, so a bare prefix test reads it as inside `src`.
-fn repo_with_sibling(name: &str) -> PathBuf {
+fn repo_with_sibling(name: &str) -> Scratch {
     let dir = repo(name);
     let sibling = [
         ("src-old/x.ts", renamed(PARSE_ROWS, 1)),
@@ -516,7 +517,7 @@ fn repo_with_sibling(name: &str) -> PathBuf {
     dir
 }
 
-fn repo_with_spanning_clone(name: &str) -> PathBuf {
+fn repo_with_spanning_clone(name: &str) -> Scratch {
     let dir = repo(name);
     write_all(&dir, &[("other/c.ts", renamed(SUM_TOTALS, 3))]);
     assert_eq!(doppelscan(&dir, &["baseline"]).0, 0);
@@ -715,7 +716,7 @@ fn a_base_branch_falls_back_to_its_remote_tracking_branch() {
     assert_eq!(code, 0, "{out}");
 }
 
-fn repo_with_fixture_copies(name: &str) -> PathBuf {
+fn repo_with_fixture_copies(name: &str) -> Scratch {
     let dir = repo(name);
     std::fs::create_dir_all(dir.join("fixtures")).unwrap();
     for n in [5, 6] {
@@ -879,7 +880,7 @@ const TRACE: &str = "    tracer.begin(\"sum\", orders.length, config.region, con
 /// two `two.ts`, while both functions hold the same smaller run. From the
 /// root that run sits inside clones already reported; from `src` alone it
 /// is a clone of `one.ts` and `two.ts`.
-fn tree_hiding_a_run_inside_larger_clones(name: &str) -> PathBuf {
+fn tree_hiding_a_run_inside_larger_clones(name: &str) -> Scratch {
     let dir = repo(name);
     std::fs::remove_dir_all(dir.join("src")).unwrap();
     std::fs::create_dir_all(dir.join("src")).unwrap();
@@ -1008,7 +1009,7 @@ fn json_reports_are_written_as_a_sorted_value() {
     }
 }
 
-fn repo_with_copy_at(name: &str, path: &str) -> PathBuf {
+fn repo_with_copy_at(name: &str, path: &str) -> Scratch {
     let dir = repo(name);
     let path = dir.join(path);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1085,9 +1086,7 @@ const CARD_TSX: &str = r#"export function Card({ title, items }: Props) {
 "#;
 
 fn commit_lf_then_check_crlf(name: &str, files: &[(&str, String)]) -> (i32, String) {
-    let dir = std::env::temp_dir().join(format!("doppelscan-crlf-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = Scratch::new(&format!("crlf-{name}"));
     git(&dir, &["init", "-q"]);
     for (path, text) in files {
         std::fs::write(dir.join(path), text).unwrap();
@@ -1283,9 +1282,7 @@ fn an_uncommitted_case_only_rename_is_not_new() {
 // Latin-1 byte passed as "No new duplication".
 #[test]
 fn check_flags_a_new_copy_that_is_not_utf8() {
-    let dir = std::env::temp_dir().join(format!("doppelscan-latin1-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = Scratch::new("latin1");
     git(&dir, &["init", "-q"]);
     std::fs::write(dir.join("a.ts"), SUM_TOTALS).unwrap();
     git(&dir, &["add", "."]);
@@ -1301,9 +1298,7 @@ fn check_flags_a_new_copy_that_is_not_utf8() {
 // for, an empty scan printed " was not checked: ..." with no subject.
 #[test]
 fn an_empty_scan_note_has_a_subject() {
-    let dir = std::env::temp_dir().join(format!("doppelscan-empty-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = Scratch::new("empty");
     git(&dir, &["init", "-q"]);
     std::fs::write(dir.join("notes.txt"), "no source here\n").unwrap();
     git(&dir, &["add", "."]);
@@ -1458,7 +1453,7 @@ fn with_edited_total() -> String {
     three_definitions().replace("return Math.round(total * 100) / 100;", "return total;")
 }
 
-fn repo_sharing_definitions(name: &str) -> PathBuf {
+fn repo_sharing_definitions(name: &str) -> Scratch {
     let dir = repo(name);
     write_all(
         &dir,
@@ -1600,7 +1595,7 @@ fn settle_without(cut: &[&str]) -> String {
     cut.iter().fold(SETTLE.to_string(), drop_cut)
 }
 
-fn repo_of_settle(name: &str) -> PathBuf {
+fn repo_of_settle(name: &str) -> Scratch {
     let dir = repo(name);
     let code = settle_without(&[]);
     write_all(&dir, &[("src/a.ts", code.clone()), ("src/b.ts", code)]);

@@ -1,10 +1,11 @@
 //! Files as they sit on disk: line endings and encodings only reach the
 //! scan through the file reader, so these write bytes rather than `Source`s.
 
-use std::path::PathBuf;
+mod scratch;
 
 use doppelscan::engine::{Engine, ScanOptions};
 use doppelscan::report::Analysis;
+use scratch::Scratch;
 
 const CODE: &str = r#"export function sumTotals(orders: Order[], config: Config): number {
     let total = 0;
@@ -18,10 +19,7 @@ const CODE: &str = r#"export function sumTotals(orders: Order[], config: Config)
 "#;
 
 fn scan_bytes(name: &str, files: &[(&str, Vec<u8>)]) -> Analysis {
-    let dir: PathBuf =
-        std::env::temp_dir().join(format!("doppelscan-enc-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = Scratch::new(&format!("enc-{name}"));
     for (path, bytes) in files {
         std::fs::write(dir.join(path), bytes).unwrap();
     }
