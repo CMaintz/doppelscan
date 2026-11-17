@@ -1,4 +1,5 @@
-use std::path::PathBuf;
+mod scratch;
+
 use std::time::Instant;
 
 use doppelscan::baseline::Baseline;
@@ -6,6 +7,7 @@ use doppelscan::engine::{Engine, ScanOptions, Source, analyze, index_sources};
 use doppelscan::lang::{LANGS, Syntax, lang_index_by_name, lang_index_for_path};
 use doppelscan::report::{Analysis, Group};
 use doppelscan::variation::Kind;
+use scratch::Scratch;
 
 fn scan_with(files: &[(&str, &str)], strict: bool) -> Analysis {
     let sources = files
@@ -37,13 +39,6 @@ fn start_lines(a: &Analysis) -> Vec<u32> {
         .iter()
         .flat_map(|g| g.occurrences.iter().map(|o| o.start_line))
         .collect()
-}
-
-fn temp_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("doppelscan-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
 }
 
 const SUM_PAID: &str = r#"
@@ -336,7 +331,7 @@ fn every_token_language_skips_its_comments() {
 // specs) would bury the code results.
 #[test]
 fn yaml_is_scanned_only_when_asked_for() {
-    let dir = temp_dir("yaml");
+    let dir = Scratch::new("yaml");
     std::fs::write(dir.join("a.yml"), format!("name: ci\nsteps:\n{STEPS}")).unwrap();
     std::fs::write(dir.join("b.yml"), format!("name: release\nsteps:\n{STEPS}")).unwrap();
     let scan_dir = |languages: Vec<usize>| {
@@ -349,14 +344,13 @@ fn yaml_is_scanned_only_when_asked_for() {
     };
     assert_eq!(scan_dir(Vec::new()), 0);
     assert_eq!(scan_dir(vec![lang_index_by_name("yaml").unwrap()]), 1);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // Catches a question about YAML code being answered from a scan that
 // skipped YAML: asking about a snippet in an opt-in language scans it.
 #[test]
 fn similar_code_is_found_in_an_opt_in_language() {
-    let dir = temp_dir("yaml-similar");
+    let dir = Scratch::new("yaml-similar");
     std::fs::write(dir.join("a.yml"), format!("name: ci\nsteps:\n{STEPS}")).unwrap();
     let opts = ScanOptions {
         min_tokens: 20,
@@ -365,7 +359,6 @@ fn similar_code_is_found_in_an_opt_in_language() {
     let yaml = lang_index_by_name("yaml").unwrap();
     let found = Engine::default().similar(&dir, STEPS, yaml, &opts).unwrap();
     assert_eq!(found.hits.len(), 1);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // Catches a baseline written without named languages meaning "whatever
@@ -373,14 +366,13 @@ fn similar_code_is_found_in_an_opt_in_language() {
 // on their existing duplication.
 #[test]
 fn a_baseline_records_the_languages_it_covered() {
-    let dir = temp_dir("baseline-langs");
+    let dir = Scratch::new("baseline-langs");
     let empty = Engine::default()
         .scan(&dir, &ScanOptions::default())
         .unwrap();
     let new = Baseline::from_analysis(&empty, &ScanOptions::default());
     let langs = &new.settings.languages;
     assert!(langs.contains(&"c-family".to_string()) && !langs.contains(&"yaml".to_string()));
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // Catches a catch-all fallback: data files are not code.

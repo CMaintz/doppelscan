@@ -1,12 +1,14 @@
 mod common;
+mod scratch;
 
 use std::io::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use common::git;
 use doppelscan::engine::Engine;
 use doppelscan::mcp::handle_line;
+use scratch::Scratch;
 use serde_json::{Value, json};
 
 const CLONE: &str = r#"
@@ -21,9 +23,8 @@ export function sumTotals(orders: Order[], config: Config): number {
 }
 "#;
 
-fn fixture(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("doppelscan-mcp-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+fn fixture(name: &str) -> Scratch {
+    let dir = Scratch::new(&format!("mcp-{name}"));
     std::fs::create_dir_all(dir.join("src")).unwrap();
     std::fs::write(dir.join("src/a.ts"), CLONE).unwrap();
     std::fs::write(
@@ -230,7 +231,6 @@ fn check_new(engine: &Engine, root: &Path) -> String {
 #[test]
 fn check_new_duplicates_compares_a_subdirectory_with_head() {
     let (engine, root) = (Engine::default(), fixture("check"));
-    let _ = std::fs::remove_dir_all(root.join(".git"));
     git(&root, &["init", "-q"]);
     git(&root, &["add", "."]);
     git(&root, &["commit", "-qm", "init"]);
